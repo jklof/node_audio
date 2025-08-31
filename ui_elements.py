@@ -8,9 +8,11 @@ from PySide6.QtGui import (
     QPainter, QPen, QColor, QBrush, QPainterPath, QPainterPathStroker, QAction
 )
 from PySide6.QtCore import Qt, QRectF, QPointF, Signal, Slot, QTimer
+from typing import Any
 
 # Import the interface to check against
 from node_system import IClockProvider
+from constants import SOCKET_TYPE_COLORS
 
 logger = logging.getLogger(__name__)
 
@@ -30,10 +32,21 @@ class SocketItem(QGraphicsObject):
         self.socket_logic = socket_logic
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemSendsScenePositionChanges)
         self.setAcceptHoverEvents(True)
-        self._brush = QBrush(QColor("lightblue") if socket_logic.is_input else QColor("lightgreen"))
-        self._hover_brush = QBrush(QColor("cyan") if socket_logic.is_input else QColor("lime"))
+
+        # --- MODIFIED: Use central color map ---
+        socket_type = self.socket_logic.data_type
+        # Normalize None to Any for the color lookup
+        if socket_type is None:
+            socket_type = Any
+        
+        # Get the color from the central map based on the socket's logical data type.
+        color = SOCKET_TYPE_COLORS.get(socket_type, SOCKET_TYPE_COLORS["default"])
+
+        self._brush = QBrush(color)
+        self._hover_brush = QBrush(color.lighter(130))
         self._pen = QPen(Qt.GlobalColor.black, 1)
         self._is_hovered = False
+        # --- END MODIFICATION ---
 
     def boundingRect(self):
         return QRectF(-SOCKET_SIZE/2, -SOCKET_SIZE/2, SOCKET_SIZE, SOCKET_SIZE)

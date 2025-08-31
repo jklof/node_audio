@@ -4,7 +4,7 @@ import logging
 import json
 import time
 from collections import deque
-from typing import Type
+from typing import Type, Any
 
 from PySide6.QtCore import QObject, Signal
 
@@ -348,6 +348,17 @@ class Engine:
         self._emit_graph_changed()
 
     def add_connection(self, start_socket: Socket, end_socket: Socket):
+        # --- NEW: Authoritative Type Validation ---
+        start_type = start_socket.data_type if start_socket.data_type is not None else Any
+        end_type = end_socket.data_type if end_socket.data_type is not None else Any
+        
+        is_compatible = (start_type is Any or end_type is Any or start_type == end_type)
+
+        if not is_compatible:
+            logger.error(f"Engine rejected incompatible connection: {start_socket} -> {end_socket}")
+            return
+        # --- END NEW ---
+        
         with self._lock:
             self._invalidate_plan_cache()
             self._add_connection_locked(start_socket, end_socket)

@@ -1,5 +1,7 @@
 import numpy as np
 from dataclasses import dataclass
+from PySide6.QtGui import QColor
+from typing import Any
 
 # ==============================================================================
 # Core Data Structure for Spectral Processing
@@ -31,3 +33,15 @@ DEFAULT_COMPLEX_DTYPE = np.complex64
 # --- Performance Monitoring ---
 TICK_DURATION_S = DEFAULT_BLOCKSIZE / DEFAULT_SAMPLERATE
 TICK_DURATION_NS = int(TICK_DURATION_S * 1_000_000_000)
+
+# --- NEW: Central dictionary for socket type colors ---
+SOCKET_TYPE_COLORS = {
+    np.ndarray: QColor("#2274A5"),      # Muted Blue for Audio/Arrays
+    float: QColor("#57A773"),           # Green for Floats
+    bool: QColor("#F45B69"),            # Red for Bools/Triggers
+    int: QColor("#F45B69"),             # Also red for ints (often used as triggers)
+    SpectralFrame: QColor("#9A44B2"),   # Purple for Spectral Data
+    Any: QColor("#E6E6E6"),             # White/Light Gray for Universal
+    None: QColor("#E6E6E6"),            # Treat None as universal as well
+    "default": QColor("#888888")        # A default gray for unregistered types
+}

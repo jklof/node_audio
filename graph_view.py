@@ -4,6 +4,7 @@ import math
 from PySide6.QtWidgets import QGraphicsView, QGraphicsLineItem, QGraphicsProxyWidget
 from PySide6.QtCore import Qt, QPointF, QRectF, Signal, Slot, QLineF
 from PySide6.QtGui import QPainter, QColor, QPen, QCursor
+from typing import Any
 
 from node_system import NodeGraph, Socket
 from ui_elements import NodeItem, SocketItem, ConnectionItem
@@ -188,6 +189,17 @@ class NodeGraphWidget(QGraphicsView):
         if isinstance(end_item, SocketItem) and start_item is not None and end_item != start_item:
             start_logic = start_item.socket_logic
             end_logic = end_item.socket_logic
+
+            # --- NEW: UI-Level Type Validation Logic ---
+            start_type = start_logic.data_type if start_logic.data_type is not None else Any
+            end_type = end_logic.data_type if end_logic.data_type is not None else Any
+
+            is_compatible = (start_type is Any or end_type is Any or start_type == end_type)
+
+            if not is_compatible:
+                logger.warning(f"Connection rejected: Type mismatch between {start_logic} ({start_type.__name__}) and {end_logic} ({end_type.__name__}).")
+                return # Abort the connection attempt
+            # --- END NEW ---
 
             if start_logic.is_input and not end_logic.is_input:
                 self.connectionRequested.emit(end_logic, start_logic)
