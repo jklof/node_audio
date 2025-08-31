@@ -1,14 +1,18 @@
-# === File: plugins/utility_nodes.py ===
+# === File: plugins/utility.py ===
 
 import numpy as np
 import threading
 import logging
 from node_system import Node
-from ui_elements import NodeItem
+from ui_elements import NodeItem, NODE_CONTENT_PADDING # <-- Added NODE_CONTENT_PADDING
 from constants import DEFAULT_DTYPE
 
-from PySide6.QtWidgets import QDoubleSpinBox, QVBoxLayout, QWidget, QDial, QSizePolicy
-from PySide6.QtCore import Qt, Slot
+from PySide6.QtWidgets import (
+    QDoubleSpinBox, QVBoxLayout, QWidget, QDial, QSizePolicy, QLabel # <-- Added QLabel
+)
+from PySide6.QtCore import Qt, Slot, QSignalBlocker, Signal, QObject # <-- Added Signal, QObject
+from PySide6.QtGui import QFontMetrics # <-- Added QFontMetrics
+
 
 logger = logging.getLogger(__name__)
 
@@ -259,3 +263,143 @@ class SignalAnalyzer(Node):
     def deserialize_extra(self, data: dict):
         # No state to load.
         pass
+
+
+# ==============================================================================
+# --- NEW: UI for the Dial (Hz) Node ---
+# ==============================================================================
+class DialHzNodeItem(NodeItem):
+    """Custom UI for the DialHzNode, featuring a logarithmic frequency dial."""
+    
+    NODE_SPECIFIC_WIDTH = 160
+
+    def __init__(self, node_logic: "DialHzNode"):
+        super().__init__(node_logic, width=self.NODE_SPECIFIC_WIDTH)
+
+        self.container_widget = QWidget()
+        main_layout = QVBoxLayout(self.container_widget)
+        main_layout.setContentsMargins(NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING)
+        main_layout.setSpacing(6)
+
+        # --- Create Dial and Labels ---
+        self.freq_dial = QDial()
+        self.freq_dial.setRange(0, 1000)
+        self.freq_dial.setNotchesVisible(True)
+        
+        self.title_label = QLabel("Frequency")
+        self.title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.value_label = QLabel("...")
+        self.value_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        # Ensure minimum width to prevent UI jitter
+        fm = QFontMetrics(self.value_label.font())
+        min_width = fm.boundingRect("20000.0 Hz").width()
+        self.title_label.setMinimumWidth(min_width)
+
+        main_layout.addWidget(self.title_label)
+        main_layout.addWidget(self.value_label)
+        main_layout.addWidget(self.freq_dial)
+        
+        self.setContentWidget(self.container_widget)
+
+        # --- Connect Signals ---
+        self.freq_dial.valueChanged.connect(self._handle_freq_change)
+        self.node_logic.emitter.stateUpdated.connect(self._on_state_updated)
+        
+        self.updateFromLogic()
+
+    @Slot(int)
+    def _handle_freq_change(self, dial_value: int):
+        # Logarithmic mapping for more intuitive frequency control
+        min_f, max_f = 20.0, 20000.0
+        log_min, log_max = np.log10(min_f), np.log10(max_f)
+        freq = 10**(((dial_value / 1000.0) * (log_max - log_min)) + log_min)
+        self.node_logic.set_frequency(freq)
+
+    @Slot(dict)
+    def _on_state_updated(self, state: dict):
+        """Updates the UI from a state dictionary."""
+        freq = state.get("frequency", 440.0)
+        
+        # Update Dial Position
+        with QSignalBlocker(self.freq_dial):
+            min_f, max_f = 20.0, 20000.0
+            log_min, log_max = np.log10(min_f), np.log10(max_f)
+            dial_val = int(1000.0 * (np.log10(freq) - log_min) / (log_max - log_min))
+            self.freq_dial.setValue(dial_val)
+        
+        # Update Label Text
+        is_freq_ext = "freq_in" in self.node_logic.inputs and self.node_logic.inputs["freq_in"].connections
+        self.value_label.setText(f"{freq:.1f} Hz{' (ext)' if is_freq_ext else ''}")
+        self.freq_dial.setEnabled(not is_freq_ext)
+
+    @Slot()
+    def updateFromLogic(self):
+        """Requests a full state snapshot from the logic and updates the UI."""
+        state = self.node_logic.get_current_state_snapshot()
+        self._on_state_updated(state)
+        super().updateFromLogic()
+
+# ==============================================================================
+# --- NEW: Logic for the Dial (Hz) Node ---
+# ==============================================================================
+class DialHzNodeEmitter(QObject):
+    """A dedicated QObject to safely emit signals from the logic to the UI thread."""
+    stateUpdated = Signal(dict)
+
+class DialHzNode(Node):
+    NODE_TYPE = "Dial (Hz)"
+    UI_CLASS = DialHzNodeItem
+    CATEGORY = "Utility"
+    DESCRIPTION = "Provides a frequency value (20-20k Hz) with a logarithmic dial."
+
+    def __init__(self, name: str, node_id: str | None = None):
+        super().__init__(name, node_id)
+        self.emitter = DialHzNodeEmitter()
+        self.add_input("freq_in", data_type=float)
+        self.add_output("freq_out", data_type=float)
+        self._lock = threading.Lock()
+        self._frequency = 440.0
+
+    def get_current_state_snapshot(self, locked: bool = False):
+        """Returns a copy of the current parameters for UI synchronization."""
+        if locked:
+            return {"frequency": self._frequency}
+        with self._lock:
+            return {"frequency": self._frequency}
+
+    @Slot(float)
+    def set_frequency(self, frequency: float):
+        """Thread-safe slot for the UI to set the value."""
+        with self._lock:
+            new_freq = np.clip(float(frequency), 20.0, 20000.0)
+            if self._frequency != new_freq:
+                self._frequency = new_freq
+                state_to_emit = self.get_current_state_snapshot(locked=True)
+                self.emitter.stateUpdated.emit(state_to_emit)
+
+    def process(self, input_data: dict) -> dict:
+        state_snapshot_to_emit = None
+        with self._lock:
+            # Prioritize socket input for frequency
+            freq_socket = input_data.get("freq_in")
+            if freq_socket is not None:
+                new_freq = np.clip(float(freq_socket), 20.0, 20000.0)
+                if abs(self._frequency - new_freq) > 1e-6:
+                    self._frequency = new_freq
+                    state_snapshot_to_emit = self.get_current_state_snapshot(locked=True)
+            
+            output_freq = self._frequency
+
+        # Emit signal after releasing the lock
+        if state_snapshot_to_emit:
+            self.emitter.stateUpdated.emit(state_snapshot_to_emit)
+            
+        return {"freq_out": output_freq}
+
+    def serialize_extra(self) -> dict:
+        with self._lock:
+            return {"frequency": self._frequency}
+
+    def deserialize_extra(self, data: dict):
+        self.set_frequency(data.get("frequency", 440.0))
