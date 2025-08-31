@@ -397,15 +397,7 @@ class YouTubePlayerNode(Node):
                 if state_to_emit: self.emitter.emit_state_change(state_to_emit)
                 last_ui_update_time = now
         
-        state_to_emit = None
-        with self._lock:
-            if current_playback_time_s >= self._state_snapshot.get("duration_s", 0) and self._state_snapshot.get("duration_s", 0) > 0:
-                self._playback_state = PlaybackState.STOPPED
-                self._state_snapshot["position_s"] = self._state_snapshot.get("duration_s", 0)
-            else:
-                self._playback_state = PlaybackState.STOPPED
-            state_to_emit = self._update_state_snapshot_locked()
-        if state_to_emit: self.emitter.emit_state_change(state_to_emit)
+        self._end_of_stream_actions(current_playback_time_s, start_time_s)
 
         logger.info(f"[{self.name}] Audio reader thread finished.")
 
@@ -417,6 +409,32 @@ class YouTubePlayerNode(Node):
             self.emitter.emit_video_frame(image.copy())
             time.sleep(1/20)
         logger.info(f"[{self.name}] Video reader thread finished.")
+
+    def _end_of_stream_actions(self, current_playback_time_s: float, start_time_s: float):
+        """Handle end of stream - implement looping by automatically restarting playback."""
+        state_to_emit = None
+        with self._lock:
+            duration_s = self._state_snapshot.get("duration_s", 0.0)
+
+            if current_playback_time_s >= duration_s and duration_s > 0:
+                # End of video reached - loop back to beginning
+                logger.info(f"[{self.name}] End of video reached, looping back to start.")
+                self._seek_request_s = 0.0
+                self._playback_state = PlaybackState.PLAYING
+                self._state_snapshot["position_s"] = 0.0
+                state_to_emit = self._update_state_snapshot_locked()
+            elif not self._stop_event.is_set():
+                # Natural end without reaching full duration
+                self._playback_state = PlaybackState.STOPPED
+                self._state_snapshot["position_s"] = current_playback_time_s
+                state_to_emit = self._update_state_snapshot_locked()
+            else:
+                # Stop event was set, just mark as stopped
+                self._playback_state = PlaybackState.STOPPED
+                state_to_emit = self._update_state_snapshot_locked()
+
+        if state_to_emit:
+            self.emitter.emit_state_change(state_to_emit)
 
     def _stream_reader_loop(self):
         url = self._state_snapshot["url"]
@@ -515,11 +533,8 @@ class YouTubePlayerNode(Node):
                         state_to_emit = self._update_state_snapshot_locked()
                 if state_to_emit: self.emitter.emit_state_change(state_to_emit)
 
-                # If the stream just ended naturally, break out of the main while loop
-                # instead of trying to restart it. The user must press play again.
-                with self._lock:
-                    if self._seek_request_s == -1.0:
-                        break
+                # Continue main loop to allow for looping (restart from beginning)
+                # The _end_of_stream_actions method will set _seek_request_s = 0.0 for looping
 
         logger.info(f"[{self.name}] Main worker loop finished.")
         state_to_emit = None
