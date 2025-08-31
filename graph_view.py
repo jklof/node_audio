@@ -1,7 +1,7 @@
 import logging
 import threading
 import math
-from PySide6.QtWidgets import QGraphicsView, QGraphicsLineItem
+from PySide6.QtWidgets import QGraphicsView, QGraphicsLineItem, QGraphicsProxyWidget
 from PySide6.QtCore import Qt, QPointF, QRectF, Signal, Slot, QLineF
 from PySide6.QtGui import QPainter, QColor, QPen, QCursor
 
@@ -121,10 +121,18 @@ class NodeGraphWidget(QGraphicsView):
             super().mouseReleaseEvent(event)
 
     def keyPressEvent(self, event):
-        if event.key() == Qt.Key.Key_Delete or event.key() == Qt.Key.Key_Backspace:
+        # Check if an input widget (hosted in a QGraphicsProxyWidget) has focus.
+        focus_item = self.scene().focusItem()
+        is_input_widget_focused = isinstance(focus_item, QGraphicsProxyWidget)
+
+        # Only trigger graph item deletion if an input widget is NOT focused.
+        if (event.key() == Qt.Key.Key_Delete or event.key() == Qt.Key.Key_Backspace) and not is_input_widget_focused:
             self._delete_selected_items()
             event.accept()
         else:
+            # For all other keys, OR if an input widget has focus,
+            # pass the event to the default handler. This allows typing,
+            # backspace, delete, etc., in the input widgets.
             super().keyPressEvent(event)
 
     def _delete_selected_items(self):
