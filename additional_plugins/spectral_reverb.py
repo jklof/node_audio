@@ -43,18 +43,18 @@ class SpectralReverbNodeItem(NodeItem):
         self.pre_delay_slider, self.pre_delay_label = self._create_slider_control("Pre-delay", 0.0, 250.0, "{:.0f} ms")
         self.decay_slider, self.decay_label = self._create_slider_control("Decay Time", 0.1, 15.0, "{:.1f} s")
         self.damp_slider, self.damp_label = self._create_slider_control("HF Damp", 500.0, 20000.0, "{:.0f} Hz", is_log=True)
-        self.lf_damp_slider, self.lf_damp_label = self._create_slider_control("LF Damp", 20.0, 2000.0, "{:.0f} Hz", is_log=True) # <-- NEW
+        self.lf_damp_slider, self.lf_damp_label = self._create_slider_control("LF Damp", 20.0, 2000.0, "{:.0f} Hz", is_log=True)
         self.diffusion_slider, self.diffusion_label = self._create_slider_control("Diffusion", 0.0, 1.0, "{:.0%}")
-        self.width_slider, self.width_label = self._create_slider_control("Stereo Width", 0.0, 1.0, "{:.0%}") # <-- NEW
+        self.width_slider, self.width_label = self._create_slider_control("Stereo Width", 0.0, 1.0, "{:.0%}")
         self.mix_slider, self.mix_label = self._create_slider_control("Mix", 0.0, 1.0, "{:.0%}")
         
         for label, slider in [
             (self.pre_delay_label, self.pre_delay_slider),
             (self.decay_label, self.decay_slider),
             (self.damp_label, self.damp_slider),
-            (self.lf_damp_label, self.lf_damp_slider), # <-- NEW
+            (self.lf_damp_label, self.lf_damp_slider),
             (self.diffusion_label, self.diffusion_slider),
-            (self.width_label, self.width_slider), # <-- NEW
+            (self.width_label, self.width_slider),
             (self.mix_label, self.mix_slider)
         ]:
             main_layout.addWidget(label)
@@ -62,13 +62,12 @@ class SpectralReverbNodeItem(NodeItem):
 
         self.setContentWidget(self.container_widget)
 
-        # --- Connect Signals ---
         self.pre_delay_slider.valueChanged.connect(self._on_pre_delay_changed)
         self.decay_slider.valueChanged.connect(self._on_decay_changed)
         self.damp_slider.valueChanged.connect(self._on_damp_changed)
-        self.lf_damp_slider.valueChanged.connect(self._on_lf_damp_changed) # <-- NEW
+        self.lf_damp_slider.valueChanged.connect(self._on_lf_damp_changed)
         self.diffusion_slider.valueChanged.connect(self._on_diffusion_changed)
-        self.width_slider.valueChanged.connect(self._on_width_changed) # <-- NEW
+        self.width_slider.valueChanged.connect(self._on_width_changed)
         self.mix_slider.valueChanged.connect(self._on_mix_changed)
         self.node_logic.emitter.stateUpdated.connect(self._on_state_updated)
         
@@ -122,13 +121,13 @@ class SpectralReverbNodeItem(NodeItem):
     @Slot()
     def _on_damp_changed(self):
         self.node_logic.set_hf_damp(self._map_slider_to_logical(self.damp_slider))
-    @Slot() # <-- NEW
+    @Slot()
     def _on_lf_damp_changed(self):
         self.node_logic.set_lf_damp(self._map_slider_to_logical(self.lf_damp_slider))
     @Slot()
     def _on_diffusion_changed(self):
         self.node_logic.set_diffusion(self._map_slider_to_logical(self.diffusion_slider))
-    @Slot() # <-- NEW
+    @Slot()
     def _on_width_changed(self):
         self.node_logic.set_width(self._map_slider_to_logical(self.width_slider))
     @Slot()
@@ -141,20 +140,17 @@ class SpectralReverbNodeItem(NodeItem):
             "pre_delay_ms": (self.pre_delay_slider, self.pre_delay_label),
             "decay_time": (self.decay_slider, self.decay_label),
             "hf_damp": (self.damp_slider, self.damp_label),
-            "lf_damp": (self.lf_damp_slider, self.lf_damp_label), # <-- NEW
+            "lf_damp": (self.lf_damp_slider, self.lf_damp_label),
             "diffusion": (self.diffusion_slider, self.diffusion_label),
-            "width": (self.width_slider, self.width_label), # <-- NEW
+            "width": (self.width_slider, self.width_label),
             "mix": (self.mix_slider, self.mix_label),
         }
-        
         for key, (slider, label) in sliders_map.items():
             value = state.get(key, slider.property("min_val"))
             is_connected = key in self.node_logic.inputs and self.node_logic.inputs[key].connections
             slider.setEnabled(not is_connected)
-            
             with QSignalBlocker(slider):
                 slider.setValue(self._map_logical_to_slider(slider, value))
-            
             label_text = f"{slider.property('name')}: {slider.property('format').format(value)}"
             if is_connected: label_text += " (ext)"
             label.setText(label_text)
@@ -195,9 +191,9 @@ class SpectralReverbNode(Node):
         self._pre_delay_ms: float = 20.0
         self._decay_time_s: float = 2.5
         self._hf_damp_hz: float = 4000.0
-        self._lf_damp_hz: float = 150.0 # <-- NEW
+        self._lf_damp_hz: float = 150.0
         self._diffusion: float = 1.0
-        self._width: float = 1.0 # <-- NEW
+        self._width: float = 1.0
         self._mix: float = 0.5
         
         # --- DSP Buffers & State ---
@@ -208,59 +204,88 @@ class SpectralReverbNode(Node):
         self._last_frame_params: tuple = (0, 0)
         self._params_dirty: bool = True
 
-    def _emit_state_update_locked(self):
-        state = self.get_current_state_snapshot(locked=True)
-        self.emitter.stateUpdated.emit(state)
-
     # --- Parameter Setter Slots ---
     @Slot(float)
     def set_pre_delay_ms(self, value: float):
+        state = None
         with self._lock:
-            self._pre_delay_ms = value; self._params_dirty = True
-            self._emit_state_update_locked()
+            if value != self._pre_delay_ms:
+                self._pre_delay_ms = value; self._params_dirty = True
+                state = self._get_current_state_snapshot_locked()
+        if state:
+            self.emitter.stateUpdated.emit(state)
     @Slot(float)
     def set_decay_time(self, value: float):
+        state = None
         with self._lock:
-            self._decay_time_s = value; self._params_dirty = True
-            self._emit_state_update_locked()
+            if value != self._decay_time_s:
+                self._decay_time_s = value; self._params_dirty = True
+                state = self._get_current_state_snapshot_locked()
+        if state:
+            self.emitter.stateUpdated.emit(state)
     @Slot(float)
     def set_hf_damp(self, value: float):
+        state = None
         with self._lock:
-            self._hf_damp_hz = value; self._params_dirty = True
-            self._emit_state_update_locked()
+            if value != self._hf_damp_hz:
+                self._hf_damp_hz = value; self._params_dirty = True
+                state = self._get_current_state_snapshot_locked()
+        if state:
+            self.emitter.stateUpdated.emit(state)
     @Slot(float)
     def set_lf_damp(self, value: float):
+        state = None
         with self._lock:
-            self._lf_damp_hz = value; self._params_dirty = True
-            self._emit_state_update_locked()
+            if value != self._lf_damp_hz:
+                self._lf_damp_hz = value; self._params_dirty = True
+                state = self._get_current_state_snapshot_locked()
+        if state:
+            self.emitter.stateUpdated.emit(state)
     @Slot(float)
     def set_diffusion(self, value: float):
+        state = None
         with self._lock:
-            self._diffusion = np.clip(value, 0.0, 1.0); self._params_dirty = True
-            self._emit_state_update_locked()
+            value = np.clip(value, 0.0, 1.0)
+            if value != self._diffusion:
+                self._diffusion = value; self._params_dirty = True
+                state = self._get_current_state_snapshot_locked()
+        if state:
+            self.emitter.stateUpdated.emit(state)
     @Slot(float)
     def set_width(self, value: float):
+        state = None
         with self._lock:
-            self._width = np.clip(value, 0.0, 1.0); self._params_dirty = True
-            self._emit_state_update_locked()
+            value = np.clip(value, 0.0, 1.0)
+            if value != self._width:
+                self._width = value; self._params_dirty = True
+                state = self._get_current_state_snapshot_locked()
+        if state:
+            self.emitter.stateUpdated.emit(state)
     @Slot(float)
     def set_mix(self, value: float):
+        state = None
         with self._lock:
-            self._mix = np.clip(value, 0.0, 1.0)
-            self._emit_state_update_locked()
+            value = np.clip(value, 0.0, 1.0)
+            if value != self._mix:
+                self._mix = value
+                state = self._get_current_state_snapshot_locked()
+        if state:
+            self.emitter.stateUpdated.emit(state)
 
-    def get_current_state_snapshot(self, locked: bool = False) -> Dict:
-        state = {
+
+    def _get_current_state_snapshot_locked(self) -> Dict:
+        return {
             "pre_delay_ms": self._pre_delay_ms,
             "decay_time": self._decay_time_s,
             "hf_damp": self._hf_damp_hz,
-            "lf_damp": self._lf_damp_hz, # <-- NEW
+            "lf_damp": self._lf_damp_hz,
             "diffusion": self._diffusion,
-            "width": self._width, # <-- NEW
+            "width": self._width,
             "mix": self._mix
         }
-        if locked: return state
-        with self._lock: return state
+    def get_current_state_snapshot(self) -> Dict:
+        with self._lock:
+            return self._get_current_state_snapshot_locked()
 
     def _recalculate_params(self, frame: SpectralFrame):
         # --- Recalculate Decay Factors ---
@@ -311,23 +336,54 @@ class SpectralReverbNode(Node):
         if not isinstance(frame, SpectralFrame):
             return {"spectral_frame_out": None}
 
+        state_snapshot_to_emit = None
         with self._lock:
-            # --- Update state from sockets if connected ---
-            socket_params = {
-                "pre_delay_ms": input_data.get("pre_delay_ms"), "decay_time": input_data.get("decay_time"),
-                "hf_damp": input_data.get("hf_damp"), "lf_damp": input_data.get("lf_damp"),
-                "diffusion": input_data.get("diffusion"), "width": input_data.get("width"),
-                "mix": input_data.get("mix"),
-            }
-            if socket_params["pre_delay_ms"] is not None: self._pre_delay_ms = socket_params["pre_delay_ms"]; self._params_dirty = True
-            if socket_params["decay_time"] is not None: self._decay_time_s = socket_params["decay_time"]; self._params_dirty = True
-            if socket_params["hf_damp"] is not None: self._hf_damp_hz = socket_params["hf_damp"]; self._params_dirty = True
-            if socket_params["lf_damp"] is not None: self._lf_damp_hz = socket_params["lf_damp"]; self._params_dirty = True
-            if socket_params["diffusion"] is not None: self._diffusion = np.clip(socket_params["diffusion"], 0.0, 1.0); self._params_dirty = True
-            if socket_params["width"] is not None: self._width = np.clip(socket_params["width"], 0.0, 1.0); self._params_dirty = True
-            if socket_params["mix"] is not None: self._mix = np.clip(socket_params["mix"], 0.0, 1.0)
+
+            pre_delay = input_data.get("pre_delay_ms")
+            if pre_delay is not None:
+                if self._pre_delay_ms != pre_delay:
+                    self._pre_delay_ms = pre_delay
+                    self._params_dirty = True
+
+            decay_time = input_data.get("decay_time")
+            if decay_time is not None:
+                if self._decay_time_s != decay_time:
+                    self._decay_time_s = decay_time
+                    self._params_dirty = True
             
-            # --- Initialize / re-initialize buffers on format change ---
+            hf_damp = input_data.get("hf_damp")
+            if hf_damp is not None:
+                if self._hf_damp_hz != hf_damp:
+                    self._hf_damp_hz = hf_damp
+                    self._params_dirty = True
+            
+            lf_damp = input_data.get("lf_damp")
+            if lf_damp is not None:
+                if self._lf_damp_hz != lf_damp:
+                    self._lf_damp_hz = lf_damp
+                    self._params_dirty = True
+            
+            diffusion = input_data.get("diffusion")
+            if diffusion is not None:
+                new_diff = np.clip(diffusion, 0.0, 1.0)
+                if self._diffusion != new_diff:
+                    self._diffusion = new_diff
+                    self._params_dirty = True
+
+            width = input_data.get("width")
+            if width is not None:
+                new_width = np.clip(width, 0.0, 1.0)
+                if self._width != new_width:
+                    self._width = new_width
+                    self._params_dirty = True
+
+            mix = input_data.get("mix")
+            if mix is not None:
+                new_mix = np.clip(mix, 0.0, 1.0)
+                if self._mix != new_mix:
+                    self._mix = new_mix
+                    self._params_dirty = True
+
             num_bins, num_channels = frame.data.shape
             current_frame_params = (frame.fft_size, frame.hop_size)
             if self._last_frame_params != current_frame_params:
@@ -338,7 +394,8 @@ class SpectralReverbNode(Node):
 
             if self._params_dirty:
                 self._recalculate_params(frame)
-            
+                state_snapshot_to_emit = self._get_current_state_snapshot_locked()
+
             # Ensure reverb buffer is always stereo
             if self._reverb_fft_buffer.shape[1] != 2:
                  self._reverb_fft_buffer = np.zeros((num_bins, 2), dtype=DEFAULT_COMPLEX_DTYPE)
@@ -363,6 +420,10 @@ class SpectralReverbNode(Node):
             wet_signal = self._reverb_fft_buffer * self._decay_factors
             self._reverb_fft_buffer = delayed_frame_data + wet_signal
             output_fft = (dry_signal * (1.0 - self._mix)) + (wet_signal * self._mix)
+        
+        # emit state update outside lock
+        if state_snapshot_to_emit:
+            self.emitter.stateUpdated.emit(state_snapshot_to_emit)
             
         output_frame = SpectralFrame(
             data=output_fft,

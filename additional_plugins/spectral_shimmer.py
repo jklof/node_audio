@@ -146,57 +146,59 @@ class SpectralShimmerNode(Node):
         
         # --- DSP Buffers & State ---
         self._shimmer_buffer: Optional[np.ndarray] = None
-        self._last_frame_params: tuple = (0, 0)
-
-    def _emit_state_update_locked(self):
-        state = self.get_current_state_snapshot(locked=True)
-        self.emitter.stateUpdated.emit(state)
+        self._last_frame_params: tuple = (0, 0, 0)
 
     # --- Parameter Setter Slots ---
     @Slot(float)
     def set_pitch_shift(self, value: float):
+        state_to_emit = None
         with self._lock:
-            self._pitch_shift_st = value
-            self._emit_state_update_locked()
+            if self._pitch_shift_st != value:
+                self._pitch_shift_st = value
+                state_to_emit = self._get_current_state_snapshot_locked()
+        if state_to_emit:
+            self.emitter.stateUpdated.emit(state_to_emit)
+            
     @Slot(float)
     def set_feedback(self, value: float):
+        state_to_emit = None
         with self._lock:
-            self._feedback = np.clip(value, 0.0, 1.0)
-            self._emit_state_update_locked()
+            new_feedback = np.clip(value, 0.0, 1.0)
+            if self._feedback != new_feedback:
+                self._feedback = new_feedback
+                state_to_emit = self._get_current_state_snapshot_locked()
+        if state_to_emit:
+            self.emitter.stateUpdated.emit(state_to_emit)
+            
     @Slot(float)
     def set_mix(self, value: float):
+        state_to_emit = None
         with self._lock:
-            self._mix = np.clip(value, 0.0, 1.0)
-            self._emit_state_update_locked()
+            new_mix = np.clip(value, 0.0, 1.0)
+            if self._mix != new_mix:
+                self._mix = new_mix
+                state_to_emit = self._get_current_state_snapshot_locked()
+        if state_to_emit:
+            self.emitter.stateUpdated.emit(state_to_emit)
 
-    def get_current_state_snapshot(self, locked: bool = False) -> Dict:
-        state = {"pitch_shift": self._pitch_shift_st, "feedback": self._feedback, "mix": self._mix}
-        if locked: return state
-        with self._lock: return state
+    def _get_current_state_snapshot_locked(self) -> Dict:
+        return {"pitch_shift": self._pitch_shift_st, "feedback": self._feedback, "mix": self._mix}
+
+    def get_current_state_snapshot(self) -> Dict:
+        with self._lock:
+            return self._get_current_state_snapshot_locked()
 
     def _pitch_shift_frame(self, frame_data: np.ndarray, ratio: float) -> np.ndarray:
-        """
-        Shifts pitch by resampling the frequency bins.
-        Works on a per-channel basis.
-        """
         num_bins, num_channels = frame_data.shape
         shifted_frame = np.zeros_like(frame_data)
-        
         original_indices = np.arange(num_bins)
-        # Create new indices by "stretching" or "squashing" the original index space
         shifted_indices = original_indices / ratio
 
         for i in range(num_channels):
             magnitudes = np.abs(frame_data[:, i])
             phases = np.angle(frame_data[:, i])
-            
-            # Interpolate the magnitudes at the new index locations
-            # Frequencies shifted beyond the nyquist are faded to zero
             shifted_magnitudes = np.interp(original_indices, shifted_indices, magnitudes, left=0, right=0)
-            
-            # Reconstruct the complex number with the new magnitudes and original phases
             shifted_frame[:, i] = shifted_magnitudes * np.exp(1j * phases)
-            
         return shifted_frame
 
     def process(self, input_data: dict) -> dict:
@@ -204,43 +206,46 @@ class SpectralShimmerNode(Node):
         if not isinstance(frame, SpectralFrame):
             return {"spectral_frame_out": None}
 
+        state_snapshot_to_emit = None
         with self._lock:
+            ui_update_needed = False
             # --- Update state from sockets if connected ---
-            socket_params = {
-                "pitch_shift": input_data.get("pitch_shift"),
-                "feedback": input_data.get("feedback"),
-                "mix": input_data.get("mix"),
-            }
-            if socket_params["pitch_shift"] is not None: self._pitch_shift_st = socket_params["pitch_shift"]
-            if socket_params["feedback"] is not None: self._feedback = np.clip(socket_params["feedback"], 0.0, 1.0)
-            if socket_params["mix"] is not None: self._mix = np.clip(socket_params["mix"], 0.0, 1.0)
+            pitch_socket = input_data.get("pitch_shift")
+            if pitch_socket is not None and self._pitch_shift_st != pitch_socket:
+                self._pitch_shift_st = pitch_socket; ui_update_needed = True
+
+            feedback_socket = input_data.get("feedback")
+            if feedback_socket is not None:
+                new_feedback = np.clip(feedback_socket, 0.0, 1.0)
+                if self._feedback != new_feedback:
+                    self._feedback = new_feedback; ui_update_needed = True
+
+            mix_socket = input_data.get("mix")
+            if mix_socket is not None:
+                new_mix = np.clip(mix_socket, 0.0, 1.0)
+                if self._mix != new_mix:
+                    self._mix = new_mix; ui_update_needed = True
             
-            # --- Initialize / re-initialize buffers on format change ---
+            if ui_update_needed:
+                state_snapshot_to_emit = self._get_current_state_snapshot_locked()
+            
             num_bins, num_channels = frame.data.shape
             current_frame_params = (frame.fft_size, frame.hop_size, num_channels)
             if self._last_frame_params != current_frame_params:
                 self._last_frame_params = current_frame_params
                 self._shimmer_buffer = np.zeros((num_bins, num_channels), dtype=DEFAULT_COMPLEX_DTYPE)
 
-            # --- Shimmer DSP Algorithm ---
             pitch_ratio = 2**(self._pitch_shift_st / 12.0)
-            
-            # 1. Pitch-shift the contents of the feedback buffer from the last frame
             shifted_tail = self._pitch_shift_frame(self._shimmer_buffer, pitch_ratio)
-            
-            # 2. Apply feedback and create the wet signal for this frame's output
             wet_signal = shifted_tail * self._feedback
-            
-            # 3. Create the new buffer content by mixing the current input with the processed tail
             self._shimmer_buffer = frame.data + wet_signal
-            
-            # 4. Mix the dry input with the wet signal for the final output
             output_fft = (frame.data * (1.0 - self._mix)) + (wet_signal * self._mix)
             
-        # --- Create and return the output frame ---
+        if state_snapshot_to_emit:
+            self.emitter.stateUpdated.emit(state_snapshot_to_emit)
+            
         output_frame = SpectralFrame(
-            data=output_fft,
-            fft_size=frame.fft_size, hop_size=frame.hop_size,
+            data=output_fft, fft_size=frame.fft_size, hop_size=frame.hop_size,
             window_size=frame.window_size, sample_rate=frame.sample_rate,
             analysis_window=frame.analysis_window
         )

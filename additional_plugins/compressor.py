@@ -2,7 +2,7 @@ import numpy as np
 import threading
 import logging
 import time
-from typing import Dict  # <-- THIS IS THE FIX
+from typing import Dict
 
 # --- Node System Imports ---
 from node_system import Node
@@ -35,15 +35,14 @@ UI_UPDATE_THROTTLE_S = 0.05
 EPSILON = 1e-12
 
 # ==============================================================================
-# 1. State Emitter for UI Communication (Updated)
+# 1. State Emitter for UI Communication
 # ==============================================================================
 class CompressorEmitter(QObject):
-    """A dedicated QObject for thread-safe UI communication."""
     stateUpdated = Signal(dict)
     gainReductionUpdated = Signal(float)
 
 # ==============================================================================
-# 2. Custom UI Class (Updated for New Architecture)
+# 2. Custom UI Class
 # ==============================================================================
 class DynamicRangeCompressorNodeItem(NodeItem):
     NODE_SPECIFIC_WIDTH = 220
@@ -146,7 +145,7 @@ class DynamicRangeCompressorNodeItem(NodeItem):
         super().updateFromLogic()
 
 # ==============================================================================
-# 3. Logic Class for Dynamic Range Compressor (Updated)
+# 3. Logic Class for Dynamic Range Compressor
 # ==============================================================================
 class DynamicRangeCompressorNode(Node):
     NODE_TYPE = "Dynamic Range Compressor"
@@ -275,6 +274,7 @@ class DynamicRangeCompressorNode(Node):
 
         return {"out": output_block.astype(DEFAULT_DTYPE), "gain_reduction_db": comp_gain}
 
+    @staticmethod
     def _create_setter(param_name: str, min_val: float, max_val: float):
         def setter(self, value: float):
             needs_coeff_update = False

@@ -206,38 +206,45 @@ class WaveShaperNode(Node):
         self._drive: float = 1.0
         self._mix: float = 1.0
 
-    def get_current_state_snapshot(self, locked: bool = False) -> Dict:
-        """Returns a copy of the current parameters for UI synchronization."""
-        if locked:
-            return {"shaper_type": self._shaper_type, "drive": self._drive, "mix": self._mix}
+    def _get_current_state_snapshot_locked(self) -> Dict:
+        """Returns a copy of the current parameters for UI synchronization. Assumes caller holds the lock."""
+        return {"shaper_type": self._shaper_type, "drive": self._drive, "mix": self._mix}
+
+    def get_current_state_snapshot(self) -> Dict:
         with self._lock:
-            return {"shaper_type": self._shaper_type, "drive": self._drive, "mix": self._mix}
+            return self._get_current_state_snapshot_locked()
 
     @Slot(ShaperType)
     def set_shaper_type(self, shaper_type: ShaperType):
+        state_to_emit = None
         with self._lock:
             if self._shaper_type != shaper_type:
                 self._shaper_type = shaper_type
-                state_to_emit = self.get_current_state_snapshot(locked=True)
-                self.emitter.stateUpdated.emit(state_to_emit)
+                state_to_emit = self._get_current_state_snapshot_locked()
+        if state_to_emit:
+            self.emitter.stateUpdated.emit(state_to_emit)
 
     @Slot(float)
     def set_drive(self, drive: float):
+        state_to_emit = None
         with self._lock:
             new_drive = np.clip(float(drive), 1.0, 100.0)
             if self._drive != new_drive:
                 self._drive = new_drive
-                state_to_emit = self.get_current_state_snapshot(locked=True)
-                self.emitter.stateUpdated.emit(state_to_emit)
+                state_to_emit = self._get_current_state_snapshot_locked()
+        if state_to_emit:
+            self.emitter.stateUpdated.emit(state_to_emit)
 
     @Slot(float)
     def set_mix(self, mix: float):
+        state_to_emit = None
         with self._lock:
             new_mix = np.clip(float(mix), 0.0, 1.0)
             if self._mix != new_mix:
                 self._mix = new_mix
-                state_to_emit = self.get_current_state_snapshot(locked=True)
-                self.emitter.stateUpdated.emit(state_to_emit)
+                state_to_emit = self._get_current_state_snapshot_locked()
+        if state_to_emit:
+            self.emitter.stateUpdated.emit(state_to_emit)
 
     def process(self, input_data: dict) -> dict:
         signal = input_data.get("in")
@@ -252,7 +259,7 @@ class WaveShaperNode(Node):
                 new_drive = np.clip(float(drive_socket), 1.0, 100.0)
                 if abs(self._drive - new_drive) > 1e-6:
                     self._drive = new_drive
-                    state_snapshot_to_emit = self.get_current_state_snapshot(locked=True)
+                    state_snapshot_to_emit = self._get_current_state_snapshot_locked()
 
             # Prioritize socket input for mix
             mix_socket = input_data.get("mix")
@@ -260,7 +267,7 @@ class WaveShaperNode(Node):
                 new_mix = np.clip(float(mix_socket), 0.0, 1.0)
                 if abs(self._mix - new_mix) > 1e-6:
                     self._mix = new_mix
-                    state_snapshot_to_emit = self.get_current_state_snapshot(locked=True)
+                    state_snapshot_to_emit = self._get_current_state_snapshot_locked()
 
             drive = self._drive
             shaper_type = self._shaper_type

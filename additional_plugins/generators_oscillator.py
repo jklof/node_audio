@@ -213,38 +213,47 @@ class OscillatorNode(Node):
         self._frequency: float = 440.0
         self._pulse_width: float = 0.5
 
-    def get_current_state_snapshot(self, locked: bool = False) -> Dict:
-        """Returns a copy of the current parameters for UI synchronization."""
-        if locked:
-            return {"waveform": self._waveform, "frequency": self._frequency, "pulse_width": self._pulse_width}
+    def _get_current_state_snapshot_locked(self) -> Dict:
+        """Returns a copy of the current parameters for UI synchronization. Assumes lock is held."""
+        return {"waveform": self._waveform, "frequency": self._frequency, "pulse_width": self._pulse_width}
+
+    def get_current_state_snapshot(self) -> Dict:
         with self._lock:
-            return {"waveform": self._waveform, "frequency": self._frequency, "pulse_width": self._pulse_width}
+            return self._get_current_state_snapshot_locked()
 
     @Slot(Waveform)
     def set_waveform(self, waveform: Waveform):
+        state_to_emit = None
         with self._lock:
             if self._waveform != waveform:
                 self._waveform = waveform
-                state_to_emit = self.get_current_state_snapshot(locked=True)
-                self.emitter.stateUpdated.emit(state_to_emit)
+                state_to_emit = self._get_current_state_snapshot_locked()
+        if state_to_emit:
+            self.emitter.stateUpdated.emit(state_to_emit)
 
     @Slot(float)
     def set_frequency(self, frequency: float):
+        state_to_emit = None
         with self._lock:
             new_freq = np.clip(float(frequency), 20.0, 20000.0)
             if self._frequency != new_freq:
                 self._frequency = new_freq
-                state_to_emit = self.get_current_state_snapshot(locked=True)
-                self.emitter.stateUpdated.emit(state_to_emit)
+                state_to_emit = self._get_current_state_snapshot_locked()
+        if state_to_emit:
+            self.emitter.stateUpdated.emit(state_to_emit)
+
     
     @Slot(float)
     def set_pulse_width(self, pulse_width: float):
+        state_to_emit = None
         with self._lock:
             new_pw = np.clip(float(pulse_width), 0.0, 1.0)
             if self._pulse_width != new_pw:
                 self._pulse_width = new_pw
-                state_to_emit = self.get_current_state_snapshot(locked=True)
-                self.emitter.stateUpdated.emit(state_to_emit)
+                state_to_emit = self._get_current_state_snapshot_locked()
+        if state_to_emit:
+            self.emitter.stateUpdated.emit(state_to_emit)
+
 
     def process(self, input_data: dict) -> dict:
         state_snapshot_to_emit = None
@@ -255,14 +264,14 @@ class OscillatorNode(Node):
                 new_freq = np.clip(float(freq_socket), 20.0, 20000.0)
                 if abs(self._frequency - new_freq) > 1e-6:
                     self._frequency = new_freq
-                    state_snapshot_to_emit = self.get_current_state_snapshot(locked=True)
+                    state_snapshot_to_emit = self._get_current_state_snapshot_locked()
             
             pw_socket = input_data.get("pulse_width")
             if pw_socket is not None:
                 new_pw = np.clip(float(pw_socket), 0.0, 1.0)
                 if abs(self._pulse_width - new_pw) > 1e-6:
                     self._pulse_width = new_pw
-                    state_snapshot_to_emit = self.get_current_state_snapshot(locked=True)
+                    state_snapshot_to_emit = self._get_current_state_snapshot_locked()
             
             # Copy state to local variables for processing
             frequency = self._frequency
