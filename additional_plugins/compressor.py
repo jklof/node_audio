@@ -10,9 +10,7 @@ from constants import DEFAULT_DTYPE, DEFAULT_SAMPLERATE
 
 # --- UI and Qt Imports ---
 from ui_elements import NodeItem, NODE_CONTENT_PADDING
-from PySide6.QtWidgets import (
-    QWidget, QSlider, QLabel, QVBoxLayout, QGridLayout
-)
+from PySide6.QtWidgets import QWidget, QSlider, QLabel, QVBoxLayout, QGridLayout
 from PySide6.QtCore import Qt, Signal, Slot, QObject, QSignalBlocker
 
 # Configure logging
@@ -34,12 +32,14 @@ MAX_MAKEUP_GAIN_DB = 24.0
 UI_UPDATE_THROTTLE_S = 0.05
 EPSILON = 1e-12
 
+
 # ==============================================================================
 # 1. State Emitter for UI Communication
 # ==============================================================================
 class CompressorEmitter(QObject):
     stateUpdated = Signal(dict)
     gainReductionUpdated = Signal(float)
+
 
 # ==============================================================================
 # 2. Custom UI Class
@@ -52,7 +52,9 @@ class DynamicRangeCompressorNodeItem(NodeItem):
 
         self.container_widget = QWidget()
         main_layout = QVBoxLayout(self.container_widget)
-        main_layout.setContentsMargins(NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING)
+        main_layout.setContentsMargins(
+            NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING
+        )
         main_layout.setSpacing(5)
 
         controls_layout = QGridLayout()
@@ -75,24 +77,27 @@ class DynamicRangeCompressorNodeItem(NodeItem):
             value_label = QLabel(fmt.format(0.0))
             value_label.setMinimumWidth(65)
             value_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            
+
             controls_layout.addWidget(param_label, i, 0)
             controls_layout.addWidget(slider, i, 1)
             controls_layout.addWidget(value_label, i, 2)
-            
+
             self.controls[key] = {
-                "slider": slider, "value_label": value_label, 
-                "format": fmt, "min_val": p_min, "max_val": p_max
+                "slider": slider,
+                "value_label": value_label,
+                "format": fmt,
+                "min_val": p_min,
+                "max_val": p_max,
             }
             slider.valueChanged.connect(lambda val, k=key: self._handle_slider_change(k, val))
 
         main_layout.addLayout(controls_layout)
-        
+
         self.gr_label = QLabel("GR: 0.0 dB")
         self.gr_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.gr_label.setStyleSheet("font-weight: bold; color: orange;")
         main_layout.addWidget(self.gr_label)
-        
+
         self.setContentWidget(self.container_widget)
 
         self.node_logic.emitter.stateUpdated.connect(self._on_state_updated)
@@ -107,7 +112,8 @@ class DynamicRangeCompressorNodeItem(NodeItem):
     def _map_logical_to_slider(self, key: str, value: float) -> int:
         info = self.controls[key]
         range_val = info["max_val"] - info["min_val"]
-        if abs(range_val) < EPSILON: return 0
+        if abs(range_val) < EPSILON:
+            return 0
         norm = (np.clip(value, info["min_val"], info["max_val"]) - info["min_val"]) / range_val
         return int(round(norm * 1000.0))
 
@@ -115,21 +121,23 @@ class DynamicRangeCompressorNodeItem(NodeItem):
     def _handle_slider_change(self, key: str, value: int):
         logical_val = self._map_slider_to_logical(key, value)
         setter = getattr(self.node_logic, f"set_{key}", None)
-        if setter: setter(logical_val)
+        if setter:
+            setter(logical_val)
 
     @Slot(dict)
     def _on_state_updated(self, state: dict):
         for key, control_info in self.controls.items():
             value = state.get(key, control_info["min_val"])
-            
+
             is_connected = key in self.node_logic.inputs and self.node_logic.inputs[key].connections
             control_info["slider"].setEnabled(not is_connected)
-            
+
             with QSignalBlocker(control_info["slider"]):
                 control_info["slider"].setValue(self._map_logical_to_slider(key, value))
-            
+
             label_text = control_info["format"].format(value)
-            if is_connected: label_text += " (ext)"
+            if is_connected:
+                label_text += " (ext)"
             control_info["value_label"].setText(label_text)
 
     @Slot(float)
@@ -143,6 +151,7 @@ class DynamicRangeCompressorNodeItem(NodeItem):
         last_gr = self.node_logic.get_current_gain_reduction_db()
         self._update_gr_display(float(last_gr))
         super().updateFromLogic()
+
 
 # ==============================================================================
 # 3. Logic Class for Dynamic Range Compressor
@@ -180,27 +189,35 @@ class DynamicRangeCompressorNode(Node):
         # --- DSP State ---
         self._samplerate = float(DEFAULT_SAMPLERATE)
         self._detector_envelope = 0.0
-        self._compressor_gain_db = 0.0 # Gain reduction is stored as a negative dB value
+        self._compressor_gain_db = 0.0  # Gain reduction is stored as a negative dB value
         self._last_ui_update_time = 0
         self._update_coefficients()
-        
+
     def _calculate_coeff(self, time_ms: float) -> float:
-        if time_ms <= 0.0: return 0.0
+        if time_ms <= 0.0:
+            return 0.0
         return np.exp(-1.0 / (time_ms * 0.001 * self._samplerate))
 
     def _update_coefficients(self):
         self._attack_coeff = self._calculate_coeff(self._attack_ms)
         self._release_coeff = self._calculate_coeff(self._release_ms)
-        logger.debug(f"[{self.name}] Coeffs updated: Attack={self._attack_coeff:.4f}, Release={self._release_coeff:.4f}")
+        logger.debug(
+            f"[{self.name}] Coeffs updated: Attack={self._attack_coeff:.4f}, Release={self._release_coeff:.4f}"
+        )
 
     def get_current_state_snapshot(self, locked: bool = False) -> Dict:
         state = {
-            "threshold_db": self._threshold_db, "ratio": self._ratio,
-            "attack_ms": self._attack_ms, "release_ms": self._release_ms,
-            "knee_db": self._knee_db, "makeup_gain_db": self._makeup_gain_db,
+            "threshold_db": self._threshold_db,
+            "ratio": self._ratio,
+            "attack_ms": self._attack_ms,
+            "release_ms": self._release_ms,
+            "knee_db": self._knee_db,
+            "makeup_gain_db": self._makeup_gain_db,
         }
-        if locked: return state
-        with self._lock: return state
+        if locked:
+            return state
+        with self._lock:
+            return state
 
     def process(self, input_data: dict) -> dict:
         signal_in = input_data.get("in")
@@ -220,13 +237,19 @@ class DynamicRangeCompressorNode(Node):
                     if getattr(self, f"_{p}") != float(socket_val):
                         setattr(self, f"_{p}", float(socket_val))
                         state_update_needed = True
-            
-            if state_update_needed and ("attack_ms" in [p for p in params if input_data.get(p) is not None] or "release_ms" in [p for p in params if input_data.get(p) is not None]):
+
+            if state_update_needed and (
+                "attack_ms" in [p for p in params if input_data.get(p) is not None]
+                or "release_ms" in [p for p in params if input_data.get(p) is not None]
+            ):
                 self._update_coefficients()
 
             # --- Copy state to local variables for processing ---
-            threshold = self._threshold_db; ratio = self._ratio; knee = self._knee_db
-            attack_c = self._attack_coeff; release_c = self._release_coeff
+            threshold = self._threshold_db
+            ratio = self._ratio
+            knee = self._knee_db
+            attack_c = self._attack_coeff
+            release_c = self._release_coeff
             makeup_gain = self._makeup_gain_db
             detector_env = self._detector_envelope
             comp_gain = self._compressor_gain_db
@@ -234,33 +257,33 @@ class DynamicRangeCompressorNode(Node):
         # --- Emit state update AFTER releasing lock ---
         if state_update_needed:
             self.emitter.stateUpdated.emit(self.get_current_state_snapshot())
-        
+
         # --- Audio Processing ---
         mono_signal = np.mean(np.abs(signal_in), axis=1) if signal_in.ndim > 1 else np.abs(signal_in)
         output_block = np.zeros_like(signal_in)
 
         for i in range(len(mono_signal)):
-            detector_env = max(mono_signal[i], detector_env * release_c) # Simplified envelope follower
+            detector_env = max(mono_signal[i], detector_env * release_c)  # Simplified envelope follower
             level_db = 20 * np.log10(detector_env + EPSILON)
-            
+
             over_db = level_db - threshold
             gain_reduction_db = 0.0
-            
-            if knee > 0 and over_db > -knee/2:
-                if over_db < knee/2: # Inside knee
-                    gain_reduction_db = (1/ratio - 1) * (over_db + knee/2)**2 / (2 * knee)
-                else: # Above knee
-                    gain_reduction_db = (1/ratio - 1) * over_db
-            elif over_db > 0: # Hard knee
-                gain_reduction_db = (1/ratio - 1) * over_db
-            
+
+            if knee > 0 and over_db > -knee / 2:
+                if over_db < knee / 2:  # Inside knee
+                    gain_reduction_db = (1 / ratio - 1) * (over_db + knee / 2) ** 2 / (2 * knee)
+                else:  # Above knee
+                    gain_reduction_db = (1 / ratio - 1) * over_db
+            elif over_db > 0:  # Hard knee
+                gain_reduction_db = (1 / ratio - 1) * over_db
+
             target_gain = gain_reduction_db
             if target_gain < comp_gain:
                 comp_gain = attack_c * comp_gain + (1 - attack_c) * target_gain
             else:
                 comp_gain = release_c * comp_gain + (1 - release_c) * target_gain
-            
-            linear_gain = 10**((comp_gain + makeup_gain) / 20.0)
+
+            linear_gain = 10 ** ((comp_gain + makeup_gain) / 20.0)
             output_block[i] = signal_in[i] * linear_gain
 
         with self._lock:
@@ -286,8 +309,11 @@ class DynamicRangeCompressorNode(Node):
                     if param_name in ["attack_ms", "release_ms"]:
                         needs_coeff_update = True
                     state_to_emit = self.get_current_state_snapshot(locked=True)
-            if needs_coeff_update: self._update_coefficients()
-            if state_to_emit: self.emitter.stateUpdated.emit(state_to_emit)
+            if needs_coeff_update:
+                self._update_coefficients()
+            if state_to_emit:
+                self.emitter.stateUpdated.emit(state_to_emit)
+
         return setter
 
     set_threshold_db = _create_setter("threshold_db", MIN_THRESHOLD_DB, MAX_THRESHOLD_DB)
@@ -298,7 +324,8 @@ class DynamicRangeCompressorNode(Node):
     set_makeup_gain_db = _create_setter("makeup_gain_db", MIN_MAKEUP_GAIN_DB, MAX_MAKEUP_GAIN_DB)
 
     def get_current_gain_reduction_db(self) -> float:
-        with self._lock: return self._compressor_gain_db
+        with self._lock:
+            return self._compressor_gain_db
 
     def start(self):
         with self._lock:

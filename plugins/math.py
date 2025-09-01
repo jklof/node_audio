@@ -4,7 +4,9 @@ from constants import DEFAULT_DTYPE
 
 # Configure logging
 import logging
+
 logger = logging.getLogger(__name__)
+
 
 class MultiplyAndAdd(Node):
     NODE_TYPE = "Multiply Add"
@@ -43,6 +45,7 @@ class MultiplyAndAdd(Node):
             logger.warning(f"MultiplyAndAdd [{self.name}]: Calculation error (Inputs: v={v}, m={m}, a={a}). Error: {e}")
             return {"out": None}
 
+
 class ComparatorNode(Node):
     NODE_TYPE = "Comparator"
     CATEGORY = "Math"
@@ -50,27 +53,28 @@ class ComparatorNode(Node):
 
     def __init__(self, name: str, node_id: str = None):
         super().__init__(name, node_id)
-        
+
         # Sockets
         self.add_input("in", data_type=float)
         self.add_input("threshold", data_type=float)
         self.add_output("out", data_type=bool)
-        
+
         self.default_threshold = 0.0
 
     def process(self, input_data: dict) -> dict:
         input_value = input_data.get("in")
-        
+
         if input_value is None:
             return {"out": False}
 
         threshold = input_data.get("threshold", self.default_threshold)
-        
+
         try:
             is_greater = float(input_value) > float(threshold)
             return {"out": is_greater}
         except (TypeError, ValueError):
             return {"out": False}
+
 
 class AddSignalsNode(Node):
     NODE_TYPE = "Add Signals"
@@ -97,19 +101,25 @@ class AddSignalsNode(Node):
             if isinstance(signal2, np.ndarray):
                 return {"out": signal2.astype(DEFAULT_DTYPE)}
             else:
-                logger.warning(f"AddSignalsNode [{self.name}]: Input 'in1' is None, 'in2' is not a numpy array (type: {type(signal2)}).")
+                logger.warning(
+                    f"AddSignalsNode [{self.name}]: Input 'in1' is None, 'in2' is not a numpy array (type: {type(signal2)})."
+                )
                 return {"out": None}
         elif signal2 is None:
             # If only signal1 exists, pass it through (ensure correct type)
             if isinstance(signal1, np.ndarray):
                 return {"out": signal1.astype(DEFAULT_DTYPE)}
             else:
-                logger.warning(f"AddSignalsNode [{self.name}]: Input 'in2' is None, 'in1' is not a numpy array (type: {type(signal1)}).")
+                logger.warning(
+                    f"AddSignalsNode [{self.name}]: Input 'in2' is None, 'in1' is not a numpy array (type: {type(signal1)})."
+                )
                 return {"out": None}
 
         # Both signals are present, check types are numpy arrays
         if not isinstance(signal1, np.ndarray) or not isinstance(signal2, np.ndarray):
-            logger.warning(f"AddSignalsNode [{self.name}]: Invalid input types. Expected numpy arrays, got ({type(signal1)}, {type(signal2)}).")
+            logger.warning(
+                f"AddSignalsNode [{self.name}]: Invalid input types. Expected numpy arrays, got ({type(signal1)}, {type(signal2)})."
+            )
             return {"out": None}
 
         # Attempt addition (handles shape mismatches etc.)
@@ -120,11 +130,14 @@ class AddSignalsNode(Node):
             return {"out": result.astype(DEFAULT_DTYPE)}
         except ValueError as e:
             # Specifically catch ValueError which often indicates shape mismatch
-            logger.warning(f"AddNode [{self.name}]: Error adding signals (likely shape mismatch: {signal1.shape} vs {signal2.shape}). Error: {e}")
+            logger.warning(
+                f"AddNode [{self.name}]: Error adding signals (likely shape mismatch: {signal1.shape} vs {signal2.shape}). Error: {e}"
+            )
             return {"out": None}
         except Exception as e:
             logger.error(f"AddNode [{self.name}]: Unexpected error adding signals: {e}", exc_info=True)
             return {"out": None}
+
 
 class GainBiasNode(Node):
     NODE_TYPE = "Gain & Bias"
@@ -155,6 +168,6 @@ class GainBiasNode(Node):
 
         gain = float(gain_input) if gain_input is not None else 1.0
         bias = float(bias_input) if bias_input is not None else 0.0
-        
+
         result = (signal * gain) + bias
         return {"out": result.astype(DEFAULT_DTYPE)}

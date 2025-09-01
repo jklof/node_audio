@@ -1,12 +1,17 @@
 import logging
 from PySide6.QtWidgets import (
-    QGraphicsItem, QGraphicsObject, QGraphicsTextItem, QGraphicsPathItem,
-    QStyleOptionGraphicsItem, QWidget, QMenu, QGraphicsProxyWidget,
-    QInputDialog, QLineEdit
+    QGraphicsItem,
+    QGraphicsObject,
+    QGraphicsTextItem,
+    QGraphicsPathItem,
+    QStyleOptionGraphicsItem,
+    QWidget,
+    QMenu,
+    QGraphicsProxyWidget,
+    QInputDialog,
+    QLineEdit,
 )
-from PySide6.QtGui import (
-    QPainter, QPen, QColor, QBrush, QPainterPath, QPainterPathStroker, QAction
-)
+from PySide6.QtGui import QPainter, QPen, QColor, QBrush, QPainterPath, QPainterPathStroker, QAction
 from PySide6.QtCore import Qt, QRectF, QPointF, Signal, Slot, QTimer
 from typing import Any
 
@@ -23,8 +28,10 @@ HEADER_HEIGHT = 20
 SOCKET_Y_SPACING = 25
 NODE_CONTENT_PADDING = 5
 
+
 class SocketItem(QGraphicsObject):
     """Visual representation of a socket in the scene."""
+
     positionChanged = Signal(QPointF)
 
     def __init__(self, socket_logic, parent_item):
@@ -38,7 +45,7 @@ class SocketItem(QGraphicsObject):
         # Normalize None to Any for the color lookup
         if socket_type is None:
             socket_type = Any
-        
+
         # Get the color from the central map based on the socket's logical data type.
         color = SOCKET_TYPE_COLORS.get(socket_type, SOCKET_TYPE_COLORS["default"])
 
@@ -49,7 +56,7 @@ class SocketItem(QGraphicsObject):
         # --- END MODIFICATION ---
 
     def boundingRect(self):
-        return QRectF(-SOCKET_SIZE/2, -SOCKET_SIZE/2, SOCKET_SIZE, SOCKET_SIZE)
+        return QRectF(-SOCKET_SIZE / 2, -SOCKET_SIZE / 2, SOCKET_SIZE, SOCKET_SIZE)
 
     def paint(self, painter: QPainter, option, widget):
         painter.setPen(self._pen)
@@ -74,11 +81,13 @@ class SocketItem(QGraphicsObject):
     def get_scene_position(self) -> QPointF:
         return self.scenePos()
 
+
 class NodeItem(QGraphicsObject):
     """
     Visual representation of a node in the scene.
     Manages its geometry centrally and adapts to its content.
     """
+
     def __init__(self, node_logic, width=NODE_WIDTH):
         super().__init__()
         self.node_logic = node_logic
@@ -89,7 +98,7 @@ class NodeItem(QGraphicsObject):
         self._socket_items = {}
         self._socket_labels = {}
         self._content_proxy = None
-        self._is_updating_geometry = False # Re-entrancy guard for update_geometry
+        self._is_updating_geometry = False  # Re-entrancy guard for update_geometry
         self._processing_percentage = 0.0
         self._show_processing_bar = False
 
@@ -102,8 +111,8 @@ class NodeItem(QGraphicsObject):
         # --- Create UI Children ---
         self.title_item = QGraphicsTextItem(self.node_logic.name, self)
         self.title_item.setDefaultTextColor(Qt.GlobalColor.white)
-        
-        #Create socket and label items ---
+
+        # Create socket and label items ---
         for logic_socket in self.node_logic.inputs.values():
             self._socket_items[logic_socket] = SocketItem(logic_socket, self)
             label = QGraphicsTextItem(logic_socket.name, self)
@@ -115,7 +124,7 @@ class NodeItem(QGraphicsObject):
             label = QGraphicsTextItem(logic_socket.name, self)
             label.setDefaultTextColor(Qt.GlobalColor.lightGray)
             self._socket_labels[logic_socket] = label
-        
+
         self.update_geometry()
         self.setPos(QPointF(*node_logic.pos))
 
@@ -130,18 +139,18 @@ class NodeItem(QGraphicsObject):
                 # Disconnect the geometry update signal from the old proxy
                 self._content_proxy.geometryChanged.disconnect(self._schedule_geometry_update)
             except (TypeError, RuntimeError):
-                pass # Ignore if it was already disconnected
+                pass  # Ignore if it was already disconnected
             if self._content_proxy.scene():
                 self.scene().removeItem(self._content_proxy)
             self._content_proxy.deleteLater()
             self._content_proxy = None
-        
+
         if widget:
             self._content_proxy = QGraphicsProxyWidget(self)
             self._content_proxy.setWidget(widget)
             # Connect the new proxy's signal to the scheduler slot
             self._content_proxy.geometryChanged.connect(self._schedule_geometry_update)
-        
+
         # Trigger a full geometry update when the content widget is set/cleared
         self.update_geometry()
 
@@ -174,13 +183,13 @@ class NodeItem(QGraphicsObject):
         if self._is_updating_geometry:
             return
         self._is_updating_geometry = True
-        
-        try: # Use a try...finally block to ensure the guard is always released
+
+        try:  # Use a try...finally block to ensure the guard is always released
             self.prepareGeometryChange()
 
             # --- Calculate Required Width ---
             title_width = self.title_item.boundingRect().width()
-            
+
             max_input_label_width = 0
             for socket in self.node_logic.inputs.values():
                 label = self._socket_labels[socket]
@@ -190,10 +199,9 @@ class NodeItem(QGraphicsObject):
             for socket in self.node_logic.outputs.values():
                 label = self._socket_labels[socket]
                 max_output_label_width = max(max_output_label_width, label.boundingRect().width())
-            
+
             sockets_and_labels_width = (
-                SOCKET_SIZE + max_input_label_width + max_output_label_width +
-                (NODE_CONTENT_PADDING * 4)
+                SOCKET_SIZE + max_input_label_width + max_output_label_width + (NODE_CONTENT_PADDING * 4)
             )
 
             content_width = 0
@@ -204,7 +212,7 @@ class NodeItem(QGraphicsObject):
                 NODE_WIDTH,
                 title_width + NODE_CONTENT_PADDING * 2,
                 content_width + NODE_CONTENT_PADDING * 2,
-                sockets_and_labels_width
+                sockets_and_labels_width,
             )
 
             # --- Position Sockets, Labels, and Title ---
@@ -217,13 +225,16 @@ class NodeItem(QGraphicsObject):
                 socket_item.setPos(0, y_in)
                 label_item.setPos(SOCKET_SIZE, y_in - label_item.boundingRect().height() / 2)
                 y_in += SOCKET_Y_SPACING
-            
+
             y_out = HEADER_HEIGHT + SOCKET_Y_SPACING / 2
             for logic_socket in self.node_logic.outputs.values():
                 socket_item = self._socket_items[logic_socket]
                 label_item = self._socket_labels[logic_socket]
                 socket_item.setPos(self._width, y_out)
-                label_item.setPos(self._width - SOCKET_SIZE - label_item.boundingRect().width(), y_out - label_item.boundingRect().height() / 2)
+                label_item.setPos(
+                    self._width - SOCKET_SIZE - label_item.boundingRect().width(),
+                    y_out - label_item.boundingRect().height() / 2,
+                )
                 y_out += SOCKET_Y_SPACING
 
             # Determine height needed for sockets area
@@ -240,22 +251,22 @@ class NodeItem(QGraphicsObject):
             else:
                 self._height = sockets_area_height + NODE_CONTENT_PADDING
 
-            self.update() # Trigger a repaint
+            self.update()  # Trigger a repaint
         finally:
-            self._is_updating_geometry = False # Release the guard
+            self._is_updating_geometry = False  # Release the guard
 
     def boundingRect(self):
         # Adjust bounding rect to include sockets protruding from the sides
-        return QRectF(0, 0, self._width, self._height).adjusted(-SOCKET_SIZE/2, 0, SOCKET_SIZE/2, 0)
+        return QRectF(0, 0, self._width, self._height).adjusted(-SOCKET_SIZE / 2, 0, SOCKET_SIZE / 2, 0)
 
     def paint(self, painter: QPainter, option, widget=None):
         body_rect = QRectF(0, 0, self._width, self._height)
-        
+
         # Main body
         painter.setBrush(QColor(50, 50, 50, 200))
         painter.setPen(Qt.PenStyle.NoPen)
         painter.drawRoundedRect(body_rect, 5, 5)
-        
+
         # Header with rounded top corners
         path = QPainterPath()
         path.moveTo(0, 5)
@@ -267,24 +278,23 @@ class NodeItem(QGraphicsObject):
         path.closeSubpath()
         painter.setBrush(QColor(70, 70, 70, 220))
         painter.drawPath(path)
-        
+
         # Processing time percentage bar
         if self._show_processing_bar and self._processing_percentage > 0:
             bar_width = self._width * (self._processing_percentage / 100.0)
-            
+
             # Determine color based on percentage (green -> yellow -> red)
             if self._processing_percentage < 50:
-                color = QColor(0, 255, 0, 100) # Green, semi-transparent
+                color = QColor(0, 255, 0, 100)  # Green, semi-transparent
             elif self._processing_percentage < 85:
-                color = QColor(255, 255, 0, 100) # Yellow, semi-transparent
+                color = QColor(255, 255, 0, 100)  # Yellow, semi-transparent
             else:
-                color = QColor(255, 0, 0, 120) # Red, more opaque
-            
+                color = QColor(255, 0, 0, 120)  # Red, more opaque
+
             bar_rect = QRectF(0, 0, bar_width, HEADER_HEIGHT)
             painter.setBrush(color)
             painter.setPen(Qt.PenStyle.NoPen)
             painter.drawRect(bar_rect)
-
 
         # Selection outline
         if self.isSelected():
@@ -308,7 +318,7 @@ class NodeItem(QGraphicsObject):
             if self.node_logic:
                 self.node_logic.pos = (value.x(), value.y())
         return super().itemChange(change, value)
-    
+
     @Slot()
     def updateFromLogic(self):
         # Explicitly check and update the title text from the logic object
@@ -320,7 +330,7 @@ class NodeItem(QGraphicsObject):
     def contextMenuEvent(self, event):
         menu = QMenu()
 
-        #Check for the interface and add clock source option
+        # Check for the interface and add clock source option
         if isinstance(self.node_logic, IClockProvider):
             action = menu.addAction("Set as Clock Source")
             action.setCheckable(True)
@@ -329,31 +339,30 @@ class NodeItem(QGraphicsObject):
 
         # rename action
         rename_action = menu.addAction("Rename Node")
+
         def request_rename():
             # Use the view as the parent for the dialog for proper modality
             view = self.scene().views()[0] if self.scene().views() else None
             current_name = self.node_logic.name
             new_name, ok = QInputDialog.getText(
-                view,
-                "Rename Node",
-                "Enter new name:",
-                QLineEdit.EchoMode.Normal,
-                current_name
+                view, "Rename Node", "Enter new name:", QLineEdit.EchoMode.Normal, current_name
             )
             if ok and new_name and new_name != current_name:
                 self.scene().nodeRenameRequested.emit(self.node_logic.id, new_name)
+
         rename_action.triggered.connect(request_rename)
 
         menu.addSeparator()
-        #delete action
+        # delete action
         delete_action = menu.addAction("Delete Node")
         delete_action.triggered.connect(lambda: self.scene().parent().nodeDeletionRequested.emit(self.node_logic.id))
-    
+
         menu.exec(event.screenPos())
 
 
 class ConnectionItem(QGraphicsPathItem):
     """Visual representation of a connection line."""
+
     def __init__(self, conn_logic, start_socket, end_socket, parent=None):
         super().__init__(parent)
         self.connection_logic = conn_logic
@@ -370,16 +379,20 @@ class ConnectionItem(QGraphicsPathItem):
         self.start_socket.positionChanged.connect(self.update_path)
         self.end_socket.positionChanged.connect(self.update_path)
         self.update_path()
-        
+
     def remove(self):
         """Disconnects signals to prevent errors on deletion."""
         if self.start_socket:
-            try: self.start_socket.positionChanged.disconnect(self.update_path)
-            except (TypeError, RuntimeError): pass
+            try:
+                self.start_socket.positionChanged.disconnect(self.update_path)
+            except (TypeError, RuntimeError):
+                pass
         if self.end_socket:
-            try: self.end_socket.positionChanged.disconnect(self.update_path)
-            except (TypeError, RuntimeError): pass
-        
+            try:
+                self.end_socket.positionChanged.disconnect(self.update_path)
+            except (TypeError, RuntimeError):
+                pass
+
     @Slot()
     def update_path(self):
         if not self.start_socket or not self.end_socket:
@@ -392,7 +405,7 @@ class ConnectionItem(QGraphicsPathItem):
         ctrl2 = QPointF(end_pos.x() - abs(dx) * 0.5, end_pos.y())
         path.cubicTo(ctrl1, ctrl2, end_pos)
         self.setPath(path)
-        
+
     def paint(self, painter: QPainter, option, widget=None):
         if self.isSelected():
             painter.setPen(self._pen_selected)
@@ -401,25 +414,25 @@ class ConnectionItem(QGraphicsPathItem):
         else:
             painter.setPen(self._pen)
         painter.drawPath(self.path())
-        
+
     def shape(self) -> QPainterPath:
         stroker = QPainterPathStroker()
         stroker.setWidth(10)
         return stroker.createStroke(self.path())
-        
+
     def hoverEnterEvent(self, event):
         self._is_hovered = True
         self.update()
-        
+
     def hoverLeaveEvent(self, event):
         self._is_hovered = False
         self.update()
-        
+
     def contextMenuEvent(self, event):
         menu = QMenu()
         delete_action = menu.addAction("Delete Connection")
         view = self.scene().parent() if self.scene() else None
-        if view and hasattr(view, 'connectionDeletionRequested'):
+        if view and hasattr(view, "connectionDeletionRequested"):
             delete_action.triggered.connect(lambda: view.connectionDeletionRequested.emit(self.connection_logic.id))
         menu.exec(event.screenPos())
         event.accept()

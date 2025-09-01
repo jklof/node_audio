@@ -24,7 +24,9 @@ class LFONodeItem(NodeItem):
 
         self.container_widget = QWidget()
         layout = QVBoxLayout(self.container_widget)
-        layout.setContentsMargins(NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING)
+        layout.setContentsMargins(
+            NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING
+        )
         layout.setSpacing(4)
 
         self.freq_label = QLabel(f"Frequency: {node_logic.get_frequency_hz():.2f} Hz")
@@ -85,7 +87,7 @@ class LFONode(Node):
 
     def __init__(self, name, node_id=None):
         super().__init__(name, node_id)
-        
+
         self.add_input("sync_control", data_type=bool)
         self.add_output("sine_out", data_type=float)
         self.add_output("square_out", data_type=float)
@@ -123,7 +125,7 @@ class LFONode(Node):
         # phase increment calculation.
         # The phase must advance by the number of samples in one processing block (tick).
         phase_increment = (freq / self.samplerate) * self.blocksize
-        
+
         # --- sync trigger ---
         if sync_trigger is not None and sync_trigger:
             self._phase = 0.0
@@ -137,11 +139,7 @@ class LFONode(Node):
         square_val = 1.0 if phase < 0.5 else -1.0
         saw_val = (2.0 * phase) - 1.0  # Ramps from -1.0 to 1.0
 
-        return {
-            "sine_out": sine_val,
-            "square_out": square_val,
-            "saw_out": saw_val
-        }
+        return {"sine_out": sine_val, "square_out": square_val, "saw_out": saw_val}
 
     def serialize_extra(self):
         with self.lock:

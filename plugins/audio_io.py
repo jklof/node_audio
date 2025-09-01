@@ -9,6 +9,7 @@ from constants import DEFAULT_SAMPLERATE, DEFAULT_BLOCKSIZE, DEFAULT_DTYPE, DEFA
 
 logger = logging.getLogger(__name__)
 
+
 class AudioOutNode(Node, IClockProvider):
     NODE_TYPE = "Audio Output"
     CATEGORY = "Input / Output"
@@ -37,7 +38,9 @@ class AudioOutNode(Node, IClockProvider):
                     if data.shape == outdata.shape:
                         outdata[:] = data
                     else:
-                        logger.warning(f"Shape mismatch in audio callback. Expected {outdata.shape}, got {data.shape}. Outputting silence.")
+                        logger.warning(
+                            f"Shape mismatch in audio callback. Expected {outdata.shape}, got {data.shape}. Outputting silence."
+                        )
                         outdata.fill(0)
                 else:
                     logger.warning("Audio buffer underrun!")
@@ -52,8 +55,8 @@ class AudioOutNode(Node, IClockProvider):
         This is called for all AudioSinkNodes when the graph starts processing.
         """
         if self._stream is not None:
-            return # Already running
-            
+            return  # Already running
+
         logger.info(f"[{self.name}] Opening audio stream...")
         with self._lock:
             self._buffer.clear()
@@ -67,8 +70,8 @@ class AudioOutNode(Node, IClockProvider):
                 blocksize=DEFAULT_BLOCKSIZE,
                 channels=DEFAULT_CHANNELS,
                 dtype=DEFAULT_DTYPE,
-                latency='low',
-                callback=self._audio_callback
+                latency="low",
+                callback=self._audio_callback,
             )
             self._stream.start()
             logger.info(f"[{self.name}] Audio stream started successfully.")
@@ -87,8 +90,8 @@ class AudioOutNode(Node, IClockProvider):
                 logger.error(f"[{self.name}] Error closing audio stream: {e}", exc_info=True)
             finally:
                 self._stream = None
-        
-        self._tick_callback = None # Ensure callback is cleared
+
+        self._tick_callback = None  # Ensure callback is cleared
         with self._lock:
             self._buffer.clear()
         logger.info(f"[{self.name}] Audio stream stopped.")
@@ -97,7 +100,7 @@ class AudioOutNode(Node, IClockProvider):
     def start_clock(self, tick_callback: callable):
         """Promotes this node to be the ACTIVE clock source."""
         logger.info(f"[{self.name}] Promoting to ACTIVE clock source.")
-        self.start() # Ensure the stream is running
+        self.start()  # Ensure the stream is running
         self._tick_callback = tick_callback
 
     def stop_clock(self):
@@ -109,7 +112,7 @@ class AudioOutNode(Node, IClockProvider):
     def process(self, input_data):
         """Receives audio from the graph and adds it to the buffer."""
         signal_block = input_data.get("in")
-        
+
         if signal_block is None:
             signal_block = np.zeros((DEFAULT_BLOCKSIZE, DEFAULT_CHANNELS), dtype=DEFAULT_DTYPE)
 
@@ -119,7 +122,7 @@ class AudioOutNode(Node, IClockProvider):
                 processed_block = signal_block
             elif signal_block.ndim == 1 and signal_block.shape[0] == DEFAULT_BLOCKSIZE:
                 processed_block = np.column_stack([signal_block, signal_block])
-            
+
         if processed_block is not None:
             with self._lock:
                 self._buffer.append(processed_block.astype(DEFAULT_DTYPE))

@@ -24,6 +24,7 @@ MIN_DB_DISPLAY = -70.0
 MAX_DB_DISPLAY = 6.0
 MIN_FREQ_DISPLAY = 20.0
 
+
 # ==============================================================================
 # 1. Custom Drawing Widget: SpectrogramWidget
 # ==============================================================================
@@ -41,7 +42,8 @@ class SpectrogramWidget(QWidget):
         self._fft_size = 1024
         self._freq_bins: np.ndarray | None = None
         self._db_range = MAX_DB_DISPLAY - MIN_DB_DISPLAY
-        if self._db_range <= 0: self._db_range = 1.0
+        if self._db_range <= 0:
+            self._db_range = 1.0
         self._recalculate_frequency_bins()
 
     def sizeHint(self) -> QSize:
@@ -49,10 +51,9 @@ class SpectrogramWidget(QWidget):
 
     def _create_colormap(self) -> np.ndarray:
         size = 256
-        c = np.array([
-             [68, 1, 84, 255], [59, 82, 139, 255], [33, 145, 140, 255],
-             [94, 201, 98, 255], [253, 231, 37, 255]
-        ])
+        c = np.array(
+            [[68, 1, 84, 255], [59, 82, 139, 255], [33, 145, 140, 255], [94, 201, 98, 255], [253, 231, 37, 255]]
+        )
         indices = np.linspace(0, 1, len(c))
         map_indices = np.linspace(0, 1, size)
         r = np.interp(map_indices, indices, c[:, 0])
@@ -73,7 +74,8 @@ class SpectrogramWidget(QWidget):
             self._sample_rate, params_changed = sample_rate, True
         if self._fft_size != fft_size:
             self._fft_size, params_changed = fft_size, True
-        if params_changed: self._recalculate_frequency_bins()
+        if params_changed:
+            self._recalculate_frequency_bins()
 
         if self._image is None or self._image.size() != self.size():
             self._image = QImage(self.size(), QImage.Format.Format_RGB32)
@@ -102,36 +104,41 @@ class SpectrogramWidget(QWidget):
 
     def paintEvent(self, event: QPaintEvent):
         painter = QPainter(self)
-        if self._image: painter.drawImage(0, 0, self._image)
+        if self._image:
+            painter.drawImage(0, 0, self._image)
 
         painter.setPen(QColor(200, 200, 200))
         painter.setFont(self._font)
         fm = QFontMetrics(self._font)
         h, nyquist = self.height(), self._sample_rate / 2.0
-        if nyquist <= 0: return
+        if nyquist <= 0:
+            return
 
         num_labels = max(2, h // 40)
         for i in range(num_labels + 1):
             freq_ratio = i / num_labels
             freq_hz = freq_ratio * nyquist
-            if freq_hz < MIN_FREQ_DISPLAY: continue
+            if freq_hz < MIN_FREQ_DISPLAY:
+                continue
             y = np.clip(h - int(freq_ratio * h), fm.height(), h - 2)
             text = f"{freq_hz / 1000:.1f}k" if freq_hz >= 1000 else f"{freq_hz:.0f}"
             painter.drawText(2, y, text)
         painter.end()
+
 
 # ==============================================================================
 # 2. Custom NodeItem for the Spectrogram Visualizer
 # ==============================================================================
 class SpectrogramVisualizerNodeItem(NodeItem):
     """Custom NodeItem that embeds the SpectrogramWidget."""
+
     # --- FIX 1: DEFINE A SUITABLE WIDTH FOR THIS NODE ---
     NODE_SPECIFIC_WIDTH = 270
 
     def __init__(self, node_logic: "SpectrogramVisualizerNode"):
         # --- FIX 2: PASS THE CUSTOM WIDTH TO THE SUPERCLASS CONSTRUCTOR ---
         super().__init__(node_logic, width=self.NODE_SPECIFIC_WIDTH)
-        
+
         self.display_widget = SpectrogramWidget()
         self.setContentWidget(self.display_widget)
         node_logic.newDataReady.connect(self._update_visualization)
@@ -139,11 +146,12 @@ class SpectrogramVisualizerNodeItem(NodeItem):
     @Slot(object, int, int)
     def _update_visualization(self, fft_frame: np.ndarray, sample_rate: int, fft_size: int):
         self.display_widget.update_data(fft_frame, sample_rate, fft_size)
-        
+
     @Slot()
     def updateFromLogic(self):
         self.display_widget.update_data(None, 44100, 1024)
         super().updateFromLogic()
+
 
 # ==============================================================================
 # 3. Node Logic Class: SpectrogramVisualizerNode
@@ -156,13 +164,16 @@ class SpectrogramVisualizerNode(Node):
 
     class WrappedSignal(QObject):
         _s = Signal(object, int, int)
+
         def emit(self, fft_frame: np.ndarray | None, sample_rate: int, fft_size: int):
             try:
                 data_copy = fft_frame.copy() if fft_frame is not None else None
                 self._s.emit(data_copy, sample_rate, fft_size)
             except RuntimeError as e:
                 logger.debug(f"SpectrogramVisualizerNode WrappedSignal: Error emitting signal: {e}")
-        def connect(self, slot_func: Slot): self._s.connect(slot_func)
+
+        def connect(self, slot_func: Slot):
+            self._s.connect(slot_func)
 
     def __init__(self, name: str, node_id: str | None = None):
         super().__init__(name, node_id)
@@ -172,15 +183,18 @@ class SpectrogramVisualizerNode(Node):
 
     def process(self, input_data: dict) -> dict:
         current_time = time.monotonic()
-        if current_time < self._next_ui_update_time: return {}
+        if current_time < self._next_ui_update_time:
+            return {}
         self._next_ui_update_time = current_time + UI_UPDATE_INTERVAL_S
-        
+
         frame = input_data.get("spectral_frame_in")
-        if not isinstance(frame, SpectralFrame): return {}
+        if not isinstance(frame, SpectralFrame):
+            return {}
 
         fft_data, sample_rate, fft_size = frame.data, frame.sample_rate, frame.fft_size
-        if not np.iscomplexobj(fft_data) or fft_data.shape[1] == 0: return {}
-            
+        if not np.iscomplexobj(fft_data) or fft_data.shape[1] == 0:
+            return {}
+
         mono_fft_frame = np.mean(fft_data, axis=1)
         self.newDataReady.emit(mono_fft_frame, sample_rate, fft_size)
         return {}

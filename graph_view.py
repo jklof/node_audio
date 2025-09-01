@@ -12,11 +12,13 @@ from graph_scene import NodeGraphScene
 
 logger = logging.getLogger(__name__)
 
+
 class NodeGraphWidget(QGraphicsView):
     """The main view widget for the node graph, handling user interactions."""
+
     connectionRequested = Signal(object, object)  # start_socket_logic, end_socket_logic
-    nodeDeletionRequested = Signal(str) # node_id
-    connectionDeletionRequested = Signal(str) # connection_id
+    nodeDeletionRequested = Signal(str)  # node_id
+    connectionDeletionRequested = Signal(str)  # connection_id
 
     def __init__(self, graph_logic: NodeGraph, parent=None):
         super().__init__(parent)
@@ -83,7 +85,6 @@ class NodeGraphWidget(QGraphicsView):
         painter.setPen(pen_coarse)
         painter.drawLines(lines_coarse)
 
-
     def mousePressEvent(self, event):
         item = self.itemAt(event.pos())
         if event.button() == Qt.MouseButton.LeftButton and isinstance(item, SocketItem):
@@ -109,7 +110,7 @@ class NodeGraphWidget(QGraphicsView):
             event.accept()
         else:
             super().mouseMoveEvent(event)
-    
+
     def mouseReleaseEvent(self, event):
         if self._is_panning and event.button() == Qt.MouseButton.MiddleButton:
             self._is_panning = False
@@ -162,7 +163,6 @@ class NodeGraphWidget(QGraphicsView):
             logger.info(f"View: Requesting deletion of node {node_id[:4]}")
             self.nodeDeletionRequested.emit(node_id)
 
-
     def _start_connection_draw(self, start_socket: SocketItem):
         self._start_socket_item = start_socket
         self._temp_connection_line = QGraphicsLineItem()
@@ -185,7 +185,7 @@ class NodeGraphWidget(QGraphicsView):
         end_item = self.itemAt(view_pos)
         start_item = self._start_socket_item
         self._start_socket_item = None
-        
+
         if isinstance(end_item, SocketItem) and start_item is not None and end_item != start_item:
             start_logic = start_item.socket_logic
             end_logic = end_item.socket_logic
@@ -194,11 +194,13 @@ class NodeGraphWidget(QGraphicsView):
             start_type = start_logic.data_type if start_logic.data_type is not None else Any
             end_type = end_logic.data_type if end_logic.data_type is not None else Any
 
-            is_compatible = (start_type is Any or end_type is Any or start_type == end_type)
+            is_compatible = start_type is Any or end_type is Any or start_type == end_type
 
             if not is_compatible:
-                logger.warning(f"Connection rejected: Type mismatch between {start_logic} ({start_type.__name__}) and {end_logic} ({end_type.__name__}).")
-                return # Abort the connection attempt
+                logger.warning(
+                    f"Connection rejected: Type mismatch between {start_logic} ({start_type.__name__}) and {end_logic} ({end_type.__name__})."
+                )
+                return  # Abort the connection attempt
             # --- END NEW ---
 
             if start_logic.is_input and not end_logic.is_input:
@@ -217,12 +219,12 @@ class NodeGraphWidget(QGraphicsView):
     def zoom_in(self):
         """Zooms in the view."""
         self.scale(1.15, 1.15)
-        
+
     @Slot()
     def zoom_out(self):
         """Zooms out the view."""
         self.scale(1 / 1.15, 1 / 1.15)
-        
+
     @Slot()
     def zoom_to_fit(self):
         """
@@ -248,9 +250,9 @@ class NodeGraphWidget(QGraphicsView):
 
         if not total_rect.isValid():
             return
-            
+
         # Add a margin for better visibility
         margin = 50
         total_rect.adjust(-margin, -margin, margin, margin)
-        
+
         self.fitInView(total_rect, Qt.AspectRatioMode.KeepAspectRatio)

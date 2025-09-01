@@ -12,16 +12,18 @@ from plugin_loader import registry
 
 logger = logging.getLogger(__name__)
 
+
 class NodeGraphScene(QGraphicsScene):
     """
     Manages the visual representation of the node graph. It requests logical
     changes from the controller but does not modify the graph logic directly.
     """
-    nodeCreationRequested = Signal(type, str, tuple) # class, name, (x, y)
-    nodeRenameRequested = Signal(str, str) # node_id, new_name
-    itemDeletionRequested = Signal(str) # For nodes, handled by view
-    clockSourceSetRequested = Signal(str) # node_id
-    
+
+    nodeCreationRequested = Signal(type, str, tuple)  # class, name, (x, y)
+    nodeRenameRequested = Signal(str, str)  # node_id, new_name
+    itemDeletionRequested = Signal(str)  # For nodes, handled by view
+    clockSourceSetRequested = Signal(str)  # node_id
+
     def __init__(self, graph_logic: NodeGraph, parent=None):
         super().__init__(parent)
         self.graph_logic = graph_logic
@@ -39,10 +41,9 @@ class NodeGraphScene(QGraphicsScene):
             self.removeItem(conn_item)
         for node_item in list(self.node_items.values()):
             self.removeItem(node_item)
-            
+
         self.node_items.clear()
         self.connection_items.clear()
-
 
     @Slot(dict)
     def sync_from_graph(self, graph_snapshot: dict):
@@ -58,14 +59,13 @@ class NodeGraphScene(QGraphicsScene):
         connections_snapshot = graph_snapshot.get("connections", {})
         self.current_clock_id = graph_snapshot.get("selected_clock_node_id")
 
-
         # --- RECONCILE NODES ---
 
         # 2. Identify and remove deleted nodes from the UI
         snapshot_node_ids = set(nodes_snapshot.keys())
         current_node_ids = set(self.node_items.keys())
         ids_to_remove = current_node_ids - snapshot_node_ids
-        
+
         for node_id in ids_to_remove:
             node_item = self.node_items.pop(node_id)
             self.removeItem(node_item)
@@ -99,7 +99,7 @@ class NodeGraphScene(QGraphicsScene):
 
         for conn_id in conn_ids_to_remove:
             conn_item = self.connection_items.pop(conn_id)
-            conn_item.remove() # Disconnect signals
+            conn_item.remove()  # Disconnect signals
             self.removeItem(conn_item)
             logger.debug(f"UI Sync: Removed connection item {conn_id[:4]}")
 
@@ -120,7 +120,6 @@ class NodeGraphScene(QGraphicsScene):
 
         logger.info("UI sync complete.")
 
-
     @Slot(dict)
     def on_node_stats_updated(self, stats: dict):
         """Receives processing stats from the engine and updates relevant node items."""
@@ -129,7 +128,7 @@ class NodeGraphScene(QGraphicsScene):
             for node_item in self.node_items.values():
                 node_item.set_processing_percentage(0.0)
             return
-        
+
         # Update each node with its new percentage
         for node_id, percentage in stats.items():
             if node_id in self.node_items:
@@ -142,7 +141,6 @@ class NodeGraphScene(QGraphicsScene):
         for node_item in self.node_items.values():
             node_item.set_processing_bar_visible(visible)
 
-
     def contextMenuEvent(self, event):
         """Shows the node creation menu on right-click on the background."""
         item = self.itemAt(event.scenePos(), QTransform())
@@ -153,7 +151,7 @@ class NodeGraphScene(QGraphicsScene):
                 for node_type in registry.get_node_types_in_category(category):
                     action = category_menu.addAction(node_type)
                     action.setData(registry.get_node_class(node_type))
-            
+
             selected_action = menu.exec(event.screenPos())
             if selected_action and selected_action.data():
                 node_class = selected_action.data()

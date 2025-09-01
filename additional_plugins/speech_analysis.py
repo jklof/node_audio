@@ -8,6 +8,7 @@ from typing import Dict, Optional
 # It can be installed via: pip install librosa
 try:
     import librosa
+
     LIBROSA_AVAILABLE = True
 except ImportError:
     LIBROSA_AVAILABLE = False
@@ -28,21 +29,25 @@ logger = logging.getLogger(__name__)
 # Use a larger frame for analysis to accurately capture low frequencies.
 REQUIRED_FRAME_LENGTH = 2048
 UI_UPDATE_INTERVAL_S = 0.1
-VAD_ENERGY_THRESHOLD = 1e-6 # Energy threshold for voice activity detection
-F0_SMOOTHING_ALPHA = 0.3    # Smoothing factor for the F0 output
+VAD_ENERGY_THRESHOLD = 1e-6  # Energy threshold for voice activity detection
+F0_SMOOTHING_ALPHA = 0.3  # Smoothing factor for the F0 output
+
 
 # ==============================================================================
 # 1. State Emitter for UI Communication
 # ==============================================================================
 class F0EstimatorEmitter(QObject):
     """A dedicated QObject to safely emit signals from the logic to the UI thread."""
+
     stateUpdated = Signal(dict)
+
 
 # ==============================================================================
 # 2. Custom UI Class (F0EstimatorNodeItem) - UPDATED
 # ==============================================================================
 class F0EstimatorNodeItem(NodeItem):
     """UPDATED UI for the F0 Estimator, with a three-method selector."""
+
     NODE_SPECIFIC_WIDTH = 200
 
     def __init__(self, node_logic: "F0EstimatorNode"):
@@ -50,7 +55,9 @@ class F0EstimatorNodeItem(NodeItem):
 
         self.container_widget = QWidget()
         layout = QVBoxLayout(self.container_widget)
-        layout.setContentsMargins(NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING)
+        layout.setContentsMargins(
+            NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING
+        )
         layout.setSpacing(5)
 
         # --- UPDATED: Method Selection Dropdown with three options ---
@@ -93,8 +100,9 @@ class F0EstimatorNodeItem(NodeItem):
         method = state.get("method", "pyin")
         with QSignalBlocker(self.method_combo):
             index = self.method_combo.findData(method)
-            if index != -1: self.method_combo.setCurrentIndex(index)
-        
+            if index != -1:
+                self.method_combo.setCurrentIndex(index)
+
         # Disable librosa-dependent options if the library is not available
         for key in ["pyin", "yin"]:
             key_index = self.method_combo.findData(key)
@@ -103,16 +111,21 @@ class F0EstimatorNodeItem(NodeItem):
 
         f0 = state.get("f0_hz")
         confidence = state.get("confidence")
-        if f0 is not None and f0 > 0: self.f0_label.setText(f"F0: {f0:.2f} Hz")
-        else: self.f0_label.setText("F0: Unvoiced")
-        if confidence is not None: self.confidence_label.setText(f"Confidence: {confidence:.1%}")
-        else: self.confidence_label.setText("Confidence: ...")
+        if f0 is not None and f0 > 0:
+            self.f0_label.setText(f"F0: {f0:.2f} Hz")
+        else:
+            self.f0_label.setText("F0: Unvoiced")
+        if confidence is not None:
+            self.confidence_label.setText(f"Confidence: {confidence:.1%}")
+        else:
+            self.confidence_label.setText("Confidence: ...")
 
     @Slot()
     def updateFromLogic(self):
         state = self.node_logic.get_current_state_snapshot()
         self._on_state_updated(state)
         super().updateFromLogic()
+
 
 # ==============================================================================
 # 3. Node Logic Class (F0EstimatorNode) - COMBINED AND REFINED
@@ -125,6 +138,7 @@ class F0EstimatorNode(Node):
 
     class _PitchEngine:
         """Internal helper class encapsulating the custom autocorrelation algorithm."""
+
         def __init__(self, sample_rate, frame_length):
             self.sample_rate = sample_rate
             self.min_f0 = 80.0
@@ -143,21 +157,25 @@ class F0EstimatorNode(Node):
 
         def autocorrelation_f0(self, audio_block: np.ndarray) -> (float, float):
             processed = self._preprocess(audio_block)
-            autocorr = np.correlate(processed, processed, mode='full')
-            autocorr = autocorr[len(autocorr)//2:]
-            
-            if autocorr[0] > 0: autocorr /= autocorr[0]
-            else: return 0.0, 0.0
-            
-            search_range = autocorr[self.min_lag:min(self.max_lag, len(autocorr))]
-            if len(search_range) == 0: return 0.0, 0.0
-            
+            autocorr = np.correlate(processed, processed, mode="full")
+            autocorr = autocorr[len(autocorr) // 2 :]
+
+            if autocorr[0] > 0:
+                autocorr /= autocorr[0]
+            else:
+                return 0.0, 0.0
+
+            search_range = autocorr[self.min_lag : min(self.max_lag, len(autocorr))]
+            if len(search_range) == 0:
+                return 0.0, 0.0
+
             peak_idx = np.argmax(search_range)
             peak_value = search_range[peak_idx]
-            
+
             confidence = np.clip(peak_value / 0.8, 0.0, 1.0)
-            if peak_value < 0.3: return 0.0, confidence
-            
+            if peak_value < 0.3:
+                return 0.0, confidence
+
             lag = peak_idx + self.min_lag
             f0 = self.sample_rate / lag
             return f0, confidence
@@ -171,11 +189,11 @@ class F0EstimatorNode(Node):
         self.add_output("confidence", data_type=float)
 
         self._lock = threading.Lock()
-        self._method = 'pyin' if LIBROSA_AVAILABLE else 'autocorr'
+        self._method = "pyin" if LIBROSA_AVAILABLE else "autocorr"
         self._last_f0 = 0.0
         self._next_ui_update_time = 0
         self._buffer = np.array([], dtype=DEFAULT_DTYPE)
-        
+
         self._pitch_engine = self._PitchEngine(DEFAULT_SAMPLERATE, REQUIRED_FRAME_LENGTH)
 
     @Slot(str)
@@ -197,11 +215,13 @@ class F0EstimatorNode(Node):
             return {"f0_hz": 0.0, "confidence": 0.0}
 
         try:
-            if audio_in.ndim > 1: mono_signal = np.mean(audio_in, axis=1)
-            else: mono_signal = audio_in
+            if audio_in.ndim > 1:
+                mono_signal = np.mean(audio_in, axis=1)
+            else:
+                mono_signal = audio_in
             mono_signal = mono_signal.astype(np.float32)
 
-            energy = np.sum(mono_signal ** 2)
+            energy = np.sum(mono_signal**2)
             if energy < VAD_ENERGY_THRESHOLD:
                 self._last_f0 = 0.0
                 return {"f0_hz": 0.0, "confidence": 0.0}
@@ -215,20 +235,25 @@ class F0EstimatorNode(Node):
                 method = self._method
 
             raw_f0, confidence = 0.0, 0.0
-            if method == 'pyin' and LIBROSA_AVAILABLE:
+            if method == "pyin" and LIBROSA_AVAILABLE:
                 f0, _, voiced_probs = librosa.pyin(
-                    analysis_chunk, fmin=librosa.note_to_hz('C2'), fmax=librosa.note_to_hz('C7'),
-                    sr=DEFAULT_SAMPLERATE, frame_length=REQUIRED_FRAME_LENGTH, fill_na=None
+                    analysis_chunk,
+                    fmin=librosa.note_to_hz("C2"),
+                    fmax=librosa.note_to_hz("C7"),
+                    sr=DEFAULT_SAMPLERATE,
+                    frame_length=REQUIRED_FRAME_LENGTH,
+                    fill_na=None,
                 )
                 valid_f0 = f0[~np.isnan(f0)]
-                if len(valid_f0) > 0: raw_f0 = float(np.mean(valid_f0))
+                if len(valid_f0) > 0:
+                    raw_f0 = float(np.mean(valid_f0))
                 valid_probs = voiced_probs[~np.isnan(voiced_probs)]
-                if len(valid_probs) > 0: confidence = float(np.mean(valid_probs))
-            
-            elif method == 'yin' and LIBROSA_AVAILABLE:
+                if len(valid_probs) > 0:
+                    confidence = float(np.mean(valid_probs))
+
+            elif method == "yin" and LIBROSA_AVAILABLE:
                 f0 = librosa.yin(
-                    analysis_chunk, fmin=80, fmax=800, sr=DEFAULT_SAMPLERATE,
-                    frame_length=REQUIRED_FRAME_LENGTH
+                    analysis_chunk, fmin=80, fmax=800, sr=DEFAULT_SAMPLERATE, frame_length=REQUIRED_FRAME_LENGTH
                 )
                 f0_estimate = f0[0]
                 if not np.isnan(f0_estimate) and f0_estimate > 0:
@@ -237,8 +262,8 @@ class F0EstimatorNode(Node):
                 else:
                     raw_f0 = 0.0
                     confidence = 0.0
-            
-            else: # Fallback to autocorrelation
+
+            else:  # Fallback to autocorrelation
                 raw_f0, confidence = self._pitch_engine.autocorrelation_f0(analysis_chunk)
 
             with self._lock:
@@ -247,15 +272,13 @@ class F0EstimatorNode(Node):
                 else:
                     output_f0 = raw_f0
                 self._last_f0 = output_f0 if output_f0 > 0 else 0.0
-            
+
             output_confidence = confidence
 
             current_time = time.monotonic()
             if current_time >= self._next_ui_update_time:
                 self._next_ui_update_time = current_time + UI_UPDATE_INTERVAL_S
-                self.emitter.stateUpdated.emit({
-                    "method": method, "f0_hz": output_f0, "confidence": output_confidence
-                })
+                self.emitter.stateUpdated.emit({"method": method, "f0_hz": output_f0, "confidence": output_confidence})
 
         except Exception as e:
             logger.error(f"[{self.name}] Error during F0 estimation: {e}", exc_info=True)
@@ -278,7 +301,9 @@ class F0EstimatorNode(Node):
         self.emitter.stateUpdated.emit(state)
 
     def serialize_extra(self) -> dict:
-        with self._lock: return {"method": self._method}
+        with self._lock:
+            return {"method": self._method}
 
     def deserialize_extra(self, data: dict):
-        with self._lock: self._method = data.get("method", 'pyin')
+        with self._lock:
+            self._method = data.get("method", "pyin")

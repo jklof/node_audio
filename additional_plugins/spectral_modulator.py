@@ -15,11 +15,13 @@ from PySide6.QtWidgets import QWidget, QLabel, QSlider, QVBoxLayout
 # --- Logging ---
 logger = logging.getLogger(__name__)
 
+
 # ==============================================================================
 # 1. State Emitter for UI Communication
 # ==============================================================================
 class SpectralModulatorEmitter(QObject):
     stateUpdated = Signal(dict)
+
 
 # ==============================================================================
 # 2. Custom UI Class (SpectralModulatorNodeItem)
@@ -29,21 +31,23 @@ class SpectralModulatorNodeItem(NodeItem):
 
     def __init__(self, node_logic: "SpectralModulatorNode"):
         super().__init__(node_logic, width=self.NODE_SPECIFIC_WIDTH)
-        
+
         self.container_widget = QWidget()
         main_layout = QVBoxLayout(self.container_widget)
-        main_layout.setContentsMargins(NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING)
+        main_layout.setContentsMargins(
+            NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING
+        )
         main_layout.setSpacing(5)
 
         # --- Create Slider Controls ---
         self.rate_slider, self.rate_label = self._create_slider_control("Rate", 0.1, 10.0, "{:.2f} Hz")
         self.depth_slider, self.depth_label = self._create_slider_control("Depth", 0.0, 20.0, "{:.1f} ms")
         self.mix_slider, self.mix_label = self._create_slider_control("Mix", 0.0, 1.0, "{:.0%}")
-        
+
         for label, slider in [
             (self.rate_label, self.rate_slider),
             (self.depth_label, self.depth_slider),
-            (self.mix_label, self.mix_slider)
+            (self.mix_label, self.mix_slider),
         ]:
             main_layout.addWidget(label)
             main_layout.addWidget(slider)
@@ -55,7 +59,7 @@ class SpectralModulatorNodeItem(NodeItem):
         self.depth_slider.valueChanged.connect(self._on_depth_changed)
         self.mix_slider.valueChanged.connect(self._on_mix_changed)
         self.node_logic.emitter.stateUpdated.connect(self._on_state_updated)
-        
+
         self.updateFromLogic()
 
     def _create_slider_control(self, name: str, min_val: float, max_val: float, fmt: str) -> tuple[QSlider, QLabel]:
@@ -76,16 +80,19 @@ class SpectralModulatorNodeItem(NodeItem):
     def _map_logical_to_slider(self, slider: QSlider, value: float) -> int:
         min_val, max_val = slider.property("min_val"), slider.property("max_val")
         range_val = max_val - min_val
-        if range_val == 0: return 0
+        if range_val == 0:
+            return 0
         norm = (value - min_val) / range_val
         return int(np.clip(norm, 0.0, 1.0) * 1000.0)
-            
+
     @Slot()
     def _on_rate_changed(self):
         self.node_logic.set_rate(self._map_slider_to_logical(self.rate_slider))
+
     @Slot()
     def _on_depth_changed(self):
         self.node_logic.set_depth(self._map_slider_to_logical(self.depth_slider))
+
     @Slot()
     def _on_mix_changed(self):
         self.node_logic.set_mix(self._map_slider_to_logical(self.mix_slider))
@@ -97,13 +104,13 @@ class SpectralModulatorNodeItem(NodeItem):
             "depth": (self.depth_slider, self.depth_label),
             "mix": (self.mix_slider, self.mix_label),
         }
-        
+
         is_mod_ext = self.node_logic.inputs["mod_in"].connections
 
         for key, (slider, label) in sliders_map.items():
             value = state.get(key, slider.property("min_val"))
             is_param_ext = key in self.node_logic.inputs and self.node_logic.inputs[key].connections
-            
+
             if key == "rate":
                 slider.setEnabled(not is_mod_ext)
             else:
@@ -111,11 +118,11 @@ class SpectralModulatorNodeItem(NodeItem):
 
             with QSignalBlocker(slider):
                 slider.setValue(self._map_logical_to_slider(slider, value))
-            
+
             label_text = f"{slider.property('name')}: {slider.property('format').format(value)}"
 
             if (key == "rate" and is_mod_ext) or is_param_ext:
-                 label_text += " (ext)"
+                label_text += " (ext)"
 
             label.setText(label_text)
 
@@ -148,12 +155,12 @@ class SpectralModulatorNode(Node):
         self.add_output("spectral_frame_out", data_type=SpectralFrame)
 
         self._lock = threading.Lock()
-        
+
         # --- Internal State ---
         self._rate_hz: float = 1.5
         self._depth_ms: float = 5.0
         self._mix: float = 0.5
-        
+
         # --- DSP State ---
         self._lfo_phase: float = 0.0
 
@@ -167,7 +174,7 @@ class SpectralModulatorNode(Node):
                 state_to_emit = self._get_current_state_snapshot_locked()
         if state_to_emit:
             self.emitter.stateUpdated.emit(state_to_emit)
-            
+
     @Slot(float)
     def set_depth(self, value: float):
         state_to_emit = None
@@ -177,7 +184,7 @@ class SpectralModulatorNode(Node):
                 state_to_emit = self._get_current_state_snapshot_locked()
         if state_to_emit:
             self.emitter.stateUpdated.emit(state_to_emit)
-            
+
     @Slot(float)
     def set_mix(self, value: float):
         state_to_emit = None
@@ -207,18 +214,21 @@ class SpectralModulatorNode(Node):
             # --- Update state from parameter sockets if connected ---
             rate_socket = input_data.get("rate")
             if rate_socket is not None and self._rate_hz != rate_socket:
-                self._rate_hz = rate_socket; ui_update_needed = True
-            
+                self._rate_hz = rate_socket
+                ui_update_needed = True
+
             depth_socket = input_data.get("depth")
             if depth_socket is not None and self._depth_ms != depth_socket:
-                self._depth_ms = depth_socket; ui_update_needed = True
-                
+                self._depth_ms = depth_socket
+                ui_update_needed = True
+
             mix_socket = input_data.get("mix")
             if mix_socket is not None:
                 new_mix = np.clip(mix_socket, 0.0, 1.0)
                 if self._mix != new_mix:
-                    self._mix = new_mix; ui_update_needed = True
-            
+                    self._mix = new_mix
+                    ui_update_needed = True
+
             if ui_update_needed:
                 state_snapshot_to_emit = self._get_current_state_snapshot_locked()
 
@@ -239,7 +249,7 @@ class SpectralModulatorNode(Node):
             freqs = np.fft.rfftfreq(frame.fft_size, d=1.0 / frame.sample_rate)
             phase_shifts_rad = 2 * np.pi * freqs * delay_s
             phasor = np.exp(1j * phase_shifts_rad).astype(DEFAULT_COMPLEX_DTYPE)
-            
+
             wet_signal = frame.data * phasor[:, np.newaxis]
             output_fft = (frame.data * (1.0 - self._mix)) + (wet_signal * self._mix)
 
@@ -249,19 +259,21 @@ class SpectralModulatorNode(Node):
 
         output_frame = SpectralFrame(
             data=output_fft,
-            fft_size=frame.fft_size, hop_size=frame.hop_size,
-            window_size=frame.window_size, sample_rate=frame.sample_rate,
-            analysis_window=frame.analysis_window
+            fft_size=frame.fft_size,
+            hop_size=frame.hop_size,
+            window_size=frame.window_size,
+            sample_rate=frame.sample_rate,
+            analysis_window=frame.analysis_window,
         )
         return {"spectral_frame_out": output_frame}
 
     def start(self):
         with self._lock:
             self._lfo_phase = 0.0
-            
+
     def serialize_extra(self) -> dict:
         return self.get_current_state_snapshot()
-    
+
     def deserialize_extra(self, data: dict):
         with self._lock:
             self._rate_hz = data.get("rate", 1.5)

@@ -4,19 +4,18 @@ import numpy as np
 import threading
 import logging
 from node_system import Node
-from ui_elements import NodeItem, NODE_CONTENT_PADDING # <-- Added NODE_CONTENT_PADDING
+from ui_elements import NodeItem, NODE_CONTENT_PADDING  # <-- Added NODE_CONTENT_PADDING
 from constants import DEFAULT_DTYPE
 
-from PySide6.QtWidgets import (
-    QDoubleSpinBox, QVBoxLayout, QWidget, QDial, QSizePolicy, QLabel # <-- Added QLabel
-)
-from PySide6.QtCore import Qt, Slot, QSignalBlocker, Signal, QObject # <-- Added Signal, QObject
-from PySide6.QtGui import QFontMetrics # <-- Added QFontMetrics
+from PySide6.QtWidgets import QDoubleSpinBox, QVBoxLayout, QWidget, QDial, QSizePolicy, QLabel  # <-- Added QLabel
+from PySide6.QtCore import Qt, Slot, QSignalBlocker, Signal, QObject  # <-- Added Signal, QObject
+from PySide6.QtGui import QFontMetrics  # <-- Added QFontMetrics
 
 
 logger = logging.getLogger(__name__)
 
 EPSILON = 1e-9  # For safe division
+
 
 # ============================================================
 # UI for the ValueNode
@@ -55,6 +54,7 @@ class ValueNodeItem(NodeItem):
             self.spin_box.setValue(current_logic_value)
             self.spin_box.blockSignals(False)
         super().updateFromLogic()
+
 
 # ============================================================
 # UI for the DialNode
@@ -133,6 +133,7 @@ class ValueNode(Node):
     def deserialize_extra(self, data: dict):
         self.set_value(data.get("value", 0.0))
 
+
 # ============================================================
 # Logic for the DialNode (inherits ValueNode, overrides UI and setter)
 # ============================================================
@@ -151,6 +152,7 @@ class DialNode(ValueNode):
 # ============================================================
 # Logic for the RouteNode
 # ============================================================
+
 
 class RouteNode(Node):
     NODE_TYPE = "Route"
@@ -171,14 +173,17 @@ class RouteNode(Node):
         # No processing needed, just return the input value
         return {"out": signal}
 
+
 # ==============================================================================
 # Logic Class for the SignalAnalyzer Node
 # ==============================================================================
+
 
 class SignalAnalyzer(Node):
     """
     Analyzes an audio signal block and outputs various single-value metrics.
     """
+
     NODE_TYPE = "Signal Analyzer"
     CATEGORY = "Utility"
     DESCRIPTION = "Analyzes a signal block and outputs its RMS, Peak, Crest Factor, DC Offset, and Zero-Crossing Rate."
@@ -196,15 +201,14 @@ class SignalAnalyzer(Node):
 
         logger.debug(f"Node [{self.name}] initialized.")
 
-
     def process(self, input_data: dict) -> dict:
         signal = input_data.get("in")
         stats = {
-                "rms": None,
-                "peak": None,
-                "crest_factor": None,
-                "dc_offset": None,
-                "zero_crossing_rate": None,
+            "rms": None,
+            "peak": None,
+            "crest_factor": None,
+            "dc_offset": None,
+            "zero_crossing_rate": None,
         }
 
         # --- Handle Invalid Input ---
@@ -270,7 +274,7 @@ class SignalAnalyzer(Node):
 # ==============================================================================
 class DialHzNodeItem(NodeItem):
     """Custom UI for the DialHzNode, featuring a logarithmic frequency dial."""
-    
+
     NODE_SPECIFIC_WIDTH = 160
 
     def __init__(self, node_logic: "DialHzNode"):
@@ -278,14 +282,16 @@ class DialHzNodeItem(NodeItem):
 
         self.container_widget = QWidget()
         main_layout = QVBoxLayout(self.container_widget)
-        main_layout.setContentsMargins(NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING)
+        main_layout.setContentsMargins(
+            NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING
+        )
         main_layout.setSpacing(6)
 
         # --- Create Dial and Labels ---
         self.freq_dial = QDial()
         self.freq_dial.setRange(0, 1000)
         self.freq_dial.setNotchesVisible(True)
-        
+
         self.title_label = QLabel("Frequency")
         self.title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.value_label = QLabel("...")
@@ -299,13 +305,13 @@ class DialHzNodeItem(NodeItem):
         main_layout.addWidget(self.title_label)
         main_layout.addWidget(self.value_label)
         main_layout.addWidget(self.freq_dial)
-        
+
         self.setContentWidget(self.container_widget)
 
         # --- Connect Signals ---
         self.freq_dial.valueChanged.connect(self._handle_freq_change)
         self.node_logic.emitter.stateUpdated.connect(self._on_state_updated)
-        
+
         self.updateFromLogic()
 
     @Slot(int)
@@ -313,21 +319,21 @@ class DialHzNodeItem(NodeItem):
         # Logarithmic mapping for more intuitive frequency control
         min_f, max_f = 20.0, 20000.0
         log_min, log_max = np.log10(min_f), np.log10(max_f)
-        freq = 10**(((dial_value / 1000.0) * (log_max - log_min)) + log_min)
+        freq = 10 ** (((dial_value / 1000.0) * (log_max - log_min)) + log_min)
         self.node_logic.set_frequency(freq)
 
     @Slot(dict)
     def _on_state_updated(self, state: dict):
         """Updates the UI from a state dictionary."""
         freq = state.get("frequency", 440.0)
-        
+
         # Update Dial Position
         with QSignalBlocker(self.freq_dial):
             min_f, max_f = 20.0, 20000.0
             log_min, log_max = np.log10(min_f), np.log10(max_f)
             dial_val = int(1000.0 * (np.log10(freq) - log_min) / (log_max - log_min))
             self.freq_dial.setValue(dial_val)
-        
+
         # Update Label Text
         is_freq_ext = "freq_in" in self.node_logic.inputs and self.node_logic.inputs["freq_in"].connections
         self.value_label.setText(f"{freq:.1f} Hz{' (ext)' if is_freq_ext else ''}")
@@ -340,12 +346,15 @@ class DialHzNodeItem(NodeItem):
         self._on_state_updated(state)
         super().updateFromLogic()
 
+
 # ==============================================================================
 # --- NEW: Logic for the Dial (Hz) Node ---
 # ==============================================================================
 class DialHzNodeEmitter(QObject):
     """A dedicated QObject to safely emit signals from the logic to the UI thread."""
+
     stateUpdated = Signal(dict)
+
 
 class DialHzNode(Node):
     NODE_TYPE = "Dial (Hz)"
@@ -388,13 +397,13 @@ class DialHzNode(Node):
                 if abs(self._frequency - new_freq) > 1e-6:
                     self._frequency = new_freq
                     state_snapshot_to_emit = self.get_current_state_snapshot(locked=True)
-            
+
             output_freq = self._frequency
 
         # Emit signal after releasing the lock
         if state_snapshot_to_emit:
             self.emitter.stateUpdated.emit(state_snapshot_to_emit)
-            
+
         return {"freq_out": output_freq}
 
     def serialize_extra(self) -> dict:

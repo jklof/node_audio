@@ -23,6 +23,7 @@ UI_UPDATE_INTERVAL_S = 0.033
 SPECTRUM_SMOOTHING_FACTOR = 0.4
 MIN_FREQ_DISPLAY = 20.0
 
+
 # ==============================================================================
 # 1. Custom Drawing Widget: STFTSpectrumDisplayWidget
 # ==============================================================================
@@ -53,7 +54,8 @@ class STFTSpectrumDisplayWidget(QWidget):
 
     @Slot(np.ndarray, np.ndarray, int)
     def update_data(self, magnitudes_db: np.ndarray | None, frequencies: np.ndarray | None, sample_rate: int):
-        if sample_rate > 0: self._sample_rate = sample_rate
+        if sample_rate > 0:
+            self._sample_rate = sample_rate
         if magnitudes_db is None or frequencies is None:
             if self._raw_magnitudes_db is not None:
                 self._raw_magnitudes_db = None
@@ -65,29 +67,35 @@ class STFTSpectrumDisplayWidget(QWidget):
         if self._smoothed_magnitudes_db is None or self._smoothed_magnitudes_db.shape != self._raw_magnitudes_db.shape:
             self._smoothed_magnitudes_db = self._raw_magnitudes_db.copy()
         else:
-            self._smoothed_magnitudes_db = SPECTRUM_SMOOTHING_FACTOR * self._raw_magnitudes_db + \
-                                         (1 - SPECTRUM_SMOOTHING_FACTOR) * self._smoothed_magnitudes_db
+            self._smoothed_magnitudes_db = (
+                SPECTRUM_SMOOTHING_FACTOR * self._raw_magnitudes_db
+                + (1 - SPECTRUM_SMOOTHING_FACTOR) * self._smoothed_magnitudes_db
+            )
         self._frequencies = frequencies
         self.update()
 
     def _prepare_polygon(self) -> QPolygonF | None:
         mags = self._smoothed_magnitudes_db
         freqs = self._frequencies
-        if mags is None or freqs is None or len(mags) == 0: return None
+        if mags is None or freqs is None or len(mags) == 0:
+            return None
 
         w, h = self.width(), self.height()
         padding = 5
         plot_width, plot_height = w - 2 * padding, h - 2 * padding
-        if plot_width <= 0 or plot_height <= 0: return None
+        if plot_width <= 0 or plot_height <= 0:
+            return None
 
         max_freq_display = self._sample_rate / 2.0
-        valid_indices = (freqs >= MIN_FREQ_DISPLAY)
+        valid_indices = freqs >= MIN_FREQ_DISPLAY
         freqs, mags = freqs[valid_indices], mags[valid_indices]
-        if len(freqs) == 0: return None
+        if len(freqs) == 0:
+            return None
 
         polygon = QPolygonF()
         db_range = self._max_db - self._min_db
-        if db_range <= 0: db_range = 1.0
+        if db_range <= 0:
+            db_range = 1.0
 
         def map_db_to_y(db):
             normalized_db = (np.clip(db, self._min_db, self._max_db) - self._min_db) / db_range
@@ -96,7 +104,9 @@ class STFTSpectrumDisplayWidget(QWidget):
         log_min_freq = np.log10(max(1.0, MIN_FREQ_DISPLAY))
         log_max_freq = np.log10(max(log_min_freq + 1e-6, max_freq_display))
         log_freq_range = log_max_freq - log_min_freq
-        if log_freq_range <= 0: log_freq_range = 1.0
+        if log_freq_range <= 0:
+            log_freq_range = 1.0
+
         def map_freq_to_x(freq):
             log_freq = np.log10(max(1.0, freq))
             normalized_log_freq = (log_freq - log_min_freq) / log_freq_range
@@ -113,7 +123,8 @@ class STFTSpectrumDisplayWidget(QWidget):
                 y = map_db_to_y(mag_db)
                 polygon.append(QPointF(x, y))
                 last_x = x
-        if last_x != -1: polygon.append(QPointF(last_x, bottom_y))
+        if last_x != -1:
+            polygon.append(QPointF(last_x, bottom_y))
         return polygon
 
     def paintEvent(self, event: QPaintEvent):
@@ -124,7 +135,8 @@ class STFTSpectrumDisplayWidget(QWidget):
         w, h = self.width(), self.height()
         padding = 5
         plot_width, plot_height = w - 2 * padding, h - 2 * padding
-        if plot_width <= 0 or plot_height <= 0: return
+        if plot_width <= 0 or plot_height <= 0:
+            return
 
         # --- Draw Grid & Labels ---
         painter.setPen(self._grid_pen)
@@ -140,7 +152,8 @@ class STFTSpectrumDisplayWidget(QWidget):
         log_min_freq = np.log10(max(1.0, MIN_FREQ_DISPLAY))
         log_max_freq = np.log10(max(log_min_freq + 1e-6, max_freq_grid))
         log_freq_range = log_max_freq - log_min_freq
-        if log_freq_range <= 0: log_freq_range = 1.0
+        if log_freq_range <= 0:
+            log_freq_range = 1.0
 
         for freq in [100, 1000, 10000]:
             if MIN_FREQ_DISPLAY <= freq <= max_freq_grid:
@@ -151,8 +164,8 @@ class STFTSpectrumDisplayWidget(QWidget):
                 painter.drawLine(int(x), padding, int(x), h - padding)
                 painter.setPen(self._label_pen)
                 text = f"{freq/1000:.0f}k" if freq >= 1000 else str(freq)
-                text_y_pos = h - 2 
-                painter.drawText(int(x - fm.horizontalAdvance(text)/2), text_y_pos, text)
+                text_y_pos = h - 2
+                painter.drawText(int(x - fm.horizontalAdvance(text) / 2), text_y_pos, text)
 
         # --- Draw Spectrum ---
         polygon = self._prepare_polygon()
@@ -166,6 +179,7 @@ class STFTSpectrumDisplayWidget(QWidget):
             if len(data_points) > 0:
                 painter.drawPolyline(QPolygonF(data_points))
         painter.end()
+
 
 # ==============================================================================
 # 2. Custom NodeItem for the Spectrum Visualizer
@@ -188,6 +202,7 @@ class STFTSpectrumVisualizerNodeItem(NodeItem):
         self.spectrum_widget.update_data(None, None, 44100)
         super().updateFromLogic()
 
+
 # ==============================================================================
 # 3. Node Logic Class: STFTSpectrumVisualizerNode
 # ==============================================================================
@@ -199,6 +214,7 @@ class STFTSpectrumVisualizerNode(Node):
 
     class WrappedSignal(QObject):
         _s = Signal(object, object, int)
+
         def emit(self, magnitudes, frequencies, samplerate):
             try:
                 m_copy = magnitudes.copy() if magnitudes is not None else None
@@ -206,7 +222,9 @@ class STFTSpectrumVisualizerNode(Node):
                 self._s.emit(m_copy, f_copy, samplerate)
             except RuntimeError as e:
                 logger.debug(f"SpectrumVisualizerNode WrappedSignal: Error emitting signal: {e}")
-        def connect(self, slot_func: Slot): self._s.connect(slot_func)
+
+        def connect(self, slot_func: Slot):
+            self._s.connect(slot_func)
 
     def __init__(self, name: str, node_id: str | None = None):
         super().__init__(name, node_id)
@@ -219,7 +237,7 @@ class STFTSpectrumVisualizerNode(Node):
         if current_time < self._next_ui_update_time:
             return {}
         self._next_ui_update_time = current_time + UI_UPDATE_INTERVAL_S
-        
+
         frame = input_data.get("spectral_frame_in")
         if not isinstance(frame, SpectralFrame):
             self.newDataReady.emit(None, None, 44100)
@@ -232,13 +250,13 @@ class STFTSpectrumVisualizerNode(Node):
         try:
             magnitudes_raw = np.abs(fft_data)
             mono_magnitudes = np.mean(magnitudes_raw, axis=1) if fft_data.shape[1] > 1 else magnitudes_raw.flatten()
-            
+
             window_sum = np.sum(frame.analysis_window)
             db_ref = max(1e-9, window_sum / 2.0)
-            
+
             magnitudes_db = 20 * np.log10(mono_magnitudes / db_ref + 1e-12)
             frequencies = np.fft.rfftfreq(frame.fft_size, d=1.0 / frame.sample_rate)
-            
+
             self.newDataReady.emit(magnitudes_db, frequencies, frame.sample_rate)
         except Exception as e:
             logger.error(f"[{self.name}] Error calculating spectrum: {e}", exc_info=True)

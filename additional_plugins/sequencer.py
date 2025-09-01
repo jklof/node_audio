@@ -7,9 +7,7 @@ from node_system import Node
 from ui_elements import NodeItem, NODE_CONTENT_PADDING
 
 from PySide6.QtCore import Qt, Signal, Slot, QObject, QSignalBlocker
-from PySide6.QtWidgets import (
-    QWidget, QCheckBox, QVBoxLayout, QHBoxLayout, QLabel, QSpinBox
-)
+from PySide6.QtWidgets import QWidget, QCheckBox, QVBoxLayout, QHBoxLayout, QLabel, QSpinBox
 
 # --- Logging ---
 logger = logging.getLogger(__name__)
@@ -17,17 +15,22 @@ logger = logging.getLogger(__name__)
 # --- Constants ---
 DEFAULT_STEPS = 16
 MAX_STEPS = 32
+
+
 # ==============================================================================
 # 1. State Emitter for UI Communication
 # ==============================================================================
 class SequencerEmitter(QObject):
     """A dedicated QObject to safely emit signals from the logic to the UI thread."""
+
     stateUpdated = Signal(dict)
     playheadUpdated = Signal(int)
+
 
 # ==============================================================================
 # 2. Custom UI Class (SequencerNodeItem)
 # ==============================================================================
+
 
 class SequencerNodeItem(NodeItem):
 
@@ -36,7 +39,9 @@ class SequencerNodeItem(NodeItem):
 
         self.container_widget = QWidget()
         main_layout = QVBoxLayout(self.container_widget)
-        main_layout.setContentsMargins(NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING)
+        main_layout.setContentsMargins(
+            NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING
+        )
         main_layout.setSpacing(5)
 
         controls_layout = QHBoxLayout()
@@ -78,7 +83,7 @@ class SequencerNodeItem(NodeItem):
             checkbox.toggled.connect(self._on_step_toggled)
             self.step_checkboxes.append(checkbox)
             self.steps_layout.addWidget(checkbox)
-        
+
         self.steps_layout.addStretch()
         self.update_geometry()
 
@@ -96,10 +101,10 @@ class SequencerNodeItem(NodeItem):
 
         if num_steps != len(self.step_checkboxes):
             self._rebuild_grid(num_steps)
-        
+
         with QSignalBlocker(self.steps_spinbox):
             self.steps_spinbox.setValue(num_steps)
-        
+
         for i, checkbox in enumerate(self.step_checkboxes):
             with QSignalBlocker(checkbox):
                 checkbox.setChecked(sequence[i] if i < len(sequence) else False)
@@ -109,17 +114,18 @@ class SequencerNodeItem(NodeItem):
         if self._current_playhead != step_index:
             if 0 <= self._current_playhead < len(self.step_checkboxes):
                 self.step_checkboxes[self._current_playhead].setStyleSheet("")
-            
+
             if 0 <= step_index < len(self.step_checkboxes):
                 self.step_checkboxes[step_index].setStyleSheet("QCheckBox::indicator { background-color: orange; }")
-            
+
             self._current_playhead = step_index
-    
+
     @Slot()
     def updateFromLogic(self):
         state = self.node_logic.get_current_state_snapshot()
         self._on_state_updated(state)
         super().updateFromLogic()
+
 
 # ==============================================================================
 # 3. Node Logic Class (SequencerNode)
@@ -158,21 +164,18 @@ class SequencerNode(Node):
             num_steps = max(1, min(MAX_STEPS, num_steps))
             if num_steps == self._num_steps:
                 return
-            
+
             new_sequence = [False] * num_steps
             common_length = min(num_steps, self._num_steps)
             new_sequence[:common_length] = self._sequence[:common_length]
-            
+
             self._sequence = new_sequence
             self._num_steps = num_steps
             if self._current_step >= num_steps:
                 self._current_step = -1
 
-            state_to_emit = {
-                "num_steps": self._num_steps,
-                "sequence": list(self._sequence)
-            }
-        
+            state_to_emit = {"num_steps": self._num_steps, "sequence": list(self._sequence)}
+
         # Now, emit the signal safely after the lock has been released.
         if state_to_emit:
             self.emitter.stateUpdated.emit(state_to_emit)
@@ -186,17 +189,17 @@ class SequencerNode(Node):
     def process(self, input_data: dict) -> dict:
         clock_signal = bool(input_data.get("clock", False))
         reset_signal = bool(input_data.get("reset", False))
-        
+
         trigger_out = False
-        playhead_to_emit = None 
-        
+        playhead_to_emit = None
+
         with self._lock:
             # Detect rising edge for reset
             if reset_signal:
                 if self._current_step != -1:
                     self._current_step = -1
                     playhead_to_emit = self._current_step
-            
+
             # Detect rising edge for clock
             is_rising_edge = clock_signal and not self._prev_clock_state
             self._prev_clock_state = clock_signal

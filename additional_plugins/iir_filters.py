@@ -7,6 +7,7 @@ import logging
 # --- Core Dependencies ---
 try:
     import scipy.signal
+
     SCIPY_AVAILABLE = True
 except ImportError:
     SCIPY_AVAILABLE = False
@@ -34,13 +35,17 @@ MAX_Q = 20.0
 # 1. Custom UI Class (IIRFilterNodeItem)
 # ==============================================================================
 
+
 class IIRFilterNodeItem(NodeItem):
-    """ Custom UI for all IIR Filter nodes. """
+    """Custom UI for all IIR Filter nodes."""
+
     def __init__(self, node_logic: "BaseIIRFilterNode"):
         super().__init__(node_logic)
         self.container_widget = QWidget()
         layout = QVBoxLayout(self.container_widget)
-        layout.setContentsMargins(NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING)
+        layout.setContentsMargins(
+            NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING
+        )
         layout.setSpacing(5)
 
         if not SCIPY_AVAILABLE:
@@ -78,7 +83,7 @@ class IIRFilterNodeItem(NodeItem):
     def _map_slider_to_freq(self, value):
         min_log = np.log10(MIN_CUTOFF_HZ)
         max_log = np.log10(MAX_CUTOFF_HZ)
-        return 10**(min_log + (value / 1000.0) * (max_log - min_log))
+        return 10 ** (min_log + (value / 1000.0) * (max_log - min_log))
 
     def _map_freq_to_slider(self, freq):
         min_log = np.log10(MIN_CUTOFF_HZ)
@@ -100,9 +105,9 @@ class IIRFilterNodeItem(NodeItem):
 
     @Slot(dict)
     def _on_state_updated(self, state: dict):
-        cutoff = state.get('cutoff_hz', 1000.0)
-        q = state.get('Q', 1.0)
-        filter_type = state.get('filter_type', 'lowpass')
+        cutoff = state.get("cutoff_hz", 1000.0)
+        q = state.get("Q", 1.0)
+        filter_type = state.get("filter_type", "lowpass")
 
         with QSignalBlocker(self.cutoff_slider):
             self.cutoff_slider.setValue(self._map_freq_to_slider(cutoff))
@@ -118,23 +123,23 @@ class IIRFilterNodeItem(NodeItem):
         if SCIPY_AVAILABLE:
             state = self.node_logic.get_state_snapshot()
             self._on_state_updated(state)
-            
-            cutoff_socket = self.node_logic.inputs.get('cutoff_hz')
-            q_socket = self.node_logic.inputs.get('Q')
+
+            cutoff_socket = self.node_logic.inputs.get("cutoff_hz")
+            q_socket = self.node_logic.inputs.get("Q")
 
             cutoff_connected = cutoff_socket and len(cutoff_socket.connections) > 0
             q_connected = q_socket and len(q_socket.connections) > 0
 
             self.cutoff_slider.setEnabled(not cutoff_connected)
             self.q_slider.setEnabled(not q_connected and self.q_widget.isVisible())
-            
+
             # --- FIX: Override label text if the corresponding input is connected ---
             if cutoff_connected:
                 self.cutoff_label.setText("Cutoff Freq: --")
-            
+
             if q_connected and self.q_widget.isVisible():
                 self.q_label.setText("Q: --")
-            
+
         super().updateFromLogic()
 
 
@@ -142,8 +147,9 @@ class IIRFilterNodeItem(NodeItem):
 # 2. Refactored Base Class for IIR Filters
 # ==============================================================================
 
+
 class BaseIIRFilterNode(Node):
-    NODE_TYPE = None # This is an abstract base class
+    NODE_TYPE = None  # This is an abstract base class
     CATEGORY = "Filters"
     UI_CLASS = IIRFilterNodeItem
     FILTER_ORDER = DEFAULT_FILTER_ORDER
@@ -164,7 +170,7 @@ class BaseIIRFilterNode(Node):
         self._samplerate = float(DEFAULT_SAMPLERATE)
         self._default_cutoff_hz = 1000.0
         self._default_Q = 1.0 / np.sqrt(2)
-        
+
         self._active_cutoff = 0.0
         self._active_Q = 0.0
 
@@ -191,8 +197,13 @@ class BaseIIRFilterNode(Node):
         try:
             Wn = self._calculate_wn(clamped_cutoff, clamped_Q)
             self._sos = scipy.signal.iirfilter(
-                N=self.FILTER_ORDER, Wn=Wn, btype=self.filter_type, analog=False,
-                ftype="butter", output="sos", fs=self._samplerate,
+                N=self.FILTER_ORDER,
+                Wn=Wn,
+                btype=self.filter_type,
+                analog=False,
+                ftype="butter",
+                output="sos",
+                fs=self._samplerate,
             )
             self._filter_state_zi = None
         except (ValueError, np.linalg.LinAlgError) as e:
@@ -211,11 +222,7 @@ class BaseIIRFilterNode(Node):
 
     def get_state_snapshot(self):
         with self._lock:
-            return {
-                "cutoff_hz": self._default_cutoff_hz,
-                "Q": self._default_Q,
-                "filter_type": self.filter_type
-            }
+            return {"cutoff_hz": self._default_cutoff_hz, "Q": self._default_Q, "filter_type": self.filter_type}
 
     def process(self, input_data: dict) -> dict:
         signal_in = input_data.get("in")
@@ -236,7 +243,7 @@ class BaseIIRFilterNode(Node):
                 self._active_cutoff = final_cutoff
                 self._active_Q = final_q
                 self._update_coefficients(self._active_cutoff, self._active_Q)
-            
+
             if self._sos is None:
                 return {"out": signal_in}
 
@@ -279,19 +286,23 @@ class BaseIIRFilterNode(Node):
                 self._active_Q = self._default_Q
                 self._update_coefficients(self._active_cutoff, self._active_Q)
 
+
 # ==============================================================================
 # 3. Concrete Filter Node Implementations
 # ==============================================================================
+
 
 class LowpassFilterNode(BaseIIRFilterNode):
     NODE_TYPE = "IIR Lowpass Filter"
     DESCRIPTION = f"Applies a {DEFAULT_FILTER_ORDER}th order Butterworth lowpass filter."
     filter_type = "lowpass"
 
+
 class HighpassFilterNode(BaseIIRFilterNode):
     NODE_TYPE = "IIR Highpass Filter"
     DESCRIPTION = f"Applies a {DEFAULT_FILTER_ORDER}th order Butterworth highpass filter."
     filter_type = "highpass"
+
 
 class BandpassFilterNode(BaseIIRFilterNode):
     NODE_TYPE = "IIR Bandpass Filter"
@@ -306,16 +317,16 @@ class BandpassFilterNode(BaseIIRFilterNode):
         center_freq = cutoff
         Q = q
         nyquist = self._samplerate / 2.0
-        
+
         bandwidth = center_freq / Q
         low_cutoff = center_freq - (bandwidth / 2.0)
         high_cutoff = center_freq + (bandwidth / 2.0)
-        
+
         low_cutoff = max(MIN_CUTOFF_HZ, low_cutoff)
         high_cutoff = min(nyquist * 0.99, high_cutoff)
-        
+
         if low_cutoff >= high_cutoff:
             # Fallback to prevent crash if range is invalid
             return [center_freq - 1, center_freq]
-            
+
         return [low_cutoff, high_cutoff]

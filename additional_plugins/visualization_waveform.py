@@ -45,7 +45,6 @@ class WaveformWidget(QWidget):
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setMinimumHeight(50)
 
-
     def sizeHint(self) -> QSize:
         """
         Provide a valid size hint to the layout system.
@@ -54,7 +53,6 @@ class WaveformWidget(QWidget):
         # The width is expanding, so we can leave it to the parent.
         # The height is fixed, so we return the minimum height we've set.
         return QSize(super().sizeHint().width(), self.minimumHeight())
-
 
     def setData(self, data: np.ndarray | None):
         """

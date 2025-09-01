@@ -6,6 +6,7 @@ import abc
 
 logger = logging.getLogger(__name__)
 
+
 # Define the interface for any object that can drive the processing clock.
 class IClockProvider(abc.ABC):
     """
@@ -14,6 +15,7 @@ class IClockProvider(abc.ABC):
     node to drive the processing loop. A node can have its own resources
     (like an audio stream) running even when it is not the active clock.
     """
+
     @abc.abstractmethod
     def start_clock(self, tick_callback: callable):
         """
@@ -36,20 +38,23 @@ class IClockProvider(abc.ABC):
 
 class Socket:
     """Represents a connection point on a node."""
-    def __init__(self, name: str, node: 'Node', is_input: bool, data_type: type = np.ndarray):
+
+    def __init__(self, name: str, node: "Node", is_input: bool, data_type: type = np.ndarray):
         self.name = name
         self.node = node
         self.is_input = is_input
         self.data_type = data_type
-        self.connections: list['Connection'] = []
+        self.connections: list["Connection"] = []
         self._data: any = None  # Cached data for the current tick
 
     def __repr__(self):
         direction = "Input" if self.is_input else "Output"
         return f"<Socket {self.node.name}.{self.name} ({direction})>"
 
+
 class Connection:
     """Represents a connection between two sockets."""
+
     def __init__(self, start_socket: Socket, end_socket: Socket):
         if not start_socket or start_socket.is_input:
             raise ValueError("Connection must start from a valid Output socket.")
@@ -69,8 +74,10 @@ class Connection:
             "id": self.id,
         }
 
+
 class Node:
     """Base class for all processing nodes."""
+
     NODE_TYPE = "Base Node"
     UI_CLASS = None
     CATEGORY = "Uncategorized"
@@ -96,7 +103,6 @@ class Node:
     def process(self, input_data: dict) -> dict:
         raise NotImplementedError
 
-
     def start(self):
         """
         Called when graph processing starts.
@@ -115,7 +121,6 @@ class Node:
 
     def remove(self):
         self.stop()
-
 
     def to_dict(self):
         node_data = {
@@ -138,10 +143,12 @@ class Node:
     def __repr__(self):
         return f"<Node {self.name} ({self.NODE_TYPE} - {self.id[:4]})>"
 
+
 class NodeGraph:
     """
     A pure data container for the graph's state.
     """
+
     def __init__(self):
         self.nodes: dict[str, Node] = {}
         self.connections: dict[str, Connection] = {}

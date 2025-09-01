@@ -42,6 +42,7 @@ class Waveform(Enum):
 # ==============================================================================
 class OscillatorEmitter(QObject):
     """A dedicated QObject to safely emit signals from the logic to the UI thread."""
+
     stateUpdated = Signal(dict)
 
 
@@ -58,7 +59,9 @@ class OscillatorNodeItem(NodeItem):
 
         self.container_widget = QWidget()
         main_layout = QVBoxLayout(self.container_widget)
-        main_layout.setContentsMargins(NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING)
+        main_layout.setContentsMargins(
+            NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING
+        )
         main_layout.setSpacing(6)
 
         # --- Waveform Selection ---
@@ -76,16 +79,16 @@ class OscillatorNodeItem(NodeItem):
         self.freq_dial, self.freq_label_vbox = self._create_dial_with_labels("Freq (Hz)", "440.0")
         dials_layout.addLayout(self.freq_label_vbox, stretch=1)
         dials_layout.addWidget(self.freq_dial, stretch=2)
-        
+
         # --- Pulse Width Dial ---
         self.pw_dial, self.pw_label_vbox = self._create_dial_with_labels("Pulse Width", "0.50")
-        self.pw_widget = QWidget() # Container to easily show/hide
+        self.pw_widget = QWidget()  # Container to easily show/hide
         pw_layout = QHBoxLayout(self.pw_widget)
         pw_layout.setContentsMargins(0, 0, 0, 0)
         pw_layout.setSpacing(10)
         pw_layout.addLayout(self.pw_label_vbox, stretch=1)
         pw_layout.addWidget(self.pw_dial, stretch=2)
-        
+
         main_layout.addLayout(dials_layout)
         main_layout.addWidget(self.pw_widget)
 
@@ -102,7 +105,7 @@ class OscillatorNodeItem(NodeItem):
     def _create_dial_with_labels(self, title: str, initial_value: str) -> tuple[QDial, QVBoxLayout]:
         """Helper factory to create a dial and its associated labels."""
         dial = QDial()
-        dial.setRange(0, 1000) # Use a large integer range for precision
+        dial.setRange(0, 1000)  # Use a large integer range for precision
         dial.setNotchesVisible(True)
 
         label_vbox = QVBoxLayout()
@@ -111,7 +114,7 @@ class OscillatorNodeItem(NodeItem):
         title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         value_label = QLabel(initial_value)
         value_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        
+
         # Ensure minimum width to prevent UI jitter when text changes
         fm = QFontMetrics(value_label.font())
         min_width = fm.boundingRect("9999.9 Hz (ext)").width()
@@ -119,7 +122,7 @@ class OscillatorNodeItem(NodeItem):
 
         label_vbox.addWidget(title_label)
         label_vbox.addWidget(value_label)
-        
+
         return (dial, label_vbox)
 
     @Slot(str)
@@ -133,7 +136,7 @@ class OscillatorNodeItem(NodeItem):
         # Logarithmic mapping for more intuitive frequency control
         min_f, max_f = 20.0, 20000.0
         log_min, log_max = np.log10(min_f), np.log10(max_f)
-        freq = 10**(((dial_value / 1000.0) * (log_max - log_min)) + log_min)
+        freq = 10 ** (((dial_value / 1000.0) * (log_max - log_min)) + log_min)
         self.node_logic.set_frequency(freq)
 
     @Slot(int)
@@ -151,15 +154,16 @@ class OscillatorNodeItem(NodeItem):
         # --- Update Waveform Selector ---
         with QSignalBlocker(self.waveform_combo):
             index = self.waveform_combo.findData(waveform)
-            if index != -1: self.waveform_combo.setCurrentIndex(index)
-        
+            if index != -1:
+                self.waveform_combo.setCurrentIndex(index)
+
         # --- Update Frequency Dial and Label ---
         with QSignalBlocker(self.freq_dial):
             min_f, max_f = 20.0, 20000.0
             log_min, log_max = np.log10(min_f), np.log10(max_f)
             dial_val = int(1000.0 * (np.log10(freq) - log_min) / (log_max - log_min))
             self.freq_dial.setValue(dial_val)
-        
+
         freq_label_widget = self.freq_label_vbox.itemAt(1).widget()
         is_freq_ext = "freq" in self.node_logic.inputs and self.node_logic.inputs["freq"].connections
         freq_label_widget.setText(f"{freq:.1f} Hz{' (ext)' if is_freq_ext else ''}")
@@ -176,7 +180,7 @@ class OscillatorNodeItem(NodeItem):
 
         # --- Show/Hide Pulse Width Control ---
         self.pw_widget.setVisible(waveform == Waveform.SQUARE)
-        self.update_geometry() # Request geometry update when visibility changes
+        self.update_geometry()  # Request geometry update when visibility changes
 
     @Slot()
     def updateFromLogic(self):
@@ -206,7 +210,7 @@ class OscillatorNode(Node):
         self.samplerate = DEFAULT_SAMPLERATE
         self.blocksize = DEFAULT_BLOCKSIZE
         self.channels = DEFAULT_CHANNELS
-        
+
         # --- Internal State ---
         self._phase = 0.0
         self._waveform: Waveform = Waveform.SINE
@@ -242,7 +246,6 @@ class OscillatorNode(Node):
         if state_to_emit:
             self.emitter.stateUpdated.emit(state_to_emit)
 
-    
     @Slot(float)
     def set_pulse_width(self, pulse_width: float):
         state_to_emit = None
@@ -254,7 +257,6 @@ class OscillatorNode(Node):
         if state_to_emit:
             self.emitter.stateUpdated.emit(state_to_emit)
 
-
     def process(self, input_data: dict) -> dict:
         state_snapshot_to_emit = None
         with self._lock:
@@ -265,14 +267,14 @@ class OscillatorNode(Node):
                 if abs(self._frequency - new_freq) > 1e-6:
                     self._frequency = new_freq
                     state_snapshot_to_emit = self._get_current_state_snapshot_locked()
-            
+
             pw_socket = input_data.get("pulse_width")
             if pw_socket is not None:
                 new_pw = np.clip(float(pw_socket), 0.0, 1.0)
                 if abs(self._pulse_width - new_pw) > 1e-6:
                     self._pulse_width = new_pw
                     state_snapshot_to_emit = self._get_current_state_snapshot_locked()
-            
+
             # Copy state to local variables for processing
             frequency = self._frequency
             pulse_width = self._pulse_width
@@ -285,14 +287,14 @@ class OscillatorNode(Node):
         # --- Generate Waveform ---
         phase_increment = (2 * np.pi * frequency) / self.samplerate
         phases = self._phase + np.arange(self.blocksize) * phase_increment
-        
+
         output_1d = None
         if waveform == Waveform.SINE:
             output_1d = 0.5 * np.sin(phases)
         elif waveform == Waveform.SQUARE:
             output_1d = 0.5 * scipy.signal.square(phases, duty=pulse_width)
         elif waveform == Waveform.SAWTOOTH:
-            output_1d = 0.5 * scipy.signal.sawtooth(phases, width=1) # "width=1" gives a rising ramp
+            output_1d = 0.5 * scipy.signal.sawtooth(phases, width=1)  # "width=1" gives a rising ramp
         elif waveform == Waveform.TRIANGLE:
             output_1d = 0.5 * scipy.signal.sawtooth(phases, width=0.5)
 
@@ -318,6 +320,6 @@ class OscillatorNode(Node):
                 self._waveform = Waveform[waveform_name]
             except KeyError:
                 self._waveform = Waveform.SINE
-            
+
             self._frequency = float(data.get("frequency", 440.0))
             self._pulse_width = float(data.get("pulse_width", 0.5))

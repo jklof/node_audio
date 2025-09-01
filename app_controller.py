@@ -9,11 +9,13 @@ from node_system import Socket
 
 logger = logging.getLogger(__name__)
 
+
 class AppController(QObject):
     """
     Mediator between the UI (View) and the Engine (Model/Processing).
     Connects UI actions to Engine commands and Engine signals to UI updates.
     """
+
     def __init__(self, engine: Engine, graph_widget: NodeGraphWidget, parent_window: QWidget):
         super().__init__(parent_window)
         self.engine = engine
@@ -25,7 +27,7 @@ class AppController(QObject):
         self.engine.signals.graphChanged.connect(self.graph_widget.graph_scene.sync_from_graph)
         self.engine.signals.processingError.connect(self._on_processing_error)
         self.engine.signals.nodeProcessingStatsUpdated.connect(self.graph_widget.graph_scene.on_node_stats_updated)
-        
+
         # Connect View (UI) request signals to Controller slots
         self.graph_widget.graph_scene.nodeCreationRequested.connect(self.on_node_creation_requested)
         self.graph_widget.graph_scene.clockSourceSetRequested.connect(self.on_clock_source_set_requested)
@@ -33,7 +35,6 @@ class AppController(QObject):
         self.graph_widget.connectionRequested.connect(self.on_connection_requested)
         self.graph_widget.nodeDeletionRequested.connect(self.on_node_deletion_requested)
         self.graph_widget.connectionDeletionRequested.connect(self.on_connection_deletion_requested)
-
 
     @Slot(type, str, tuple)
     def on_node_creation_requested(self, node_class, name, pos):
@@ -63,7 +64,7 @@ class AppController(QObject):
     def on_node_deletion_requested(self, node_id: str):
         """Handles a request from the UI to delete a node."""
         self.engine.remove_node(node_id)
-        
+
     @Slot(str)
     def on_connection_deletion_requested(self, connection_id: str):
         """Handles a request from the UI to delete a connection."""
@@ -73,7 +74,11 @@ class AppController(QObject):
     def _on_processing_error(self, error_msg: str):
         """Displays a critical error from the Engine and stops processing."""
         logger.error(f"Controller: Received processing error: {error_msg}")
-        QMessageBox.critical(self.parent_window, "Processing Error", f"A critical error occurred:\n{error_msg}\nProcessing has been stopped.")
+        QMessageBox.critical(
+            self.parent_window,
+            "Processing Error",
+            f"A critical error occurred:\n{error_msg}\nProcessing has been stopped.",
+        )
 
     @Slot()
     def start_processing(self):
@@ -109,7 +114,9 @@ class AppController(QObject):
         except Exception as e:
             title = "Startup Load Error" if is_startup else "Load Error"
             logger.error(f"Failed to load graph from {file_path}: {e}", exc_info=True)
-            QMessageBox.critical(self.parent_window, title, f"Failed to load graph from file:\n{file_path}\n\nError: {e}")
+            QMessageBox.critical(
+                self.parent_window, title, f"Failed to load graph from file:\n{file_path}\n\nError: {e}"
+            )
             self.current_file_path = None
             self.parent_window.statusBar().showMessage(f"Failed to load graph from {file_path}", 5000)
 
@@ -132,7 +139,7 @@ class AppController(QObject):
         """Requests the engine to clear the entire graph."""
         logger.info("Controller: Received request to clear graph.")
         self.engine.clear_graph()
-        self.current_file_path = None # Also clear the current file path
+        self.current_file_path = None  # Also clear the current file path
         self.parent_window.statusBar().showMessage("Graph cleared.", 5000)
 
     def cleanup_on_exit(self):

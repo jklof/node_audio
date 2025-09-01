@@ -29,13 +29,16 @@ EPSILON = 1e-9
 # ==============================================================================
 class ADSREmitter(QObject):
     """A dedicated QObject to safely emit signals from the logic to the UI thread."""
+
     stateUpdated = Signal(dict)
+
 
 # ==============================================================================
 # 2. Custom UI Class (ADSRNodeItem)
 # ==============================================================================
 class ADSRNodeItem(NodeItem):
     """Provides a user interface with sliders to control the ADSR parameters."""
+
     NODE_SPECIFIC_WIDTH = 200
 
     def __init__(self, node_logic: "ADSRNode"):
@@ -43,7 +46,9 @@ class ADSRNodeItem(NodeItem):
 
         self.container_widget = QWidget()
         main_layout = QVBoxLayout(self.container_widget)
-        main_layout.setContentsMargins(NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING)
+        main_layout.setContentsMargins(
+            NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING
+        )
         main_layout.setSpacing(4)
 
         # Create slider controls for each parameter
@@ -60,7 +65,7 @@ class ADSRNodeItem(NodeItem):
         ]:
             main_layout.addWidget(label)
             main_layout.addWidget(slider)
-        
+
         self.setContentWidget(self.container_widget)
 
         # Connect UI interactions to the logic node
@@ -71,7 +76,7 @@ class ADSRNodeItem(NodeItem):
 
         # Connect the logic node's state updates back to the UI
         self.node_logic.emitter.stateUpdated.connect(self._on_state_updated)
-        
+
         # Initial synchronization
         self.updateFromLogic()
 
@@ -99,7 +104,8 @@ class ADSRNodeItem(NodeItem):
         min_val = slider.property("min_val")
         max_val = slider.property("max_val")
         range_val = max_val - min_val
-        if range_val == 0: return 0
+        if range_val == 0:
+            return 0
         normalized = (logical_value - min_val) / range_val
         return int(np.clip(normalized, 0.0, 1.0) * 1000.0)
 
@@ -114,13 +120,13 @@ class ADSRNodeItem(NodeItem):
         val = self._map_slider_to_logical(self.decay_slider)
         self.node_logic.set_decay(val)
         self.decay_label.setText(f"Decay: {self.decay_slider.property('format').format(val)}")
-        
+
     @Slot(int)
     def _on_sustain_changed(self):
         val = self._map_slider_to_logical(self.sustain_slider)
         self.node_logic.set_sustain(val)
         self.sustain_label.setText(f"Sustain: {self.sustain_slider.property('format').format(val)}")
-        
+
     @Slot(int)
     def _on_release_changed(self):
         val = self._map_slider_to_logical(self.release_slider)
@@ -136,22 +142,22 @@ class ADSRNodeItem(NodeItem):
             "sustain": (self.sustain_slider, self.sustain_label),
             "release": (self.release_slider, self.release_label),
         }
-        
+
         for key, (slider, label) in sliders_map.items():
             value = state.get(key, slider.property("min_val"))
             # Disable the slider if its corresponding input socket is connected
             is_connected = key in self.node_logic.inputs and self.node_logic.inputs[key].connections
             slider.setEnabled(not is_connected)
-            
+
             # Block signals to prevent feedback loops while setting the value
             with QSignalBlocker(slider):
                 slider.setValue(self._map_logical_to_slider(slider, value))
-            
+
             label_text = f"{slider.property('name')}: {slider.property('format').format(value)}"
             if is_connected:
-                label_text += " (ext)" # Indicate external control
+                label_text += " (ext)"  # Indicate external control
             label.setText(label_text)
-    
+
     @Slot()
     def updateFromLogic(self):
         """Requests a full state snapshot from the logic and updates the UI."""
@@ -183,43 +189,54 @@ class ADSRNode(Node):
 
         # --- Internal State ---
         self._lock = threading.Lock()
-        
+
         # User-configurable parameters (defaults)
         self._attack_s: float = 0.01
         self._decay_s: float = 0.2
         self._sustain_level: float = 0.7
         self._release_s: float = 0.5
-        
+
         # Envelope state machine
-        self._state: str = 'idle'
+        self._state: str = "idle"
         self._current_level: float = 0.0
         self._previous_gate: bool = False
 
     # --- Thread-safe setters for UI interaction ---
     @Slot(float)
     def set_attack(self, value: float):
-        with self._lock: self._attack_s = float(value)
+        with self._lock:
+            self._attack_s = float(value)
+
     @Slot(float)
     def set_decay(self, value: float):
-        with self._lock: self._decay_s = float(value)
+        with self._lock:
+            self._decay_s = float(value)
+
     @Slot(float)
     def set_sustain(self, value: float):
-        with self._lock: self._sustain_level = float(value)
+        with self._lock:
+            self._sustain_level = float(value)
+
     @Slot(float)
     def set_release(self, value: float):
-        with self._lock: self._release_s = float(value)
+        with self._lock:
+            self._release_s = float(value)
 
     def get_current_state_snapshot(self, locked: bool = False) -> Dict:
         """Returns a copy of the current parameters for UI synchronization."""
         if locked:
             return {
-                "attack": self._attack_s, "decay": self._decay_s,
-                "sustain": self._sustain_level, "release": self._release_s,
+                "attack": self._attack_s,
+                "decay": self._decay_s,
+                "sustain": self._sustain_level,
+                "release": self._release_s,
             }
         with self._lock:
             return {
-                "attack": self._attack_s, "decay": self._decay_s,
-                "sustain": self._sustain_level, "release": self._release_s,
+                "attack": self._attack_s,
+                "decay": self._decay_s,
+                "sustain": self._sustain_level,
+                "release": self._release_s,
             }
 
     def process(self, input_data: dict) -> dict:
@@ -241,91 +258,98 @@ class ADSRNode(Node):
             release_s = float(release_socket_val) if release_socket_val is not None else self._release_s
 
             # --- Check for changes from sockets to update UI ---
-            if self._attack_s != attack_s: self._attack_s = attack_s; ui_update_needed = True
-            if self._decay_s != decay_s: self._decay_s = decay_s; ui_update_needed = True
-            if self._sustain_level != sustain_level: self._sustain_level = sustain_level; ui_update_needed = True
-            if self._release_s != release_s: self._release_s = release_s; ui_update_needed = True
-            
+            if self._attack_s != attack_s:
+                self._attack_s = attack_s
+                ui_update_needed = True
+            if self._decay_s != decay_s:
+                self._decay_s = decay_s
+                ui_update_needed = True
+            if self._sustain_level != sustain_level:
+                self._sustain_level = sustain_level
+                ui_update_needed = True
+            if self._release_s != release_s:
+                self._release_s = release_s
+                ui_update_needed = True
+
             if ui_update_needed:
                 state_snapshot_to_emit = self.get_current_state_snapshot(locked=True)
 
             gate = bool(input_data.get("gate", False))
-            
+
             # --- State Machine Triggering ---
             if gate and not self._previous_gate:  # Rising edge (Note-On)
-                self._state = 'attack'
+                self._state = "attack"
             elif not gate and self._previous_gate:  # Falling edge (Note-Off)
-                self._state = 'release'
-            
+                self._state = "release"
+
             self._previous_gate = gate
 
             # --- Block-based Envelope Calculation ---
             block_duration_s = DEFAULT_BLOCKSIZE / DEFAULT_SAMPLERATE
-            
-            if self._state == 'attack':
+
+            if self._state == "attack":
                 time_to_peak = (1.0 - self._current_level) * max(MIN_TIME, attack_s)
-                
+
                 if block_duration_s < time_to_peak:
                     self._current_level += block_duration_s / max(MIN_TIME, attack_s)
                 else:
                     time_in_decay = block_duration_s - time_to_peak
                     level_after_decay = 1.0 - (1.0 - sustain_level) * (time_in_decay / max(MIN_TIME, decay_s))
-                    
+
                     if level_after_decay <= sustain_level:
                         self._current_level = sustain_level
-                        self._state = 'sustain'
+                        self._state = "sustain"
                     else:
                         self._current_level = level_after_decay
-                        self._state = 'decay'
+                        self._state = "decay"
 
-            elif self._state == 'decay':
+            elif self._state == "decay":
                 level_range_to_decay = self._current_level - sustain_level
                 if level_range_to_decay > 0:
                     time_to_sustain = (level_range_to_decay / (1.0 - sustain_level + EPSILON)) * max(MIN_TIME, decay_s)
-                    
+
                     if block_duration_s < time_to_sustain:
                         self._current_level -= (block_duration_s / max(MIN_TIME, decay_s)) * (1.0 - sustain_level)
                     else:
                         self._current_level = sustain_level
-                        self._state = 'sustain'
+                        self._state = "sustain"
                 else:
                     self._current_level = sustain_level
-                    self._state = 'sustain'
+                    self._state = "sustain"
 
-            elif self._state == 'sustain':
+            elif self._state == "sustain":
                 self._current_level = sustain_level
 
-            elif self._state == 'release':
+            elif self._state == "release":
                 if release_s > MIN_TIME:
                     samples_in_release = DEFAULT_SAMPLERATE * release_s
                     decay_factor = np.exp(-DEFAULT_BLOCKSIZE / samples_in_release)
                     self._current_level *= decay_factor
                 else:
                     self._current_level = 0.0
-                
+
                 if self._current_level < 1e-5:
                     self._current_level = 0.0
-                    self._state = 'idle'
+                    self._state = "idle"
 
-            elif self._state == 'idle':
+            elif self._state == "idle":
                 self._current_level = 0.0
-                
+
             output_value = self._current_level
 
         if state_snapshot_to_emit:
             self.emitter.stateUpdated.emit(state_snapshot_to_emit)
-            
-        return {"out": float(output_value)}
 
+        return {"out": float(output_value)}
 
     def start(self):
         super().start()
         # Reset state when processing starts
         with self._lock:
-            self._state = 'idle'
+            self._state = "idle"
             self._current_level = 0.0
             self._previous_gate = False
-    
+
     def serialize_extra(self) -> dict:
         """Save the node's user-configured parameters."""
         return self.get_current_state_snapshot()
@@ -351,19 +375,22 @@ class GateButtonNodeItem(NodeItem):
         # Create a container and a button
         self.container_widget = QWidget()
         layout = QVBoxLayout(self.container_widget)
-        layout.setContentsMargins(NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING)
-        
+        layout.setContentsMargins(
+            NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING
+        )
+
         self.button = QPushButton("Gate")
-        self.button.setCheckable(False) # It's a momentary button
-        
+        self.button.setCheckable(False)  # It's a momentary button
+
         layout.addWidget(self.button)
         self.setContentWidget(self.container_widget)
 
         # Connect the button's pressed and released signals to the logic
         self.button.pressed.connect(self.node_logic.set_gate_true)
         self.button.released.connect(self.node_logic.set_gate_false)
-    
+
     # No updateFromLogic is needed as the UI only sends state to the logic
+
 
 # ==============================================================================
 # Logic Class for the Gate Button Node

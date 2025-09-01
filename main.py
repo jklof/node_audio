@@ -2,8 +2,7 @@ import sys
 import logging
 import os
 import argparse
-from PySide6.QtWidgets import (QApplication, QMainWindow, QMessageBox, QToolBar, 
-                               QWidget, QSizePolicy, QLabel)
+from PySide6.QtWidgets import QApplication, QMainWindow, QMessageBox, QToolBar, QWidget, QSizePolicy, QLabel
 from PySide6.QtGui import QAction
 from PySide6.QtCore import Slot, QTimer, Qt, QSettings
 
@@ -15,6 +14,7 @@ from ui_icons import create_icon_from_svg, ICONS
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
+
 
 class MainWindow(QMainWindow):
     def __init__(self, clean_start: bool = False):
@@ -36,13 +36,13 @@ class MainWindow(QMainWindow):
         self._create_menus()
         self._create_toolbar()
         self.statusBar().showMessage("Ready")
-        
+
         self.engine.signals.processingStateChanged.connect(self.update_ui_for_processing_state)
         self.engine.signals.graphChanged.connect(self.update_clock_display)
 
         self.update_ui_for_processing_state(False)
         self.update_clock_display(self.engine._create_graph_snapshot_locked())
-        
+
         self._load_settings()
 
     def _load_settings(self):
@@ -83,21 +83,25 @@ class MainWindow(QMainWindow):
         settings = QSettings("ReNode", "ReNodeProcessor")
         settings.setValue("geometry", self.saveGeometry())
         settings.setValue("lastGraphFile", self.controller.current_file_path)
-        
+
     def _create_toolbar(self):
         toolbar = self.addToolBar("Main Toolbar")
         toolbar.setMovable(False)
         toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
 
         # File Operations
-        new_action = QAction(create_icon_from_svg(ICONS["new_file"]), "New", self, triggered=self.controller.clear_graph)
+        new_action = QAction(
+            create_icon_from_svg(ICONS["new_file"]), "New", self, triggered=self.controller.clear_graph
+        )
         new_action.setShortcut("Ctrl+N")
         toolbar.addAction(new_action)
 
-        load_action = QAction(create_icon_from_svg(ICONS["open_folder"]), "Open", self, triggered=self.controller.load_graph)
+        load_action = QAction(
+            create_icon_from_svg(ICONS["open_folder"]), "Open", self, triggered=self.controller.load_graph
+        )
         load_action.setShortcut("Ctrl+O")
         toolbar.addAction(load_action)
-        
+
         save_action = QAction(create_icon_from_svg(ICONS["save"]), "Save", self, triggered=self.controller.save_graph)
         save_action.setShortcut("Ctrl+S")
         toolbar.addAction(save_action)
@@ -109,19 +113,25 @@ class MainWindow(QMainWindow):
         self.stop_action.setIcon(create_icon_from_svg(ICONS["stop"]))
         toolbar.addAction(self.start_action)
         toolbar.addAction(self.stop_action)
-        
+
         toolbar.addSeparator()
-        
+
         # View Control
-        zoom_in_action = QAction(create_icon_from_svg(ICONS["zoom_in"]), "Zoom In", self, triggered=self.graph_widget.zoom_in)
+        zoom_in_action = QAction(
+            create_icon_from_svg(ICONS["zoom_in"]), "Zoom In", self, triggered=self.graph_widget.zoom_in
+        )
         zoom_in_action.setShortcut("Ctrl+=")
         toolbar.addAction(zoom_in_action)
 
-        zoom_out_action = QAction(create_icon_from_svg(ICONS["zoom_out"]), "Zoom Out", self, triggered=self.graph_widget.zoom_out)
+        zoom_out_action = QAction(
+            create_icon_from_svg(ICONS["zoom_out"]), "Zoom Out", self, triggered=self.graph_widget.zoom_out
+        )
         zoom_out_action.setShortcut("Ctrl+-")
         toolbar.addAction(zoom_out_action)
-        
-        zoom_fit_action = QAction(create_icon_from_svg(ICONS["zoom_fit"]), "Fit View", self, triggered=self.graph_widget.zoom_to_fit)
+
+        zoom_fit_action = QAction(
+            create_icon_from_svg(ICONS["zoom_fit"]), "Fit View", self, triggered=self.graph_widget.zoom_to_fit
+        )
         zoom_fit_action.setShortcut("Ctrl+0")
         toolbar.addAction(zoom_fit_action)
 
@@ -181,7 +191,7 @@ class MainWindow(QMainWindow):
     def update_clock_display(self, graph_snapshot: dict):
         clock_id = graph_snapshot.get("selected_clock_node_id")
         nodes = graph_snapshot.get("nodes", {})
-        
+
         if clock_id and clock_id in nodes:
             node_name = nodes[clock_id].name
             self.clock_status_label.setText(f"Clock: {node_name} ")
@@ -197,23 +207,24 @@ class MainWindow(QMainWindow):
         self.controller.cleanup_on_exit()
         event.accept()
 
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Re Node Processor - A real-time audio node graph application.")
     parser.add_argument(
         "--clean",
         action="store_true",
-        help="Start with a clean configuration, ignoring saved window geometry and last opened file."
+        help="Start with a clean configuration, ignoring saved window geometry and last opened file.",
     )
     parser.add_argument(
         "--load",
         type=str,
         metavar="PATH_TO_GRAPH.json",
-        help="Load a specific graph file on startup, overriding the last saved session."
+        help="Load a specific graph file on startup, overriding the last saved session.",
     )
     args = parser.parse_args()
 
     app = QApplication(sys.argv)
-    
+
     # Pass the clean flag to the MainWindow. This must happen before it reads any settings.
     window = MainWindow(clean_start=args.clean)
 

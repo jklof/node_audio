@@ -29,8 +29,9 @@ ICONS = {
         <line x1="8" y1="11" x2="14" y2="11"></line></svg>""",
     "zoom_fit": """<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <polyline points="15 3 21 3 21 9"></polyline><polyline points="9 21 3 21 3 15"></polyline>
-        <polyline points="21 15 21 21 15 21"></polyline><polyline points="3 9 3 3 9 3"></polyline></svg>"""
+        <polyline points="21 15 21 21 15 21"></polyline><polyline points="3 9 3 3 9 3"></polyline></svg>""",
 }
+
 
 def create_icon_from_svg(svg_data: str) -> QIcon:
     """
@@ -38,11 +39,11 @@ def create_icon_from_svg(svg_data: str) -> QIcon:
     to match the application's text color for theme awareness.
     """
     app = QApplication.instance()
-    hex_color = "#ffffff" # Default to white
+    hex_color = "#ffffff"  # Default to white
     if app:
         text_color = app.palette().color(QPalette.ColorRole.ButtonText)
         hex_color = text_color.name()
-    
+
     # Replace the "currentColor" placeholder with the actual theme color
     colored_svg_data = svg_data.replace("currentColor", hex_color)
 

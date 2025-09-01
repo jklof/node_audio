@@ -6,8 +6,10 @@ from node_system import Node
 
 logger = logging.getLogger(__name__)
 
+
 class NodePluginRegistry:
     """A registry for discovering and storing node plugin classes."""
+
     def __init__(self):
         self.node_types: dict[str, type[Node]] = {}
         self.node_categories: dict[str, list[str]] = {}
@@ -38,8 +40,10 @@ class NodePluginRegistry:
     def get_node_types_in_category(self, category: str) -> list[str]:
         return sorted(self.node_categories.get(category, []))
 
+
 # Global registry instance
 registry = NodePluginRegistry()
+
 
 def load_plugins(plugins_dir: str = "plugins"):
     """Loads all valid Python modules from the specified plugins directory."""

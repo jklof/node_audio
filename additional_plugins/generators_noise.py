@@ -43,6 +43,7 @@ class NoiseType(Enum):
 # ==============================================================================
 class NoiseGeneratorEmitter(QObject):
     """A dedicated QObject to safely emit signals from the logic to the UI thread."""
+
     stateUpdated = Signal(dict)
 
 
@@ -59,7 +60,9 @@ class NoiseGeneratorNodeItem(NodeItem):
 
         self.container_widget = QWidget()
         main_layout = QVBoxLayout(self.container_widget)
-        main_layout.setContentsMargins(NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING)
+        main_layout.setContentsMargins(
+            NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING
+        )
         main_layout.setSpacing(6)
 
         # --- Noise Type Selection ---
@@ -131,10 +134,10 @@ class NoiseGeneratorNodeItem(NodeItem):
         level = state.get("level", 0.0)
         with QSignalBlocker(self.level_dial):
             self.level_dial.setValue(int(round(level * 100.0)))
-        
+
         is_level_socket_connected = "level" in self.node_logic.inputs and self.node_logic.inputs["level"].connections
         self.level_dial.setEnabled(not is_level_socket_connected)
-        
+
         label_text = f"{level:.2f}"
         if is_level_socket_connected:
             label_text += " (ext)"
@@ -189,7 +192,7 @@ class NoiseGeneratorNode(Node):
         self._b_blue, self._a_blue = scipy.signal.butter(1, 1000.0 / nyquist, btype="high")
         # Violet Noise: 2nd order HPF @ 4000Hz
         self._b_violet, self._a_violet = scipy.signal.butter(2, 4000.0 / nyquist, btype="high")
-        
+
         # Reset initial filter conditions (zi)
         self._zi_pink = scipy.signal.lfilter_zi(self._b_pink, self._a_pink) * 0.0
         self._zi_brown = scipy.signal.lfilter_zi(self._b_brown, self._a_brown) * 0.0
@@ -257,16 +260,24 @@ class NoiseGeneratorNode(Node):
         # Apply filter based on noise type
         if noise_type == NoiseType.PINK:
             processed_mono_signal, zf = scipy.signal.lfilter(self._b_pink, self._a_pink, mono_white_noise, zi=zi_pink)
-            with self._lock: self._zi_pink = zf
+            with self._lock:
+                self._zi_pink = zf
         elif noise_type == NoiseType.BROWN:
-            processed_mono_signal, zf = scipy.signal.lfilter(self._b_brown, self._a_brown, mono_white_noise, zi=zi_brown)
-            with self._lock: self._zi_brown = zf
+            processed_mono_signal, zf = scipy.signal.lfilter(
+                self._b_brown, self._a_brown, mono_white_noise, zi=zi_brown
+            )
+            with self._lock:
+                self._zi_brown = zf
         elif noise_type == NoiseType.BLUE:
             processed_mono_signal, zf = scipy.signal.lfilter(self._b_blue, self._a_blue, mono_white_noise, zi=zi_blue)
-            with self._lock: self._zi_blue = zf
+            with self._lock:
+                self._zi_blue = zf
         elif noise_type == NoiseType.VIOLET:
-            processed_mono_signal, zf = scipy.signal.lfilter(self._b_violet, self._a_violet, mono_white_noise, zi=zi_violet)
-            with self._lock: self._zi_violet = zf
+            processed_mono_signal, zf = scipy.signal.lfilter(
+                self._b_violet, self._a_violet, mono_white_noise, zi=zi_violet
+            )
+            with self._lock:
+                self._zi_violet = zf
 
         processed_mono_signal *= level
         np.clip(processed_mono_signal, -1.0, 1.0, out=processed_mono_signal)

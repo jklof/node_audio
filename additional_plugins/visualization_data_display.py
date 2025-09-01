@@ -15,6 +15,7 @@ from constants import SpectralFrame
 # Configure logging
 logger = logging.getLogger(__name__)
 
+
 # ============================================================
 # UI Item Class for Data Analyze Node
 # ============================================================
@@ -55,7 +56,9 @@ class DataDisplayNodeItem(NodeItem):
             else:
                 lines.append(f"Data Shape: {stats.get('data_shape', 'N/A')}")
                 lines.append(f"Data DType: {stats.get('data_dtype', 'N/A')}")
-                lines.append(f"FFT/Hop/Win: {stats.get('fft_size', 'N/A')} / {stats.get('hop_size', 'N/A')} / {stats.get('window_size', 'N/A')}")
+                lines.append(
+                    f"FFT/Hop/Win: {stats.get('fft_size', 'N/A')} / {stats.get('hop_size', 'N/A')} / {stats.get('window_size', 'N/A')}"
+                )
                 # New stats for the complex data
                 lines.append(f"Mag. Min: {stats.get('mag_min', 'N/A'):.3f}")
                 lines.append(f"Mag. Max: {stats.get('mag_max', 'N/A'):.3f}")
@@ -105,10 +108,13 @@ class DataDisplayNode(Node):
 
     class WrappedSignal(QObject):
         _s = Signal(dict)
+
         def emit(self, data):
             data_copy = data.copy() if data is not None else None
             self._s.emit(data_copy)
-        def connect(self, x): self._s.connect(x)
+
+        def connect(self, x):
+            self._s.connect(x)
 
     def __init__(self, name, node_id=None):
         super().__init__(name, node_id)
@@ -147,7 +153,7 @@ class DataDisplayNode(Node):
             # --- NEW: Handle SpectralFrame ---
             elif isinstance(signal, SpectralFrame):
                 try:
-                    mag = np.abs(signal.data) # Get magnitude
+                    mag = np.abs(signal.data)  # Get magnitude
                     new_stats = {
                         "is_spectral_frame": True,
                         "data_shape": str(signal.data.shape),

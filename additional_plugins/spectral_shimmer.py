@@ -15,11 +15,13 @@ from PySide6.QtWidgets import QWidget, QLabel, QSlider, QVBoxLayout
 # --- Logging ---
 logger = logging.getLogger(__name__)
 
+
 # ==============================================================================
 # 1. State Emitter for UI Communication
 # ==============================================================================
 class SpectralShimmerEmitter(QObject):
     stateUpdated = Signal(dict)
+
 
 # ==============================================================================
 # 2. Custom UI Class (SpectralShimmerNodeItem)
@@ -29,21 +31,23 @@ class SpectralShimmerNodeItem(NodeItem):
 
     def __init__(self, node_logic: "SpectralShimmerNode"):
         super().__init__(node_logic, width=self.NODE_SPECIFIC_WIDTH)
-        
+
         self.container_widget = QWidget()
         main_layout = QVBoxLayout(self.container_widget)
-        main_layout.setContentsMargins(NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING)
+        main_layout.setContentsMargins(
+            NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING
+        )
         main_layout.setSpacing(5)
 
         # --- Create Slider Controls ---
         self.pitch_slider, self.pitch_label = self._create_slider_control("Pitch Shift", -12.0, 24.0, "{:+.1f} st")
         self.feedback_slider, self.feedback_label = self._create_slider_control("Feedback", 0.0, 1.0, "{:.0%}")
         self.mix_slider, self.mix_label = self._create_slider_control("Mix", 0.0, 1.0, "{:.0%}")
-        
+
         for label, slider in [
             (self.pitch_label, self.pitch_slider),
             (self.feedback_label, self.feedback_slider),
-            (self.mix_label, self.mix_slider)
+            (self.mix_label, self.mix_slider),
         ]:
             main_layout.addWidget(label)
             main_layout.addWidget(slider)
@@ -55,7 +59,7 @@ class SpectralShimmerNodeItem(NodeItem):
         self.feedback_slider.valueChanged.connect(self._on_feedback_changed)
         self.mix_slider.valueChanged.connect(self._on_mix_changed)
         self.node_logic.emitter.stateUpdated.connect(self._on_state_updated)
-        
+
         self.updateFromLogic()
 
     def _create_slider_control(self, name: str, min_val: float, max_val: float, fmt: str) -> tuple[QSlider, QLabel]:
@@ -76,16 +80,19 @@ class SpectralShimmerNodeItem(NodeItem):
     def _map_logical_to_slider(self, slider: QSlider, value: float) -> int:
         min_val, max_val = slider.property("min_val"), slider.property("max_val")
         range_val = max_val - min_val
-        if range_val == 0: return 0
+        if range_val == 0:
+            return 0
         norm = (value - min_val) / range_val
         return int(np.clip(norm, 0.0, 1.0) * 1000.0)
-            
+
     @Slot()
     def _on_pitch_changed(self):
         self.node_logic.set_pitch_shift(self._map_slider_to_logical(self.pitch_slider))
+
     @Slot()
     def _on_feedback_changed(self):
         self.node_logic.set_feedback(self._map_slider_to_logical(self.feedback_slider))
+
     @Slot()
     def _on_mix_changed(self):
         self.node_logic.set_mix(self._map_slider_to_logical(self.mix_slider))
@@ -97,17 +104,18 @@ class SpectralShimmerNodeItem(NodeItem):
             "feedback": (self.feedback_slider, self.feedback_label),
             "mix": (self.mix_slider, self.mix_label),
         }
-        
+
         for key, (slider, label) in sliders_map.items():
             value = state.get(key, slider.property("min_val"))
             is_connected = key in self.node_logic.inputs and self.node_logic.inputs[key].connections
             slider.setEnabled(not is_connected)
-            
+
             with QSignalBlocker(slider):
                 slider.setValue(self._map_logical_to_slider(slider, value))
-            
+
             label_text = f"{slider.property('name')}: {slider.property('format').format(value)}"
-            if is_connected: label_text += " (ext)"
+            if is_connected:
+                label_text += " (ext)"
             label.setText(label_text)
 
     @Slot()
@@ -138,12 +146,12 @@ class SpectralShimmerNode(Node):
         self.add_output("spectral_frame_out", data_type=SpectralFrame)
 
         self._lock = threading.Lock()
-        
+
         # --- Internal State ---
         self._pitch_shift_st: float = 12.0
         self._feedback: float = 0.75
         self._mix: float = 0.5
-        
+
         # --- DSP Buffers & State ---
         self._shimmer_buffer: Optional[np.ndarray] = None
         self._last_frame_params: tuple = (0, 0, 0)
@@ -158,7 +166,7 @@ class SpectralShimmerNode(Node):
                 state_to_emit = self._get_current_state_snapshot_locked()
         if state_to_emit:
             self.emitter.stateUpdated.emit(state_to_emit)
-            
+
     @Slot(float)
     def set_feedback(self, value: float):
         state_to_emit = None
@@ -169,7 +177,7 @@ class SpectralShimmerNode(Node):
                 state_to_emit = self._get_current_state_snapshot_locked()
         if state_to_emit:
             self.emitter.stateUpdated.emit(state_to_emit)
-            
+
     @Slot(float)
     def set_mix(self, value: float):
         state_to_emit = None
@@ -212,42 +220,48 @@ class SpectralShimmerNode(Node):
             # --- Update state from sockets if connected ---
             pitch_socket = input_data.get("pitch_shift")
             if pitch_socket is not None and self._pitch_shift_st != pitch_socket:
-                self._pitch_shift_st = pitch_socket; ui_update_needed = True
+                self._pitch_shift_st = pitch_socket
+                ui_update_needed = True
 
             feedback_socket = input_data.get("feedback")
             if feedback_socket is not None:
                 new_feedback = np.clip(feedback_socket, 0.0, 1.0)
                 if self._feedback != new_feedback:
-                    self._feedback = new_feedback; ui_update_needed = True
+                    self._feedback = new_feedback
+                    ui_update_needed = True
 
             mix_socket = input_data.get("mix")
             if mix_socket is not None:
                 new_mix = np.clip(mix_socket, 0.0, 1.0)
                 if self._mix != new_mix:
-                    self._mix = new_mix; ui_update_needed = True
-            
+                    self._mix = new_mix
+                    ui_update_needed = True
+
             if ui_update_needed:
                 state_snapshot_to_emit = self._get_current_state_snapshot_locked()
-            
+
             num_bins, num_channels = frame.data.shape
             current_frame_params = (frame.fft_size, frame.hop_size, num_channels)
             if self._last_frame_params != current_frame_params:
                 self._last_frame_params = current_frame_params
                 self._shimmer_buffer = np.zeros((num_bins, num_channels), dtype=DEFAULT_COMPLEX_DTYPE)
 
-            pitch_ratio = 2**(self._pitch_shift_st / 12.0)
+            pitch_ratio = 2 ** (self._pitch_shift_st / 12.0)
             shifted_tail = self._pitch_shift_frame(self._shimmer_buffer, pitch_ratio)
             wet_signal = shifted_tail * self._feedback
             self._shimmer_buffer = frame.data + wet_signal
             output_fft = (frame.data * (1.0 - self._mix)) + (wet_signal * self._mix)
-            
+
         if state_snapshot_to_emit:
             self.emitter.stateUpdated.emit(state_snapshot_to_emit)
-            
+
         output_frame = SpectralFrame(
-            data=output_fft, fft_size=frame.fft_size, hop_size=frame.hop_size,
-            window_size=frame.window_size, sample_rate=frame.sample_rate,
-            analysis_window=frame.analysis_window
+            data=output_fft,
+            fft_size=frame.fft_size,
+            hop_size=frame.hop_size,
+            window_size=frame.window_size,
+            sample_rate=frame.sample_rate,
+            analysis_window=frame.analysis_window,
         )
         return {"spectral_frame_out": output_frame}
 
@@ -255,10 +269,10 @@ class SpectralShimmerNode(Node):
         with self._lock:
             self._shimmer_buffer = None
             self._last_frame_params = (0, 0, 0)
-            
+
     def serialize_extra(self) -> dict:
         return self.get_current_state_snapshot()
-    
+
     def deserialize_extra(self, data: dict):
         with self._lock:
             self._pitch_shift_st = data.get("pitch_shift", 12.0)

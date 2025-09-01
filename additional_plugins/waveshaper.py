@@ -36,8 +36,10 @@ class ShaperType(Enum):
     FOLD = "Foldback"
     SINE = "Sine Distortion"
 
+
 class WaveShaperEmitter(QObject):
     """A dedicated QObject to safely emit signals from the logic to the UI thread."""
+
     stateUpdated = Signal(dict)
 
 
@@ -54,7 +56,9 @@ class WaveShaperNodeItem(NodeItem):
 
         self.container_widget = QWidget()
         main_layout = QVBoxLayout(self.container_widget)
-        main_layout.setContentsMargins(NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING)
+        main_layout.setContentsMargins(
+            NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING
+        )
         main_layout.setSpacing(6)
 
         # --- Shaper Type Selection ---
@@ -150,7 +154,8 @@ class WaveShaperNodeItem(NodeItem):
         # Update Shaper Type
         with QSignalBlocker(self.type_combo):
             index = self.type_combo.findData(shaper_type)
-            if index != -1: self.type_combo.setCurrentIndex(index)
+            if index != -1:
+                self.type_combo.setCurrentIndex(index)
 
         # Update Drive
         with QSignalBlocker(self.drive_dial):
@@ -161,7 +166,8 @@ class WaveShaperNodeItem(NodeItem):
         self.drive_dial.setEnabled(not is_drive_socket_connected)
 
         label_text = f"{drive:.1f}"
-        if is_drive_socket_connected: label_text += " (ext)"
+        if is_drive_socket_connected:
+            label_text += " (ext)"
         self.drive_value_label.setText(label_text)
 
         # Update Mix
@@ -173,7 +179,8 @@ class WaveShaperNodeItem(NodeItem):
         self.mix_dial.setEnabled(not is_mix_socket_connected)
 
         label_text = f"{mix:.2f}"
-        if is_mix_socket_connected: label_text += " (ext)"
+        if is_mix_socket_connected:
+            label_text += " (ext)"
         self.mix_value_label.setText(label_text)
 
     @Slot()
@@ -271,13 +278,13 @@ class WaveShaperNode(Node):
 
             drive = self._drive
             shaper_type = self._shaper_type
-        
+
         if state_snapshot_to_emit:
             self.emitter.stateUpdated.emit(state_snapshot_to_emit)
 
         # 1. Apply drive
         driven_signal = signal * drive
-        
+
         # 2. Apply shaping function
         output_signal = None
         if shaper_type == ShaperType.SOFT_CLIP:
