@@ -16,6 +16,9 @@ import logging
 import time
 from typing import Any, Dict, Optional
 
+# --- MODIFIED: Added torchaudio import ---
+import torchaudio
+from torchaudio.pipelines import HUBERT_BASE
 import resampy
 from constants import DEFAULT_BLOCKSIZE, DEFAULT_SAMPLERATE, DEFAULT_DTYPE
 
@@ -48,12 +51,15 @@ EPSILON = 1e-9
 
 
 # ==============================================================================
-# Helper classes for RVC Models (No changes here)
+# MODIFIED: Helper class for RVC HuBERT now uses torchaudio
 # ==============================================================================
 class RVC_Hubert:
-    def __init__(self, model_path: str, gpu: int = 0):
-        if not os.path.exists(model_path):
-            raise FileNotFoundError(f"HuBERT model not found at {model_path}")
+    """
+    MODIFIED: This class now loads the HuBERT model from the torchaudio
+    bundle and does not require a local model file.
+    """
+
+    def __init__(self, gpu: int = 0):
         if gpu < 0 or not torch.cuda.is_available():
             self.device = torch.device("cpu")
             self.is_half = False
@@ -64,13 +70,12 @@ class RVC_Hubert:
                 self.is_half = not ("16" in gpu_name or "P40" in gpu_name or "1070" in gpu_name or "1080" in gpu_name)
             except Exception:
                 self.is_half = False
-        from fairseq import checkpoint_utils
 
-        models, _, _ = checkpoint_utils.load_model_ensemble_and_task(
-            [model_path],
-            suffix="",
-        )
-        model = models[0].eval().to(self.device)
+        logger.info("Loading HuBERT model from torchaudio bundle...")
+        bundle = HUBERT_BASE
+        model = bundle.get_model().to(self.device)
+        model.eval()
+
         if self.is_half:
             model = model.half()
         self.model = model
@@ -80,13 +85,12 @@ class RVC_Hubert:
         feats = torch.from_numpy(audio_16khz).float().view(1, -1).to(self.device)
         if self.is_half:
             feats = feats.half()
-        padding_mask = torch.BoolTensor(feats.shape).fill_(False).to(self.device)
-        inputs = {"source": feats, "padding_mask": padding_mask, "output_layer": emb_output_layer}
-        logits = self.model.extract_features(**inputs)
-        if use_final_proj:
-            feats_out = self.model.final_proj(logits[0])
+        hidden_states, _ = self.model.extract_features(feats)
+
+        if emb_output_layer < len(hidden_states):
+            feats_out = hidden_states[emb_output_layer]
         else:
-            feats_out = logits[0]
+            feats_out = hidden_states[-1]
         return feats_out.squeeze(0).cpu().numpy()
 
 
@@ -107,19 +111,17 @@ class RVCUnifiedNodeItem(NodeItem):
         layout.setSpacing(5)
 
         self.load_rvc_button = QPushButton("Load RVC Model (.onnx)")
-        self.load_hubert_button = QPushButton("Load HuBERT Model (.pt)")
         self.load_rmvpe_button = QPushButton("Load RMVPE Model (.onnx)")
 
         self.rvc_label = QLabel("RVC: Not loaded")
         self.rvc_label.setStyleSheet("font-size: 9px; color: gray;")
-        self.hubert_label = QLabel("HuBERT: Not loaded")
-        self.hubert_label.setStyleSheet("font-size: 9px; color: gray;")
+        self.hubert_label = QLabel("HuBERT: torchaudio (built-in)")
+        self.hubert_label.setStyleSheet("font-size: 9px; color: lightgray;")
         self.rmvpe_label = QLabel("RMVPE: Not loaded")
         self.rmvpe_label.setStyleSheet("font-size: 9px; color: gray;")
 
         layout.addWidget(self.load_rvc_button)
         layout.addWidget(self.rvc_label)
-        layout.addWidget(self.load_hubert_button)
         layout.addWidget(self.hubert_label)
         layout.addWidget(self.load_rmvpe_button)
         layout.addWidget(self.rmvpe_label)
@@ -195,19 +197,19 @@ class RVCUnifiedNodeItem(NodeItem):
         sola_layout.addLayout(sola_search_layout)
         layout.addLayout(sola_layout)
 
-        # --- NEW: Pre-buffer control ---
+        # --- FIX: Added UI control for the pre-buffer context ---
         prebuffer_layout = QVBoxLayout()
         self.prebuffer_spin = QSpinBox()
         self.prebuffer_spin.setRange(0, 1000)
         self.prebuffer_spin.setSingleStep(10)
         self.prebuffer_spin.setValue(100)
         self.prebuffer_spin.setToolTip(
-            "Context audio given to the model before the main chunk (ms).\nHelps prevent artifacts at the start of chunks."
+            "Context audio given to the model before the main chunk (ms).\nCRITICAL for reducing robotic artifacts."
         )
         prebuffer_layout.addWidget(QLabel("Pre-Buffer (ms):"))
         prebuffer_layout.addWidget(self.prebuffer_spin)
         layout.addLayout(prebuffer_layout)
-        # --- END NEW ---
+        # --- END FIX ---
 
         status_layout = QHBoxLayout()
         self.status_label = QLabel("Status: Idle")
@@ -226,7 +228,6 @@ class RVCUnifiedNodeItem(NodeItem):
         self._populate_devices()
 
         self.load_rvc_button.clicked.connect(lambda: self._on_load_model_clicked("rvc"))
-        self.load_hubert_button.clicked.connect(lambda: self._on_load_model_clicked("hubert"))
         self.load_rmvpe_button.clicked.connect(lambda: self._on_load_model_clicked("rmvpe"))
         self.device_combo.currentIndexChanged.connect(self._on_device_change)
         self.spk_id_spin.valueChanged.connect(self.node_logic.set_speaker_id)
@@ -236,7 +237,8 @@ class RVCUnifiedNodeItem(NodeItem):
         self.chunk_spin.valueChanged.connect(self.node_logic.set_chunk_size_ms)
         self.crossfade_spin.valueChanged.connect(self.node_logic.set_crossfade_ms)
         self.sola_search_spin.valueChanged.connect(self.node_logic.set_sola_search_ms)
-        self.prebuffer_spin.valueChanged.connect(self.node_logic.set_extra_conversion_ms)  # --- NEW ---
+        # --- FIX: Connect the new pre-buffer UI control ---
+        self.prebuffer_spin.valueChanged.connect(self.node_logic.set_extra_conversion_ms)
 
         self.ui_updater = QTimer(self)
         self.ui_updater.setInterval(UI_UPDATE_INTERVAL_MS)
@@ -258,8 +260,8 @@ class RVCUnifiedNodeItem(NodeItem):
     @Slot(str)
     def _on_load_model_clicked(self, model_type: str):
         view = self.scene().views()[0] if self.scene() and self.scene().views() else None
-        title_map = {"rvc": "RVC ONNX", "hubert": "HuBERT", "rmvpe": "RMVPE ONNX"}
-        ext_map = {"rvc": "ONNX (*.onnx)", "hubert": "PyTorch (*.pt)", "rmvpe": "ONNX (*.onnx)"}
+        title_map = {"rvc": "RVC ONNX", "rmvpe": "RMVPE ONNX"}
+        ext_map = {"rvc": "ONNX (*.onnx)", "rmvpe": "ONNX (*.onnx)"}
         path, _ = QFileDialog.getOpenFileName(view, f"Select {title_map[model_type]} Model", "", ext_map[model_type])
         if path:
             self.node_logic.set_model_path(model_type, path)
@@ -278,7 +280,6 @@ class RVCUnifiedNodeItem(NodeItem):
             label.setText(f"{key.upper()}: ...{path[-40:]}" if path else f"{key.upper()}: Not loaded")
 
         set_label(self.rvc_label, "rvc")
-        set_label(self.hubert_label, "hubert")
         set_label(self.rmvpe_label, "rmvpe")
 
         with QSignalBlocker(self.device_combo):
@@ -297,8 +298,9 @@ class RVCUnifiedNodeItem(NodeItem):
             self.crossfade_spin.setValue(state.get("crossfade_ms", 100))
         with QSignalBlocker(self.sola_search_spin):
             self.sola_search_spin.setValue(state.get("sola_search_ms", 10))
+        # --- FIX: Update the new pre-buffer spinbox from state ---
         with QSignalBlocker(self.prebuffer_spin):
-            self.prebuffer_spin.setValue(state.get("extra_conversion_ms", 100))  # --- NEW ---
+            self.prebuffer_spin.setValue(state.get("extra_conversion_ms", 100))
 
         is_strained = state.get("is_strained", False)
         status_text = (
@@ -333,14 +335,13 @@ class RVCUnifiedNode(Node):
     CATEGORY = "RVC"
     DESCRIPTION = "A self-contained RVC pipeline for robust, real-time voice conversion. Combines pitch, content, and inference into one node to prevent synchronization issues."
 
-    # ... (keep __init__ and all parameter setting methods like set_model_path, set_pitch_shift, etc.) ...
     def __init__(self, name: str, node_id: Optional[str] = None):
         super().__init__(name, node_id)
         self.add_input("audio_in", data_type=np.ndarray)
         self.add_output("audio_out", data_type=np.ndarray)
         self._lock = threading.Lock()
 
-        self._model_paths = {"rvc": None, "hubert": None, "rmvpe": None}
+        self._model_paths = {"rvc": None, "rmvpe": None}
         self._rvc_session: Optional[onnxruntime.InferenceSession] = None
         self._hubert_model: Optional[RVC_Hubert] = None
         self._rmvpe_session: Optional[onnxruntime.InferenceSession] = None
@@ -382,11 +383,7 @@ class RVCUnifiedNode(Node):
 
     def _load_all_models(self):
         with self._lock:
-            rvc_path, hubert_path, rmvpe_path = (
-                self._model_paths["rvc"],
-                self._model_paths["hubert"],
-                self._model_paths["rmvpe"],
-            )
+            rvc_path, rmvpe_path = (self._model_paths["rvc"], self._model_paths["rmvpe"])
             gpu = self._device
 
         def load_onnx(path, model_name):
@@ -401,10 +398,7 @@ class RVCUnifiedNode(Node):
         try:
             rvc_session = load_onnx(rvc_path, "RVC")
             rmvpe_session = load_onnx(rmvpe_path, "RMVPE")
-            hubert_model = None
-            if hubert_path and os.path.exists(hubert_path):
-                logger.info(f"[{self.name}] Loading HuBERT model...")
-                hubert_model = RVC_Hubert(hubert_path, gpu)
+            hubert_model = RVC_Hubert(gpu)
 
             metadata, is_half, model_sr = {}, False, DEFAULT_SAMPLERATE
             if rvc_session:
@@ -443,16 +437,13 @@ class RVCUnifiedNode(Node):
             crossfade_samples = int(self._crossfade_ms / 1000 * DEFAULT_SAMPLERATE)
             if self._last_crossfade_ms == self._crossfade_ms:
                 return
-
             if crossfade_samples <= 0:
                 self._np_prev_strength = np.array([], dtype=DEFAULT_DTYPE)
                 self._np_cur_strength = np.array([], dtype=DEFAULT_DTYPE)
             else:
-                logger.info(f"[{self.name}] Regenerating crossfade curves for {crossfade_samples} samples.")
                 fade_range = np.arange(crossfade_samples) / crossfade_samples
                 self._np_prev_strength = np.cos(fade_range * 0.5 * np.pi) ** 2
                 self._np_cur_strength = np.cos((1 - fade_range) * 0.5 * np.pi) ** 2
-
             self._last_crossfade_ms = self._crossfade_ms
             self._sola_buffer = None
 
@@ -465,6 +456,7 @@ class RVCUnifiedNode(Node):
                 sola_search_samples = int(self._sola_search_ms / 1000 * DEFAULT_SAMPLERATE)
                 extra_samples = int(self._extra_conversion_ms / 1000 * DEFAULT_SAMPLERATE)
 
+                # --- FIX: This is the total audio needed for one full conversion cycle ---
                 required_input_len = chunk_samples + crossfade_samples + sola_search_samples + extra_samples
 
                 has_enough_data = len(self._input_buffer) >= required_input_len
@@ -473,55 +465,35 @@ class RVCUnifiedNode(Node):
             if has_enough_data and self._are_all_models_loaded():
                 try:
                     with self._lock:
+                        # --- FIX: Slice the required audio from the end of the input buffer ---
                         audio_to_process = self._input_buffer[-required_input_len:]
-                        self._input_buffer = self._input_buffer[-(required_input_len - chunk_samples) :]
+                        # --- FIX: Slide the buffer window forward, keeping the context for the next round ---
+                        self._input_buffer = self._input_buffer[-(required_input_len - chunk_samples):]
 
-                        hubert_model, rmvpe_session, rvc_session = (
-                            self._hubert_model,
-                            self._rmvpe_session,
-                            self._rvc_session,
-                        )
-                        pitch_shift, speaker_id, metadata, is_half = (
-                            self._pitch_shift,
-                            self._speaker_id,
-                            self._metadata,
-                            self._is_half,
-                        )
-                        silent_threshold, vad_enabled, model_sr = (
-                            self._silent_threshold,
-                            self._vad_enabled,
-                            self._model_sr,
-                        )
+                        # (Copying state variables to local scope remains the same)
+                        hubert_model, rmvpe_session, rvc_session = (self._hubert_model, self._rmvpe_session, self._rvc_session)
+                        pitch_shift, speaker_id, metadata, is_half = (self._pitch_shift, self._speaker_id, self._metadata, self._is_half)
+                        silent_threshold, vad_enabled, model_sr = (self._silent_threshold, self._vad_enabled, self._model_sr)
 
-                    # VAD check on the actual chunk to be output
+                    # VAD check on the actual chunk that will be output (after the pre-buffer)
                     vad_check_region = audio_to_process[extra_samples : extra_samples + chunk_samples]
                     rms = np.sqrt(np.mean(np.square(vad_check_region)) + EPSILON)
 
                     if vad_enabled and rms < silent_threshold:
-                        # Calculate silent output length based on the full processing block size
-                        output_len_model_sr = int(len(audio_to_process) * model_sr / DEFAULT_SAMPLERATE)
-                        audio_out_model_sr = np.zeros(output_len_model_sr, dtype=DEFAULT_DTYPE)
+                        # If silent, generate silence for the output chunk length
+                        stable_audio_out = np.zeros(chunk_samples, dtype=DEFAULT_DTYPE)
                     else:
-                        audio_16k = resampy.resample(
-                            np.ascontiguousarray(audio_to_process),
-                            sr_orig=DEFAULT_SAMPLERATE,
-                            sr_new=RVC_REQUIRED_SR,
-                            filter="kaiser_fast",
-                        )
-                        pitchf = rmvpe_session.run(
-                            ["pitchf"],
-                            {"waveform": audio_16k[np.newaxis, :], "threshold": np.array([0.3]).astype(np.float32)},
-                        )[0].squeeze()
+                        # Full processing path
+                        audio_16k = resampy.resample(np.ascontiguousarray(audio_to_process), sr_orig=DEFAULT_SAMPLERATE, sr_new=RVC_REQUIRED_SR, filter="kaiser_fast")
+                        pitchf = rmvpe_session.run(["pitchf"], {"waveform": audio_16k[np.newaxis, :], "threshold": np.array([0.3]).astype(np.float32)})[0].squeeze()
                         pitchf *= pow(2, pitch_shift / 12)
                         f0_mel = 1127.0 * np.log(1.0 + pitchf / 700.0)
-                        f0_mel[f0_mel > 0] = (f0_mel[f0_mel > 0] - self.f0_mel_min) * 254 / (
-                            self.f0_mel_max - self.f0_mel_min
-                        ) + 1
+                        f0_mel[f0_mel > 0] = (f0_mel[f0_mel > 0] - self.f0_mel_min) * 254 / (self.f0_mel_max - self.f0_mel_min) + 1
                         f0_mel[f0_mel <= 1] = 1
                         f0_mel[f0_mel > 255] = 255
                         f0_coarse = np.rint(f0_mel).astype(np.int64)
-                        emb_layer, final_proj = (9, True) if metadata.get("version", "v1") == "v1" else (12, False)
-                        features = hubert_model.encode(audio_16k, emb_layer, final_proj)
+                        emb_layer = 9 if metadata.get("version", "v1") == "v1" else 12
+                        features = hubert_model.encode(audio_16k, emb_layer)
                         min_len = min(len(features), len(f0_coarse))
                         feats_dtype = np.float16 if is_half else np.float32
                         input_dict = {
@@ -532,27 +504,22 @@ class RVCUnifiedNode(Node):
                         if metadata.get("f0", 1) == 1:
                             input_dict["pitch"] = np.expand_dims(f0_coarse[:min_len], 0)
                             input_dict["pitchf"] = np.expand_dims(pitchf[:min_len], 0).astype(np.float32)
+
                         audio_out_model_sr = rvc_session.run(["audio"], input_dict)[0].squeeze()
 
-                    # --- FIX: DISCARD PRE-BUFFER OUTPUT BEFORE RESAMPLING AND STITCHING ---
-                    extra_samples_at_model_sr = int(self._extra_conversion_ms / 1000 * model_sr)
-                    stable_audio_out_model_sr = audio_out_model_sr[extra_samples_at_model_sr:]
+                        # --- CRITICAL FIX: DISCARD PRE-BUFFER OUTPUT ---
+                        extra_samples_at_model_sr = int(self._extra_conversion_ms / 1000 * model_sr)
+                        stable_audio_out_model_sr = audio_out_model_sr[extra_samples_at_model_sr:]
 
-                    if len(stable_audio_out_model_sr) == 0:
-                        stable_audio_out = np.zeros(chunk_samples, dtype=DEFAULT_DTYPE)
-                    elif model_sr != DEFAULT_SAMPLERATE:
-                        stable_audio_out = resampy.resample(
-                            np.ascontiguousarray(stable_audio_out_model_sr),
-                            sr_orig=model_sr,
-                            sr_new=DEFAULT_SAMPLERATE,
-                            filter="kaiser_fast",
-                        )
-                    else:
-                        stable_audio_out = stable_audio_out_model_sr
+                        if len(stable_audio_out_model_sr) == 0:
+                            stable_audio_out = np.zeros(chunk_samples, dtype=DEFAULT_DTYPE)
+                        elif model_sr != DEFAULT_SAMPLERATE:
+                            stable_audio_out = resampy.resample(np.ascontiguousarray(stable_audio_out_model_sr), sr_orig=model_sr, sr_new=DEFAULT_SAMPLERATE, filter="kaiser_fast")
+                        else:
+                            stable_audio_out = stable_audio_out_model_sr
 
-                    self._perform_sola_stitching(
-                        stable_audio_out, chunk_samples, crossfade_samples, sola_search_samples
-                    )
+                    # Perform SOLA stitching with the high-quality, stable output
+                    self._perform_sola_stitching(stable_audio_out, chunk_samples, crossfade_samples, sola_search_samples)
 
                 except Exception as e:
                     logger.error(f"[{self.name}] Error in pipeline worker: {e}", exc_info=True)
@@ -607,9 +574,12 @@ class RVCUnifiedNode(Node):
 
     @Slot(str, str)
     def set_model_path(self, model_type: str, path: str):
-        with self._lock:
-            self._model_paths[model_type] = path
-        self._load_all_models()
+        if model_type in self._model_paths:
+            with self._lock:
+                self._model_paths[model_type] = path
+            self._load_all_models()
+        else:
+            logger.warning(f"[{self.name}] Unknown model type specified: {model_type}")
 
     @Slot(int)
     def set_device(self, device_id: int):
@@ -667,7 +637,6 @@ class RVCUnifiedNode(Node):
             )
             return {
                 "rvc_path": self._model_paths["rvc"],
-                "hubert_path": self._model_paths["hubert"],
                 "rmvpe_path": self._model_paths["rmvpe"],
                 "device": self._device,
                 "speaker_id": self._speaker_id,
@@ -688,7 +657,6 @@ class RVCUnifiedNode(Node):
 
     def process(self, input_data: dict) -> dict:
         audio_in = input_data.get("audio_in")
-
         with self._lock:
             if audio_in is not None:
                 mono_signal = np.mean(audio_in, axis=1) if audio_in.ndim > 1 else audio_in
@@ -700,14 +668,12 @@ class RVCUnifiedNode(Node):
                 self._last_valid_output = final_output_block
             else:
                 final_output_block = self._last_valid_output
-                if self._is_processing:
-                    logger.debug(f"[{self.name}] Buffer underrun, repeating last block.")
 
         return {"audio_out": final_output_block.reshape(-1, 1)}
 
     def start(self):
         with self._lock:
-            chunk_samples = int(self._chunk_size_ms / 1000 * DEFAULT_SAMPLERATE)
+            # --- FIX: The initial padding must now account for the pre-buffer and other context ---
             crossfade_samples = int(self._crossfade_ms / 1000 * DEFAULT_SAMPLERATE)
             sola_search_samples = int(self._sola_search_ms / 1000 * DEFAULT_SAMPLERATE)
             extra_samples = int(self._extra_conversion_ms / 1000 * DEFAULT_SAMPLERATE)
@@ -739,7 +705,6 @@ class RVCUnifiedNode(Node):
         with self._lock:
             return {
                 "rvc_model_path": self._model_paths["rvc"],
-                "hubert_model_path": self._model_paths["hubert"],
                 "rmvpe_model_path": self._model_paths["rmvpe"],
                 "device": self._device,
                 "speaker_id": self._speaker_id,
@@ -754,7 +719,6 @@ class RVCUnifiedNode(Node):
 
     def deserialize_extra(self, data: dict):
         self._model_paths["rvc"] = data.get("rvc_model_path")
-        self._model_paths["hubert"] = data.get("hubert_model_path")
         self._model_paths["rmvpe"] = data.get("rmvpe_model_path")
         self._device = data.get("device", -1)
         self._speaker_id = data.get("speaker_id", 0)

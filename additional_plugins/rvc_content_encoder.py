@@ -9,13 +9,15 @@ from typing import Dict, Optional
 # --- Core Dependencies for this Plugin ---
 try:
     import torch
+    import torchaudio
+    from torchaudio.pipelines import HUBERT_BASE
     import resampy
-    from fairseq import checkpoint_utils
 
     RVC_HUBERT_DEPS_AVAILABLE = True
 except ImportError:
     RVC_HUBERT_DEPS_AVAILABLE = False
 
+    # Define a dummy class if dependencies are missing
     class RVCContentEncoder:
         pass
 
@@ -45,10 +47,8 @@ MAX_BUFFER_CHUNKS = 5
 if RVC_HUBERT_DEPS_AVAILABLE:
 
     class RVCContentEncoder:
-        def __init__(self, model_path: str, gpu: int = 0):
-            if not os.path.exists(model_path):
-                raise FileNotFoundError(f"HuBERT model not found at {model_path}")
 
+        def __init__(self, gpu: int = 0):
             if gpu < 0 or not torch.cuda.is_available():
                 self.device = torch.device("cpu")
                 self.is_half = False
@@ -62,14 +62,13 @@ if RVC_HUBERT_DEPS_AVAILABLE:
                 except Exception:
                     self.is_half = False
 
-            logger.info(f"Loading HuBERT model from: {model_path}")
+            logger.info("Loading HuBERT model from torchaudio bundle...")
             logger.info(f"Using device: {self.device}, Half precision: {self.is_half}")
 
-            models, saved_cfg, task = checkpoint_utils.load_model_ensemble_and_task(
-                [model_path],
-                suffix="",
-            )
-            model = models[0].eval().to(self.device)
+            # Load the pre-trained HuBERT model from the torchaudio pipeline
+            bundle = HUBERT_BASE
+            model = bundle.get_model().to(self.device)
+            model.eval()
 
             if self.is_half:
                 model = model.half()
@@ -78,20 +77,31 @@ if RVC_HUBERT_DEPS_AVAILABLE:
 
         @torch.no_grad()
         def encode(self, audio_16khz: np.ndarray, emb_output_layer=9, use_final_proj=True) -> np.ndarray:
+            """
+            Encodes audio features using the torchaudio model.
+            The torchaudio model can output features from all transformer layers.
+            """
             feats = torch.from_numpy(audio_16khz).float().view(1, -1).to(self.device)
             if self.is_half:
                 feats = feats.half()
 
-            padding_mask = torch.BoolTensor(feats.shape).fill_(False).to(self.device)
+            # The torchaudio HuBERT feature extractor returns a list of hidden states from all layers.
+            hidden_states, _ = self.model.extract_features(feats)
 
-            inputs = {"source": feats, "padding_mask": padding_mask, "output_layer": emb_output_layer}
-
-            logits = self.model.extract_features(**inputs)
-
-            if use_final_proj:
-                feats_out = self.model.final_proj(logits[0])
+            # Layer 0 is the input embeddings, layers 1-12 are the transformer blocks.
+            # emb_output_layer=9 corresponds to index 9 in this list for v1.
+            # emb_output_layer=12 corresponds to index 12 for v2.
+            if emb_output_layer < len(hidden_states):
+                feats_out = hidden_states[emb_output_layer]
             else:
-                feats_out = logits[0]
+                # Fallback to the last layer if the index is out of bounds
+                logger.warning(
+                    f"Requested layer {emb_output_layer} is out of bounds. Using last layer {len(hidden_states)-1}."
+                )
+                feats_out = hidden_states[-1]
+
+            # The `use_final_proj` parameter is not applicable here as we are using the direct
+            # output of a transformer layer, which is the standard for RVC content features.
 
             return feats_out.squeeze(0).cpu().numpy()
 
@@ -108,13 +118,10 @@ class RVCContentEncoderNodeItem(NodeItem):
         )
         layout.setSpacing(5)
 
-        self.load_button = QPushButton("Load HuBERT Model")
-        layout.addWidget(self.load_button)
-
-        self.model_path_label = QLabel("Model: Not loaded")
-        self.model_path_label.setStyleSheet("font-size: 9px; color: gray;")
-        self.model_path_label.setWordWrap(True)
-        layout.addWidget(self.model_path_label)
+        model_source_label = QLabel("Model Source: torchaudio HuBERT Base")
+        model_source_label.setStyleSheet("font-size: 10px; color: lightgray;")
+        model_source_label.setWordWrap(True)
+        layout.addWidget(model_source_label)
 
         controls_layout = QHBoxLayout()
         version_v_layout = QVBoxLayout()
@@ -135,10 +142,9 @@ class RVCContentEncoderNodeItem(NodeItem):
         layout.addWidget(self.status_label)
 
         if not RVC_HUBERT_DEPS_AVAILABLE:
-            error_label = QLabel("Missing dependencies:\n(torch, fairseq, resampy)")
+            error_label = QLabel("Missing dependencies:\n(torch, torchaudio, resampy)")
             error_label.setStyleSheet("color: orange;")
             error_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.load_button.setEnabled(False)
             self.device_combo.setEnabled(False)
             self.version_combo.setEnabled(False)
             layout.addWidget(error_label)
@@ -147,7 +153,6 @@ class RVCContentEncoderNodeItem(NodeItem):
 
         self._populate_devices()
 
-        self.load_button.clicked.connect(self._on_load_model_clicked)
         self.device_combo.currentIndexChanged.connect(self._on_device_change)
         self.version_combo.currentIndexChanged.connect(self._on_version_change)
 
@@ -171,12 +176,6 @@ class RVCContentEncoderNodeItem(NodeItem):
         else:
             logger.warning("CUDA is not available. Check PyTorch installation and NVIDIA drivers.")
 
-    @Slot()
-    def _on_load_model_clicked(self):
-        parent = self.scene().views()[0] if self.scene() and self.scene().views() else None
-        path, _ = QFileDialog.getOpenFileName(parent, "Select HuBERT Model", "", "PyTorch Models (*.pt)")
-        if path:
-            self.node_logic.set_model_path(path)
 
     @Slot(int)
     def _on_device_change(self, index: int):
@@ -191,8 +190,6 @@ class RVCContentEncoderNodeItem(NodeItem):
     @Slot()
     def updateFromLogic(self):
         state = self.node_logic.get_current_state_snapshot()
-        path = state.get("model_path")
-        self.model_path_label.setText(f"Model: ...{path[-35:]}" if path else "Model: Not loaded")
 
         with QSignalBlocker(self.device_combo):
             index = self.device_combo.findData(state.get("device", -1))
@@ -209,12 +206,11 @@ class RVCContentEncoderNodeItem(NodeItem):
             deque_size = state.get("deque_size", 0)
             self.status_label.setText(f"Buffer: {deque_size} | Proc: {proc_time:.1f} ms")
 
-            # --- NEW: Visual feedback for system strain ---
             is_strained = state.get("is_strained", False)
             if is_strained:
                 self.status_label.setStyleSheet("color: red;")
             else:
-                self.status_label.setStyleSheet("color: white;")  # Or your theme's default
+                self.status_label.setStyleSheet("color: white;")
         else:
             self.status_label.setText("Status: Idle")
             self.status_label.setStyleSheet("color: white;")
@@ -234,13 +230,12 @@ class RVCContentEncoderNode(Node):
         self.add_output("features", data_type=np.ndarray)
         self._lock = threading.Lock()
 
-        self._model_path: Optional[str] = None
         self._device: int = -1
         self._rvc_version: str = "v1"
         self._encoder_instance: Optional[RVCContentEncoder] = None
         self._is_processing = False
         self._last_proc_time_ms: float = 0.0
-        self._is_strained: bool = False  # For UI feedback
+        self._is_strained: bool = False
 
         self._audio_deque = collections.deque()
         self._results_deque = collections.deque(maxlen=10)
@@ -252,8 +247,9 @@ class RVCContentEncoderNode(Node):
     ) -> np.ndarray:
         """Process a single audio chunk through resampling and encoding."""
         resampled = resampy.resample(audio_chunk, sr_orig=DEFAULT_SAMPLERATE, sr_new=REQUIRED_SR, filter="kaiser_fast")
-        emb_layer, final_proj = (9, True) if version == "v1" else (12, False)
-        features = encoder.encode(resampled.astype(np.float32), emb_layer, final_proj)
+        # For RVC, v1 uses layer 9 and v2 uses layer 12 (the final transformer block).
+        emb_layer = 9 if version == "v1" else 12
+        features = encoder.encode(resampled.astype(np.float32), emb_layer)
         return features
 
     def _encoder_loop(self):
@@ -267,9 +263,9 @@ class RVCContentEncoderNode(Node):
             has_enough_data = current_deque_size >= WORKER_CHUNK_SAMPLES
 
             if has_enough_data and encoder:
-                is_strained_now = False  # Reset strain flag for this iteration
+                is_strained_now = False
                 if current_deque_size > WORKER_CHUNK_SAMPLES * MAX_BUFFER_CHUNKS:
-                    is_strained_now = True  # Set strain flag
+                    is_strained_now = True
                     with self._lock:
                         samples_to_discard = current_deque_size - (WORKER_CHUNK_SAMPLES * (MAX_BUFFER_CHUNKS - 1))
                         for _ in range(samples_to_discard):
@@ -277,15 +273,13 @@ class RVCContentEncoderNode(Node):
                         logger.warning(f"[{self.name}] Buffer overflow. Discarding {samples_to_discard} old samples.")
 
                 with self._lock:
-                    self._is_strained = is_strained_now  # Update shared state for UI
+                    self._is_strained = is_strained_now
 
                 try:
                     with self._lock:
-                        # Create the potentially non-contiguous array from the deque
                         audio_chunk_non_contiguous = np.array(
                             [self._audio_deque.popleft() for _ in range(WORKER_CHUNK_SAMPLES)]
                         )
-                    # Explicitly create a C-contiguous copy.
                     audio_chunk = np.ascontiguousarray(audio_chunk_non_contiguous, dtype=np.float32)
 
                     start_time = time.monotonic()
@@ -311,21 +305,18 @@ class RVCContentEncoderNode(Node):
             if self._is_processing:
                 logger.warning(f"[{self.name}] Denied model load while processing is active.")
                 return
-            model_path, device_id, version = self._model_path, self._device, self._rvc_version
+            device_id, version = self._device, self._rvc_version
 
         encoder = None
         try:
-            if RVC_HUBERT_DEPS_AVAILABLE and model_path and os.path.exists(model_path):
-                encoder = RVCContentEncoder(model_path, device_id)
+            if RVC_HUBERT_DEPS_AVAILABLE:
+                encoder = RVCContentEncoder(device_id)
 
                 logger.info(f"[{self.name}] Warming up the model on device {encoder.device}...")
-                # Warm up by processing the dummy chunk with version-specific parameters.
-                # This ensures both resampling and encoding run with the same parameters used at runtime.
-                for _ in range(3):  # Increased warm-up iterations for better stability
+                for _ in range(3):
                     dummy_input_chunk = np.random.randn(WORKER_CHUNK_SAMPLES).astype(np.float32)
                     _ = self._process_audio_chunk(dummy_input_chunk, encoder, version)
 
-                # If on GPU, explicitly wait for all setup operations to complete.
                 if "cuda" in str(encoder.device):
                     logger.info(f"[{self.name}] Synchronizing CUDA stream to finalize model setup...")
                     torch.cuda.synchronize()
@@ -333,21 +324,12 @@ class RVCContentEncoderNode(Node):
 
                 logger.info(f"[{self.name}] Model is warmed up and ready.")
 
-            elif model_path:
-                logger.error(f"[{self.name}] Failed to load: File not found at '{model_path}'")
         except Exception as e:
             logger.error(f"[{self.name}] Failed to load or warm up HuBERT model: {e}", exc_info=True)
 
         with self._lock:
             self._encoder_instance = encoder
 
-    @Slot(str)
-    def set_model_path(self, path: str):
-        with self._lock:
-            if self._is_processing:
-                return
-            self._model_path = path
-        self._load_model()
 
     @Slot(int)
     def set_device(self, device_id: int):
@@ -355,17 +337,22 @@ class RVCContentEncoderNode(Node):
             if self._is_processing or self._device == device_id:
                 return
             self._device = device_id
+        # A device change requires a full model reload
         self._load_model()
 
     @Slot(str)
     def set_rvc_version(self, version: str):
         with self._lock:
-            self._rvc_version = version
+            if self._rvc_version != version:
+                self._rvc_version = version
+                # Version change might affect model parameters in the future, so good to be explicit
+                logger.info(f"[{self.name}] RVC version set to {version}. No reload needed for current model.")
+
 
     def get_current_state_snapshot(self) -> Dict:
         with self._lock:
             return {
-                "model_path": self._model_path,
+                # MODIFIED: Removed model_path
                 "device": self._device,
                 "version": self._rvc_version,
                 "is_processing": self._is_processing,
@@ -389,6 +376,11 @@ class RVCContentEncoderNode(Node):
         return {"features": latest_features}
 
     def start(self):
+        # Ensure the model is loaded when processing starts if it hasn't been already.
+        if self._encoder_instance is None:
+            logger.info(f"[{self.name}] First start, loading model...")
+            self._load_model()
+
         super().start()
         with self._lock:
             self._audio_deque.clear()
@@ -420,11 +412,9 @@ class RVCContentEncoderNode(Node):
 
     def serialize_extra(self) -> dict:
         with self._lock:
-            return {"model_path": self._model_path, "device": self._device, "version": self._rvc_version}
+            return {"device": self._device, "version": self._rvc_version}
 
     def deserialize_extra(self, data: dict):
         self._device = data.get("device", -1)
         self._rvc_version = data.get("version", "v1")
-        self._model_path = data.get("model_path")
-        if self._model_path:
-            self._load_model()
+        self._load_model()
