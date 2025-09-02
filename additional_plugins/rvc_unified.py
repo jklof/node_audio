@@ -468,12 +468,25 @@ class RVCUnifiedNode(Node):
                         # --- FIX: Slice the required audio from the end of the input buffer ---
                         audio_to_process = self._input_buffer[-required_input_len:]
                         # --- FIX: Slide the buffer window forward, keeping the context for the next round ---
-                        self._input_buffer = self._input_buffer[-(required_input_len - chunk_samples):]
+                        self._input_buffer = self._input_buffer[-(required_input_len - chunk_samples) :]
 
                         # (Copying state variables to local scope remains the same)
-                        hubert_model, rmvpe_session, rvc_session = (self._hubert_model, self._rmvpe_session, self._rvc_session)
-                        pitch_shift, speaker_id, metadata, is_half = (self._pitch_shift, self._speaker_id, self._metadata, self._is_half)
-                        silent_threshold, vad_enabled, model_sr = (self._silent_threshold, self._vad_enabled, self._model_sr)
+                        hubert_model, rmvpe_session, rvc_session = (
+                            self._hubert_model,
+                            self._rmvpe_session,
+                            self._rvc_session,
+                        )
+                        pitch_shift, speaker_id, metadata, is_half = (
+                            self._pitch_shift,
+                            self._speaker_id,
+                            self._metadata,
+                            self._is_half,
+                        )
+                        silent_threshold, vad_enabled, model_sr = (
+                            self._silent_threshold,
+                            self._vad_enabled,
+                            self._model_sr,
+                        )
 
                     # VAD check on the actual chunk that will be output (after the pre-buffer)
                     vad_check_region = audio_to_process[extra_samples : extra_samples + chunk_samples]
@@ -484,11 +497,21 @@ class RVCUnifiedNode(Node):
                         stable_audio_out = np.zeros(chunk_samples, dtype=DEFAULT_DTYPE)
                     else:
                         # Full processing path
-                        audio_16k = resampy.resample(np.ascontiguousarray(audio_to_process), sr_orig=DEFAULT_SAMPLERATE, sr_new=RVC_REQUIRED_SR, filter="kaiser_fast")
-                        pitchf = rmvpe_session.run(["pitchf"], {"waveform": audio_16k[np.newaxis, :], "threshold": np.array([0.3]).astype(np.float32)})[0].squeeze()
+                        audio_16k = resampy.resample(
+                            np.ascontiguousarray(audio_to_process),
+                            sr_orig=DEFAULT_SAMPLERATE,
+                            sr_new=RVC_REQUIRED_SR,
+                            filter="kaiser_fast",
+                        )
+                        pitchf = rmvpe_session.run(
+                            ["pitchf"],
+                            {"waveform": audio_16k[np.newaxis, :], "threshold": np.array([0.3]).astype(np.float32)},
+                        )[0].squeeze()
                         pitchf *= pow(2, pitch_shift / 12)
                         f0_mel = 1127.0 * np.log(1.0 + pitchf / 700.0)
-                        f0_mel[f0_mel > 0] = (f0_mel[f0_mel > 0] - self.f0_mel_min) * 254 / (self.f0_mel_max - self.f0_mel_min) + 1
+                        f0_mel[f0_mel > 0] = (f0_mel[f0_mel > 0] - self.f0_mel_min) * 254 / (
+                            self.f0_mel_max - self.f0_mel_min
+                        ) + 1
                         f0_mel[f0_mel <= 1] = 1
                         f0_mel[f0_mel > 255] = 255
                         f0_coarse = np.rint(f0_mel).astype(np.int64)
@@ -514,12 +537,19 @@ class RVCUnifiedNode(Node):
                         if len(stable_audio_out_model_sr) == 0:
                             stable_audio_out = np.zeros(chunk_samples, dtype=DEFAULT_DTYPE)
                         elif model_sr != DEFAULT_SAMPLERATE:
-                            stable_audio_out = resampy.resample(np.ascontiguousarray(stable_audio_out_model_sr), sr_orig=model_sr, sr_new=DEFAULT_SAMPLERATE, filter="kaiser_fast")
+                            stable_audio_out = resampy.resample(
+                                np.ascontiguousarray(stable_audio_out_model_sr),
+                                sr_orig=model_sr,
+                                sr_new=DEFAULT_SAMPLERATE,
+                                filter="kaiser_fast",
+                            )
                         else:
                             stable_audio_out = stable_audio_out_model_sr
 
                     # Perform SOLA stitching with the high-quality, stable output
-                    self._perform_sola_stitching(stable_audio_out, chunk_samples, crossfade_samples, sola_search_samples)
+                    self._perform_sola_stitching(
+                        stable_audio_out, chunk_samples, crossfade_samples, sola_search_samples
+                    )
 
                 except Exception as e:
                     logger.error(f"[{self.name}] Error in pipeline worker: {e}", exc_info=True)

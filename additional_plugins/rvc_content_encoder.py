@@ -176,7 +176,6 @@ class RVCContentEncoderNodeItem(NodeItem):
         else:
             logger.warning("CUDA is not available. Check PyTorch installation and NVIDIA drivers.")
 
-
     @Slot(int)
     def _on_device_change(self, index: int):
         if index != -1:
@@ -330,7 +329,6 @@ class RVCContentEncoderNode(Node):
         with self._lock:
             self._encoder_instance = encoder
 
-
     @Slot(int)
     def set_device(self, device_id: int):
         with self._lock:
@@ -347,7 +345,6 @@ class RVCContentEncoderNode(Node):
                 self._rvc_version = version
                 # Version change might affect model parameters in the future, so good to be explicit
                 logger.info(f"[{self.name}] RVC version set to {version}. No reload needed for current model.")
-
 
     def get_current_state_snapshot(self) -> Dict:
         with self._lock:
