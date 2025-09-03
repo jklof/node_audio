@@ -9,8 +9,10 @@ import logging
 import time
 from typing import Any, Dict, Optional
 
-import resampy  # --- FIX: Use resampy as requested ---
-from constants import DEFAULT_BLOCKSIZE, DEFAULT_SAMPLERATE, DEFAULT_DTYPE
+import resampy
+
+# --- MODIFIED: Use torch.Tensor ---
+from constants import DEFAULT_BLOCKSIZE, DEFAULT_SAMPLERATE, DEFAULT_DTYPE, torch
 
 # --- Node System Imports ---
 from node_system import Node
@@ -30,6 +32,7 @@ MAX_BUFFER_CHUNKS = 5
 class RVCOnnxInferenceNodeItem(NodeItem):
     NODE_SPECIFIC_WIDTH = 280
 
+    # ... (UI code remains unchanged) ...
     def __init__(self, node_logic: "RVCOnnxInferenceNode"):
         super().__init__(node_logic, width=self.NODE_SPECIFIC_WIDTH)
         self.container_widget = QWidget()
@@ -121,8 +124,8 @@ class RVCOnnxInferenceNodeItem(NodeItem):
             self.buffer_label.setStyleSheet("color: gray;")
         self.status_label.setText(status_text)
         task_queue = state.get("task_queue_size", 0)
-        output_buffer = state.get("output_buffer_size", 0)
-        self.buffer_label.setText(f"Buffer: In {task_queue} | Out {output_buffer}")
+        output_buffer_size_ms = state.get("output_buffer_size_ms", 0)
+        self.buffer_label.setText(f"Buffer: In {task_queue} | Out {output_buffer_size_ms:.0f}ms")
         info = state.get("info", {})
         info_text = (
             f"SR: {info.get('sr')} | F0: {info.get('f0')} | Half: {info.get('is_half')}"
@@ -134,7 +137,7 @@ class RVCOnnxInferenceNodeItem(NodeItem):
 
 
 # ==============================================================================
-# 2. Node Logic Class (Corrected)
+# 2. Node Logic Class (CONVERTED TO TORCH)
 # ==============================================================================
 class RVCOnnxInferenceNode(Node):
     NODE_TYPE = "RVC ONNX Inference"
@@ -144,10 +147,11 @@ class RVCOnnxInferenceNode(Node):
 
     def __init__(self, name: str, node_id: Optional[str] = None):
         super().__init__(name, node_id)
-        self.add_input("features", data_type=np.ndarray)
-        self.add_input("f0_coarse", data_type=np.ndarray)
-        self.add_input("pitchf", data_type=np.ndarray)
-        self.add_output("audio_out", data_type=np.ndarray)
+        # --- MODIFIED: Sockets now use torch.Tensor ---
+        self.add_input("features", data_type=torch.Tensor)
+        self.add_input("f0_coarse", data_type=torch.Tensor)
+        self.add_input("pitchf", data_type=torch.Tensor)
+        self.add_output("audio_out", data_type=torch.Tensor)
         self._lock = threading.Lock()
         self._model_path: Optional[str] = None
         self._device: int = -1
@@ -159,15 +163,15 @@ class RVCOnnxInferenceNode(Node):
         self._is_processing = False
         self._is_strained = False
         self._tasks_deque = collections.deque()
-        self._results_deque = collections.deque()  # --- FIX: This is now the final audio buffer ---
+        # --- MODIFIED: Switched to a single tensor buffer for output ---
+        self._output_buffer = torch.tensor([], dtype=DEFAULT_DTYPE)
         self._stop_event = threading.Event()
         self._worker_thread: Optional[threading.Thread] = None
 
     def _load_model(self):
         with self._lock:
             model_path, gpu = self._model_path, self._device
-            self._status = "Idle"
-            self._is_half = False
+            self._status, self._is_half = "Idle", False
         if not model_path or not os.path.exists(model_path):
             self._session, self._metadata = None, {}
             return
@@ -177,7 +181,6 @@ class RVCOnnxInferenceNode(Node):
         if gpu >= 0 and "CUDAExecutionProvider" in onnxruntime.get_available_providers():
             provider = "CUDAExecutionProvider"
             provider_options = {"device_id": str(gpu)}
-
         try:
             with self._lock:
                 self._status = "Loading..."
@@ -190,13 +193,11 @@ class RVCOnnxInferenceNode(Node):
             if "metadata" not in meta.custom_metadata_map:
                 raise ValueError("ONNX model is missing metadata.")
             metadata = json.loads(meta.custom_metadata_map["metadata"])
-            first_input_type = session.get_inputs()[0].type
-            is_half = first_input_type == "tensor(float16)"
-            self._session, self._metadata, self._is_half = session, metadata, is_half
+            is_half = session.get_inputs()[0].type == "tensor(float16)"
             with self._lock:
+                self._session, self._metadata, self._is_half = session, metadata, is_half
                 self._status = "Loaded"
             logger.info(f"[{self.name}] ONNX model loaded. Info: {metadata}, is_half: {is_half}")
-
         except Exception as e:
             logger.error(f"[{self.name}] Failed to load ONNX model: {e}", exc_info=True)
             self._session, self._metadata, self._is_half = None, {}, False
@@ -210,23 +211,18 @@ class RVCOnnxInferenceNode(Node):
                 if self._tasks_deque:
                     task = self._tasks_deque.popleft()
                 self._is_strained = len(self._tasks_deque) >= MAX_BUFFER_CHUNKS
-
             if task and self._session:
                 try:
-                    # --- FIX: Worker thread now handles resampling ---
-                    audio_out = self._session.run(["audio"], task)[0].squeeze()
-
+                    audio_out_np = self._session.run(["audio"], task)[0].squeeze()
                     model_sr = self._metadata.get("samplingRate")
                     if model_sr != DEFAULT_SAMPLERATE:
-                        # Use resampy for high-quality and fast resampling
-                        audio_out = resampy.resample(
-                            audio_out, sr_orig=model_sr, sr_new=DEFAULT_SAMPLERATE, filter="kaiser_fast"
+                        audio_out_np = resampy.resample(
+                            audio_out_np, sr_orig=model_sr, sr_new=DEFAULT_SAMPLERATE, filter="kaiser_fast"
                         )
-
+                    # Convert to tensor and append to buffer
+                    audio_out_tensor = torch.from_numpy(audio_out_np.astype(np.float32))
                     with self._lock:
-                        # Add final, ready-to-play audio to the results deque
-                        self._results_deque.extend(audio_out.tolist())
-
+                        self._output_buffer = torch.cat((self._output_buffer, audio_out_tensor))
                 except Exception as e:
                     logger.error(f"[{self.name}] Error in ONNX worker: {e}", exc_info=True)
             else:
@@ -258,55 +254,49 @@ class RVCOnnxInferenceNode(Node):
                 "status": self._status,
                 "info": info if self._session else None,
                 "task_queue_size": len(self._tasks_deque),
-                "output_buffer_size": len(self._results_deque),  # --- FIX: Report the correct buffer ---
+                "output_buffer_size_ms": (len(self._output_buffer) / DEFAULT_SAMPLERATE) * 1000,
             }
 
     def process(self, input_data: dict) -> dict:
         features, f0_coarse, pitchf = (input_data.get(k) for k in ["features", "f0_coarse", "pitchf"])
-
         with self._lock:
             session_active = self._session is not None
             is_f0_model = self._metadata.get("f0", 1) == 1
             feats_dtype = np.float16 if self._is_half else np.float32
 
-        if session_active and features is not None:
-            if not is_f0_model or (f0_coarse is not None and pitchf is not None):
+        if session_active and isinstance(features, torch.Tensor):
+            if not is_f0_model or (isinstance(f0_coarse, torch.Tensor) and isinstance(pitchf, torch.Tensor)):
                 min_len = len(features)
                 if is_f0_model:
                     min_len = min(min_len, len(f0_coarse), len(pitchf))
-
                 if min_len > 0:
+                    # Convert tensors to numpy for ONNX
+                    features_np = features.numpy()
                     input_dict = {
-                        "feats": np.expand_dims(features[:min_len], 0).astype(feats_dtype),
+                        "feats": np.expand_dims(features_np[:min_len], 0).astype(feats_dtype),
                         "p_len": np.array([min_len], dtype=np.int64),
                         "sid": np.array([self._speaker_id], dtype=np.int64),
                     }
                     if is_f0_model:
-                        input_dict["pitch"] = np.expand_dims(f0_coarse[:min_len], 0).astype(np.int64)
-                        input_dict["pitchf"] = np.expand_dims(pitchf[:min_len], 0).astype(np.float32)
-
+                        input_dict["pitch"] = np.expand_dims(f0_coarse.numpy()[:min_len], 0).astype(np.int64)
+                        input_dict["pitchf"] = np.expand_dims(pitchf.numpy()[:min_len], 0).astype(np.float32)
                     with self._lock:
                         self._tasks_deque.append(input_dict)
 
         with self._lock:
-            # --- FIX: More robust output buffering ---
-            if len(self._results_deque) >= DEFAULT_BLOCKSIZE:
-                # Pop exactly one block's worth of samples
-                output_samples = [self._results_deque.popleft() for _ in range(DEFAULT_BLOCKSIZE)]
-                # Create a 2D mono array with the correct dtype
-                output_block = np.array(output_samples, dtype=DEFAULT_DTYPE).reshape(-1, 1)
-                return {"audio_out": output_block}
+            if len(self._output_buffer) >= DEFAULT_BLOCKSIZE:
+                output_block = self._output_buffer[:DEFAULT_BLOCKSIZE].clone()
+                self._output_buffer = self._output_buffer[DEFAULT_BLOCKSIZE:]
             else:
-                # If not enough samples, return silence of the correct shape and type
-                silent_block = np.zeros((DEFAULT_BLOCKSIZE, 1), dtype=DEFAULT_DTYPE)
-                return {"audio_out": silent_block}
+                output_block = torch.zeros(DEFAULT_BLOCKSIZE, dtype=DEFAULT_DTYPE)
+        # Reshape to (channels, samples) for mono
+        return {"audio_out": output_block.unsqueeze(0)}
 
     def start(self):
         with self._lock:
             self._tasks_deque.clear()
-            self._results_deque.clear()
-            self._is_processing = True
-            self._is_strained = False
+            self._output_buffer = torch.tensor([], dtype=DEFAULT_DTYPE)
+            self._is_processing, self._is_strained = True, False
         self._stop_event.clear()
         self._worker_thread = threading.Thread(target=self._inference_loop, daemon=True)
         self._worker_thread.start()

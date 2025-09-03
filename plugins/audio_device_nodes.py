@@ -1,4 +1,5 @@
 import numpy as np
+import torch
 import sounddevice as sd
 from collections import deque
 import threading
@@ -7,7 +8,7 @@ import logging
 from typing import List, Tuple, Dict, Any, Optional, Callable
 
 from node_system import Node, IClockProvider
-from ui_elements import NodeItem, NODE_CONTENT_PADDING
+from ui_elements import NodeItem, NodeStateEmitter, NODE_CONTENT_PADDING
 
 from PySide6.QtWidgets import QWidget, QComboBox, QLabel, QVBoxLayout, QSizePolicy, QPushButton, QHBoxLayout
 from PySide6.QtCore import Qt, Slot, QObject, Signal, QSignalBlocker, QTimer
@@ -37,7 +38,6 @@ class AudioDeviceManager:
         """Forces sounddevice to re-scan for available audio devices."""
         try:
             logger.info("AudioDeviceManager: Re-scanning for audio devices.")
-            # This is the correct procedure to force a hardware re-scan by re-initializing PortAudio.
             sd._terminate()
             sd._initialize()
         except Exception as e:
@@ -132,84 +132,6 @@ class AudioDeviceManager:
         except Exception:
             return None
 
-    @staticmethod
-    def print_audio_info():
-        logger.info(f"Audio System Info (Target SR: {AudioDeviceManager.TARGET_SAMPLERATE} Hz)")
-        try:
-            AudioDeviceManager.rescan_devices()
-            apis = sd.query_hostapis()
-            logger.info(f"Host APIs: {len(apis)}")
-            for i, api in enumerate(apis):
-                logger.info(f"  {i}: {dict(api).get('name', 'N/A')}")
-            devices = sd.query_devices()
-            logger.info(f"Devices: {len(devices)}")
-            for i, dev in enumerate(devices):
-                dev_dict = dict(dev)
-                host_api = AudioDeviceManager.get_host_api_name(dev_dict.get("hostapi", -1))
-                in_compat = AudioDeviceManager.is_device_compatible(i, True)
-                out_compat = AudioDeviceManager.is_device_compatible(i, False)
-                logger.info(
-                    f"  {i}: {dev_dict.get('name', 'N/A')} (Host API: {host_api}) Comp: In={in_compat}, Out={out_compat}"
-                )
-            in_default = AudioDeviceManager.get_default_device_index(True)
-            out_default = AudioDeviceManager.get_default_device_index(False)
-            logger.info(f"Default Devices: Input={in_default}, Output={out_default}")
-        except Exception as e:
-            logger.error(f"AudioDeviceManager: Error printing audio info: {e}")
-
-
-# AudioDeviceManager.print_audio_info()
-
-
-# ==============================================================================
-# Signal Emitter for Audio Nodes
-# ==============================================================================
-class AudioNodeSignalEmitter(QObject):
-    device_config_changed = Signal()
-    stream_status_update = Signal(str)
-    channels_changed = Signal(int)
-    device_list_changed = Signal()
-
-    def __init__(self, parent_node_name="AudioNode"):
-        super().__init__()
-        self._parent_node_name = parent_node_name
-
-    def emit_device_config_changed(self):
-        try:
-            self.device_config_changed.emit()
-        except RuntimeError as e:
-            logger.debug(f"[{self._parent_node_name}] Emitter: Error emitting device_config_changed: {e}")
-
-    def emit_stream_status_update(self, status_message: str):
-        try:
-            self.stream_status_update.emit(status_message)
-        except RuntimeError as e:
-            logger.debug(f"[{self._parent_node_name}] Emitter: Error emitting stream_status_update: {e}")
-
-    def emit_channels_changed(self, num_channels: int):
-        try:
-            self.channels_changed.emit(num_channels)
-        except RuntimeError as e:
-            logger.debug(f"[{self._parent_node_name}] Emitter: Error emitting channels_changed: {e}")
-
-    def emit_device_list_changed(self):
-        try:
-            self.device_list_changed.emit()
-        except RuntimeError as e:
-            logger.debug(f"[{self._parent_node_name}] Emitter: Error emitting device_list_changed: {e}")
-
-    def connect_device_config_changed(self, slot_function):
-        self.device_config_changed.connect(slot_function)
-
-    def connect_stream_status_update(self, slot_function):
-        self.stream_status_update.connect(slot_function)
-
-    def connect_channels_changed(self, slot_function):
-        self.channels_changed.connect(slot_function)
-
-    def connect_device_list_changed(self, slot_function):
-        self.device_list_changed.connect(slot_function)
-
 
 # ==============================================================================
 # Base UI Node Item for Audio Nodes
@@ -234,7 +156,7 @@ class AudioDeviceNodeItem(NodeItem):
         self.device_combobox = QComboBox()
         self.device_combobox.setToolTip("Select audio device")
         self.device_combobox.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.device_combobox.setMinimumWidth(self.NODE_WIDTH)
+        self.device_combobox.setMinimumWidth(self.NODE_WIDTH - 40)  # Adjusted for button
         device_row.addWidget(self.device_combobox)
 
         self.refresh_button = QPushButton("🔄")
@@ -256,15 +178,19 @@ class AudioDeviceNodeItem(NodeItem):
 
         self.setContentWidget(self.container_widget)
         self.device_combobox.currentIndexChanged.connect(self._on_ui_device_selection_changed)
-
-        emitter = self.node_logic.signal_emitter
-        emitter.connect_device_config_changed(self._on_logic_device_config_changed)
-        emitter.connect_stream_status_update(self._on_logic_stream_status_update)
-        emitter.connect_channels_changed(self._on_logic_channels_changed)
-        emitter.connect_device_list_changed(self._on_logic_device_list_changed)
+        self.node_logic.emitter.stateUpdated.connect(self._on_state_updated)
 
         self._populate_device_combobox()
-        self._update_stream_channels_label()
+
+    @Slot()
+    def updateFromLogic(self):
+        """
+        Pulls the current state from the logic node and updates the UI.
+        This is essential for initializing the UI when the node is first created.
+        """
+        state = self.node_logic.get_current_state_snapshot()
+        self._on_state_updated(state)
+        super().updateFromLogic()
 
     def _populate_device_combobox(self):
         is_input_node = self.node_logic._get_is_input_node()
@@ -290,21 +216,18 @@ class AudioDeviceNodeItem(NodeItem):
 
     def _set_combobox_to_device(self, device_identifier: Optional[int]):
         logger.debug(f"[{self.node_logic.name}] UI: Setting combobox to device ID: {device_identifier}.")
-        found = False
-        for i in range(self.device_combobox.count()):
-            if self.device_combobox.itemData(i) == device_identifier:
-                if self.device_combobox.currentIndex() != i:
-                    self.device_combobox.setCurrentIndex(i)
-                found = True
-                break
-        if not found and self.device_combobox.count() > 0:
+        found_index = self.device_combobox.findData(device_identifier)
+
+        if found_index != -1:
+            if self.device_combobox.currentIndex() != found_index:
+                self.device_combobox.setCurrentIndex(found_index)
+        else:
             if self.device_combobox.currentIndex() != 0:
-                self.device_combobox.setCurrentIndex(0)
-            logger.warning(
-                f"[{self.node_logic.name}] UI: Device ID {device_identifier} not in combobox. Selected Default."
-            )
-        elif not found and self.device_combobox.count() == 0:
-            logger.error(f"[{self.node_logic.name}] UI: Combobox is empty, cannot set device.")
+                self.device_combobox.setCurrentIndex(0)  # Default to the 'Default' item
+            if device_identifier is not None:
+                logger.warning(
+                    f"[{self.node_logic.name}] UI: Device ID {device_identifier} not in combobox. Selecting 'Default'."
+                )
 
     @Slot(int)
     def _on_ui_device_selection_changed(self, combobox_idx: int):
@@ -314,39 +237,29 @@ class AudioDeviceNodeItem(NodeItem):
         logger.info(f"[{self.node_logic.name}] UI: User selected device id: {selected_device_identifier}")
         self.node_logic.set_user_selected_device(selected_device_identifier)
 
-    @Slot()
-    def _on_logic_device_config_changed(self):
+    @Slot(dict)
+    def _on_state_updated(self, state: dict):
+        """Single point of UI updates from comprehensive state dictionary."""
         if not self.node_logic:
             return
-        logger.debug(f"[{self.node_logic.name}] UI: Received device_config_changed from logic.")
-        user_selected_id = self.node_logic.get_user_selected_device_identifier()
+
         with QSignalBlocker(self.device_combobox):
+            user_selected_id = state.get("user_selected_device_identifier")
             self._set_combobox_to_device(user_selected_id)
-        self._update_stream_channels_label()
-        self.update()
 
-    @Slot(str)
-    def _on_logic_stream_status_update(self, status_message: str):
-        if not self.node_logic:
-            return
-        self._update_status_label(status_message)
+        status_message = state.get("status")
+        if status_message:
+            self._update_status_label(status_message)
 
-    @Slot(int)
-    def _on_logic_channels_changed(self, num_channels: int):
-        if not self.node_logic:
-            return
-        logger.debug(f"[{self.node_logic.name}] UI: Received channels_changed: {num_channels}")
-        self._update_stream_channels_label()
+        channels = state.get("channels")
+        if channels is not None:
+            self.stream_channels_label.setText(f"Stream Ch: {channels}")
 
-    @Slot()
-    def _on_logic_device_list_changed(self):
-        if not self.node_logic:
-            return
-        logger.info(f"[{self.node_logic.name}] UI: Received device_list_changed signal. Refreshing device list.")
-        current_selection = self.node_logic.get_user_selected_device_identifier()
-        self._populate_device_combobox()
-        with QSignalBlocker(self.device_combobox):
-            self._set_combobox_to_device(current_selection)
+        if state.get("device_list_refreshed", False):
+            logger.info(f"[{self.node_logic.name}] UI: Refreshing device list due to state update.")
+            self._populate_device_combobox()
+            with QSignalBlocker(self.device_combobox):
+                self._set_combobox_to_device(user_selected_id)
 
     @Slot()
     def _on_refresh_devices_clicked(self):
@@ -364,32 +277,13 @@ class AudioDeviceNodeItem(NodeItem):
         else:
             self.status_label.setStyleSheet("color: lightgray;")
 
-    def _update_stream_channels_label(self):
-        if not self.node_logic:
-            return
-        ch_text = f"Stream Ch: {self.node_logic.channels}"
-        self.stream_channels_label.setText(ch_text)
-
-    @Slot()
-    def updateFromLogic(self):
-        if not self.node_logic:
-            return
-        user_selected_id = self.node_logic.get_user_selected_device_identifier()
-        with QSignalBlocker(self.device_combobox):
-            self._set_combobox_to_device(user_selected_id)
-        self._update_status_label(self.node_logic.get_current_status_message())
-        self._update_stream_channels_label()
-        super().updateFromLogic()
-
 
 class AudioSourceNodeItem(AudioDeviceNodeItem):
-    def __init__(self, node_logic: "AudioSourceNode"):
-        super().__init__(node_logic=node_logic)
+    pass
 
 
 class AudioSinkNodeItem(AudioDeviceNodeItem):
-    def __init__(self, node_logic: "AudioSinkNode"):
-        super().__init__(node_logic=node_logic)
+    pass
 
 
 # ==============================================================================
@@ -401,11 +295,13 @@ class BaseAudioNode(Node):
 
     def __init__(self, name, node_id=None):
         super().__init__(name, node_id)
-        self.signal_emitter = AudioNodeSignalEmitter(parent_node_name=self.name)
+        self.emitter = NodeStateEmitter()
 
         self.samplerate = AudioDeviceManager.TARGET_SAMPLERATE
         self.blocksize = DEFAULT_BLOCKSIZE
         self.dtype = DEFAULT_DTYPE
+        self.sd_dtype = "float32"
+
         self.channels = DEFAULT_CHANNELS
 
         self._buffer = deque(maxlen=DEFAULT_BUFFER_SIZE_BLOCKS)
@@ -460,70 +356,73 @@ class BaseAudioNode(Node):
     def _update_status_message(self, message: str):
         self._current_status_message = message
 
-    def get_user_selected_device_identifier(self) -> Optional[int]:
-        with self._lock:
-            return self._user_selected_device_identifier
+    def _get_current_state_snapshot_locked(self) -> Dict:
+        return {
+            "status": self._current_status_message,
+            "user_selected_device_identifier": self._user_selected_device_identifier,
+            "channels": self.channels,
+        }
 
-    def get_current_status_message(self) -> str:
+    def get_current_state_snapshot(self) -> Dict:
         with self._lock:
-            return self._current_status_message
+            return self._get_current_state_snapshot_locked()
 
     def refresh_device_list(self):
-        """Refreshes the available device list, handling state safely."""
         logger.info(f"[{self.name}] Logic: Refreshing device list.")
 
-        stream_was_active = self._stream is not None and self._stream.active
+        stream_was_active = False
+        if self._stream is not None:
+            try:
+                # This can fail if the device was disconnected, invalidating the pointer
+                stream_was_active = self._stream.active
+            except sd.PortAudioError as e:
+                logger.warning(
+                    f"[{self.name}] Could not check stream status (it may be invalid): {e}. Assuming inactive."
+                )
+                with self._lock:
+                    self._stream = None  # Discard the invalid stream object
+                stream_was_active = False
+
         if stream_was_active:
-            logger.info(f"[{self.name}] Stopping active stream before device re-scan.")
             self.stop()
 
         AudioDeviceManager.rescan_devices()
-
         is_input_node = self._get_is_input_node()
+
         with self._lock:
             current_id = self._user_selected_device_identifier
             current_name = self._user_selected_device_name
             current_hostapi = self._user_selected_device_hostapi_name
 
-        if current_id is not None:
-            if not AudioDeviceManager.is_device_compatible(current_id, is_input_node):
-                logger.warning(
-                    f"[{self.name}] Device '{current_name}' (ID {current_id}) no longer available/compatible."
-                )
-                found_by_name = AudioDeviceManager.find_device_by_name(current_name, current_hostapi, is_input_node)
+        if current_id is not None and not AudioDeviceManager.is_device_compatible(current_id, is_input_node):
+            logger.warning(f"[{self.name}] Device '{current_name}' (ID {current_id}) no longer compatible.")
+            found_by_name = AudioDeviceManager.find_device_by_name(current_name, current_hostapi, is_input_node)
+            with self._lock:
                 if found_by_name is not None:
                     logger.info(f"[{self.name}] Found same device with new ID: {found_by_name}.")
-                    with self._lock:
-                        self._user_selected_device_identifier = found_by_name
-                        info = AudioDeviceManager.get_device_info(found_by_name)
-                        if info:
-                            self._user_selected_device_name = info.get("name")
-                            self._user_selected_device_hostapi_name = AudioDeviceManager.get_host_api_name(
-                                info.get("hostapi", -1)
-                            )
+                    self._user_selected_device_identifier = found_by_name
+                    info = AudioDeviceManager.get_device_info(found_by_name)
+                    if info:
+                        self._user_selected_device_name = info.get("name")
+                        self._user_selected_device_hostapi_name = AudioDeviceManager.get_host_api_name(
+                            info.get("hostapi", -1)
+                        )
                 else:
                     logger.warning(f"[{self.name}] Reverting to Default.")
-                    with self._lock:
-                        self._set_initial_default_device_selection()
-            else:
-                logger.debug(f"[{self.name}] Current device ID {current_id} still available.")
+                    self._set_initial_default_device_selection()
 
-        if self.signal_emitter:
-            self.signal_emitter.emit_device_list_changed()
+        state = self._get_current_state_snapshot_locked()
+        state["device_list_refreshed"] = True
+        self.emitter.stateUpdated.emit(state)
 
         if stream_was_active:
-            logger.info(f"[{self.name}] Attempting to restart stream after refresh.")
             self.start()
-
-        logger.info(f"[{self.name}] Device list refresh completed.")
 
     @Slot(object)
     def set_user_selected_device(self, device_identifier: Optional[int]):
-        logger.info(f"[{self.name}] Logic: set_user_selected_device called with: {device_identifier}")
         should_restart_stream = False
         with self._lock:
             if self._user_selected_device_identifier == device_identifier:
-                logger.debug(f"[{self.name}] Device selection unchanged.")
                 return
 
             self._user_selected_device_identifier = device_identifier
@@ -544,118 +443,78 @@ class BaseAudioNode(Node):
                 should_restart_stream = True
 
         if should_restart_stream:
-            logger.info(f"[{self.name}] Stream active, restarting to apply new device.")
             self.stop()
             self.start()
         else:
-            if self.signal_emitter:
-                self.signal_emitter.emit_device_config_changed()
+            self.emitter.stateUpdated.emit(self._get_current_state_snapshot_locked())
 
     def start(self):
-        logger.info(f"[{self.name}] Logic: Start called.")
         is_input_node = self._get_is_input_node()
-
-        status_to_emit: Optional[str] = None
-        channels_to_emit: Optional[int] = None
-
         with self._lock:
             if self._stream and self._stream.active:
-                active_name = self._active_device_info.get("name", "N/A") if self._active_device_info else "N/A"
-                logger.info(f"[{self.name}] Stream already active on {active_name}.")
-                status_to_emit = f"Active: {active_name}"
+                return
+
+            effective_device_index = self._user_selected_device_identifier
+            if effective_device_index is None:
+                effective_device_index = AudioDeviceManager.get_default_device_index(is_input_node)
+
+            if effective_device_index is None:
+                self._update_status_message(f"Error: No compatible device.")
+            elif not AudioDeviceManager.is_device_compatible(effective_device_index, is_input_node):
+                name_for_msg = self._user_selected_device_name or f"ID {effective_device_index}"
+                self._update_status_message(f"Error: Device not compatible.")
             else:
-                effective_device_index = self._user_selected_device_identifier
-                if effective_device_index is None:
-                    effective_device_index = AudioDeviceManager.get_default_device_index(is_input_node)
+                try:
+                    device_info = AudioDeviceManager.get_device_info(effective_device_index)
+                    if not device_info:
+                        raise RuntimeError("Could not get device info.")
 
-                if effective_device_index is None:
-                    status_to_emit = f"Error: No compatible {'input' if is_input_node else 'output'} device."
-                elif not AudioDeviceManager.is_device_compatible(effective_device_index, is_input_node):
-                    name_for_msg = self._user_selected_device_name or f"ID {effective_device_index}"
-                    status_to_emit = f"Error: Device '{name_for_msg}' not compatible."
-                else:
-                    try:
-                        device_info = AudioDeviceManager.get_device_info(effective_device_index)
-                        if not device_info:
-                            raise RuntimeError(f"Could not get info for device ID {effective_device_index}.")
+                    self._buffer.clear()
+                    self._stream_error_count = 0
+                    self._stream = self._get_sounddevice_stream_class()(
+                        samplerate=self.samplerate,
+                        blocksize=self.blocksize,
+                        device=effective_device_index,
+                        channels=self._get_stream_config_channels(device_info),
+                        dtype=self.sd_dtype,
+                        callback=self._get_audio_callback(),
+                    )
+                    self._stream.start()
 
-                        stream_config_channels = self._get_stream_config_channels(device_info)
-                        audio_callback = self._get_audio_callback()
-                        sd_stream_class = self._get_sounddevice_stream_class()
+                    actual_id = (
+                        self._stream.device
+                        if isinstance(self._stream.device, int)
+                        else self._stream.device[0 if is_input_node else 1]
+                    )
+                    self._active_device_info = AudioDeviceManager.get_device_info(actual_id) or {}
+                    self._update_status_message(f"Active: {self._active_device_info.get('name', 'N/A')}")
+                    self._update_channels_from_stream(self._stream)
+                except Exception as e:
+                    self._update_status_message(f"Error: Stream start failed.")
+                    logger.error(f"[{self.name}] Stream start failed: {e}", exc_info=True)
+                    if self._stream:
+                        self._stream.close()
+                    self._stream = None
+                    self._active_device_info = None
+                    self._reset_channels_on_failure()
 
-                        self._buffer.clear()
-                        self._stream_error_count = 0
-
-                        self._stream = sd_stream_class(
-                            samplerate=self.samplerate,
-                            blocksize=self.blocksize,
-                            device=effective_device_index,
-                            channels=stream_config_channels,
-                            dtype=self.dtype,
-                            callback=audio_callback,
-                        )
-                        self._stream.start()
-
-                        actual_id = (
-                            self._stream.device
-                            if isinstance(self._stream.device, int)
-                            else self._stream.device[0 if is_input_node else 1]
-                        )
-                        self._active_device_info = AudioDeviceManager.get_device_info(actual_id) or {}
-                        active_name = self._active_device_info.get("name", "N/A")
-                        status_to_emit = f"Active: {active_name}"
-                        channels_to_emit = self._update_channels_from_stream(self._stream)
-
-                    except Exception as e:
-                        status_to_emit = f"Error: Stream start failed: {e}"
-                        logger.error(f"[{self.name}] {status_to_emit}", exc_info=True)
-                        if self._stream:
-                            try:
-                                if self._stream.active:
-                                    self._stream.stop()
-                                self._stream.close()
-                            except Exception:
-                                pass
-                        self._stream = None
-                        self._active_device_info = None
-                        channels_to_emit = self._reset_channels_on_failure()
-
-        if self.signal_emitter:
-            if status_to_emit:
-                self._update_status_message(status_to_emit)
-                self.signal_emitter.emit_stream_status_update(status_to_emit)
-            if channels_to_emit is not None:
-                self.signal_emitter.emit_channels_changed(channels_to_emit)
-            self.signal_emitter.emit_device_config_changed()
+        self.emitter.stateUpdated.emit(self._get_current_state_snapshot_locked())
 
     def stop(self):
-        logger.info(f"[{self.name}] Logic: Stop called.")
-        stream_to_stop = None
         with self._lock:
             if self._stream:
-                stream_to_stop = self._stream
+                try:
+                    self._stream.stop()
+                    self._stream.close()
+                except Exception as e:
+                    logger.warning(f"[{self.name}] Error stopping stream: {e}")
                 self._stream = None
-
-        if stream_to_stop:
-            try:
-                if stream_to_stop.active:
-                    stream_to_stop.stop()
-                stream_to_stop.close()
-                logger.info(f"[{self.name}] Stream stopped/closed.")
-            except Exception as e:
-                logger.warning(f"[{self.name}] Error stopping/closing stream: {e}")
-
-        with self._lock:
             self._active_device_info = None
             self._update_status_message("Inactive")
             self._post_stream_stop_actions()
-
-        if self.signal_emitter:
-            self.signal_emitter.emit_stream_status_update("Inactive")
-            self.signal_emitter.emit_device_config_changed()
+        self.emitter.stateUpdated.emit(self._get_current_state_snapshot_locked())
 
     def remove(self):
-        logger.debug(f"[{self.name}] Logic: Remove called.")
         self.stop()
         super().remove()
 
@@ -664,7 +523,6 @@ class BaseAudioNode(Node):
             return {
                 "samplerate": self.samplerate,
                 "blocksize": self.blocksize,
-                "dtype_name": np.dtype(self.dtype).name,
                 "user_selected_device_identifier": self._user_selected_device_identifier,
                 "user_selected_device_name": self._user_selected_device_name,
                 "user_selected_device_hostapi_name": self._user_selected_device_hostapi_name,
@@ -672,14 +530,11 @@ class BaseAudioNode(Node):
             }
 
     def deserialize_extra(self, data: Dict[str, Any]):
-        logger.info(f"[{self.name}] Deserializing with device ID: {data.get('user_selected_device_identifier')}")
         is_input_node = self._get_is_input_node()
         with self._lock:
             self.samplerate = data.get("samplerate", DEFAULT_SAMPLERATE)
             self.blocksize = data.get("blocksize", DEFAULT_BLOCKSIZE)
-            self.dtype = np.dtype(data.get("dtype_name", DEFAULT_DTYPE))
             self.channels = data.get("channels", DEFAULT_CHANNELS)
-
             loaded_id = data.get("user_selected_device_identifier")
             loaded_name = data.get("user_selected_device_name")
             loaded_hostapi = data.get("user_selected_device_hostapi_name")
@@ -695,7 +550,6 @@ class BaseAudioNode(Node):
             elif loaded_name:
                 found_by_name = AudioDeviceManager.find_device_by_name(loaded_name, loaded_hostapi, is_input_node)
                 if found_by_name is not None:
-                    logger.info(f"[{self.name}] Found compatible device by name: {found_by_name}.")
                     self._user_selected_device_identifier = found_by_name
                     info = AudioDeviceManager.get_device_info(found_by_name)
                     if info:
@@ -707,15 +561,11 @@ class BaseAudioNode(Node):
                     self._set_initial_default_device_selection()
             else:
                 self._set_initial_default_device_selection()
-
             self._buffer.clear()
             self._update_status_message("Deserialized - Inactive")
 
-        if self.signal_emitter:
-            self.signal_emitter.emit_channels_changed(self.channels)
-            self.signal_emitter.emit_device_config_changed()
-            self.signal_emitter.emit_stream_status_update(self._current_status_message)
-        logger.info(f"[{self.name}] Deserialized. User selected ID: {self._user_selected_device_identifier}")
+        # Emit after deserialization to sync UI
+        self.emitter.stateUpdated.emit(self._get_current_state_snapshot_locked())
 
 
 # ==============================================================================
@@ -731,9 +581,7 @@ class AudioSourceNode(BaseAudioNode):
         super().__init__(name, node_id)
         self._overflow_count = 0
         self._last_overflow_time = 0
-        self.add_output("out", data_type=np.ndarray)
-        if self.signal_emitter:
-            self.signal_emitter.emit_channels_changed(self.channels)
+        self.add_output("out", data_type=torch.Tensor)
 
     def _get_is_input_node(self) -> bool:
         return True
@@ -750,7 +598,6 @@ class AudioSourceNode(BaseAudioNode):
 
     def _update_channels_from_stream(self, stream_instance: sd.InputStream) -> Optional[int]:
         if self.channels != stream_instance.channels:
-            logger.info(f"[{self.name}] Updating channels from {self.channels} to {stream_instance.channels}.")
             self.channels = stream_instance.channels
             return self.channels
         return None
@@ -770,7 +617,7 @@ class AudioSourceNode(BaseAudioNode):
                 self._last_overflow_time = now
         try:
             with self._lock:
-                self._buffer.append(indata.copy())
+                self._buffer.append(torch.from_numpy(indata.copy().T))
         except Exception as e:
             self._stream_error_count += 1
             if self._stream_error_count < 5:
@@ -782,22 +629,19 @@ class AudioSourceNode(BaseAudioNode):
             output_block = self._buffer.popleft() if self._buffer else None
 
         if output_block is None:
-            output_block = np.zeros((self.blocksize, stream_ch), dtype=self.dtype)
-
-        if output_block.shape[1] != stream_ch:
-            temp = np.zeros((self.blocksize, stream_ch), dtype=self.dtype)
-            ch_to_copy = min(output_block.shape[1], stream_ch)
+            output_block = torch.zeros((stream_ch, self.blocksize), dtype=self.dtype)
+        elif output_block.shape[0] != stream_ch:
+            temp = torch.zeros((stream_ch, self.blocksize), dtype=self.dtype)
+            ch_to_copy = min(output_block.shape[0], stream_ch)
             if ch_to_copy > 0:
-                temp[:, :ch_to_copy] = output_block[:, :ch_to_copy]
+                temp[:ch_to_copy, :] = output_block[:ch_to_copy, :]
             output_block = temp
-
         return {"out": output_block}
 
 
 class AudioSinkNode(BaseAudioNode, IClockProvider):
     NODE_TYPE = "Audio Device Output"
     CATEGORY = "Input / Output"
-    IS_CLOCK_SOURCE = True
     DESCRIPTION = "Sends audio to output device"
     UI_CLASS = AudioSinkNodeItem
 
@@ -807,9 +651,7 @@ class AudioSinkNode(BaseAudioNode, IClockProvider):
         self._last_underflow_time = 0
         self._tick_callback: Optional[Callable] = None
         self._active_stream_channels = self.channels
-        self.add_input("in", data_type=np.ndarray)
-        if self.signal_emitter:
-            self.signal_emitter.emit_channels_changed(self.channels)
+        self.add_input("in", data_type=torch.Tensor)
 
     def _get_is_input_node(self) -> bool:
         return False
@@ -855,9 +697,10 @@ class AudioSinkNode(BaseAudioNode, IClockProvider):
 
         with self._lock:
             if self._buffer:
-                data_block = self._buffer.popleft()
-                if data_block.shape == outdata.shape:
-                    outdata[:] = data_block
+                data_block: torch.Tensor = self._buffer.popleft()
+                numpy_block = data_block.numpy().T
+                if numpy_block.shape == outdata.shape:
+                    outdata[:] = numpy_block
                 else:
                     outdata.fill(0)
             else:
@@ -877,23 +720,26 @@ class AudioSinkNode(BaseAudioNode, IClockProvider):
         with self._lock:
             target_chans = self._active_stream_channels
 
-        processed_block = np.zeros((self.blocksize, target_chans), dtype=self.dtype)
-        if isinstance(signal_block, np.ndarray) and signal_block.shape[0] == self.blocksize and signal_block.ndim == 2:
-            input_chans = signal_block.shape[1]
+        processed_block = torch.zeros((target_chans, self.blocksize), dtype=self.dtype)
+        if (
+            isinstance(signal_block, torch.Tensor)
+            and signal_block.shape[1] == self.blocksize
+            and signal_block.ndim == 2
+        ):
+            input_chans = signal_block.shape[0]
             if input_chans == target_chans:
                 processed_block = signal_block
             else:
                 ch_to_copy = min(input_chans, target_chans)
                 if ch_to_copy > 0:
-                    processed_block[:, :ch_to_copy] = signal_block[:, :ch_to_copy]
+                    processed_block[:ch_to_copy, :] = signal_block[:ch_to_copy, :]
                 if target_chans > input_chans and input_chans > 0:
-                    last_ch = signal_block[:, -1:]
-                    processed_block[:, input_chans:] = np.tile(last_ch, (1, target_chans - input_chans))
+                    last_ch = signal_block[-1:, :]
+                    processed_block[input_chans:, :] = last_ch.tile((target_chans - input_chans, 1))
 
         try:
             with self._lock:
                 self._buffer.append(processed_block)
         except Exception as e:
             logger.error(f"[{self.name}] Error adding to buffer: {e}", exc_info=True)
-
         return {}

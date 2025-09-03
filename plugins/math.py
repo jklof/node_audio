@@ -1,4 +1,4 @@
-import numpy as np
+import torch
 from node_system import Node
 from constants import DEFAULT_DTYPE
 
@@ -83,9 +83,9 @@ class AddSignalsNode(Node):
 
     def __init__(self, name, node_id=None):
         super().__init__(name, node_id)
-        self.add_input("in1", data_type=np.ndarray)
-        self.add_input("in2", data_type=np.ndarray)
-        self.add_output("out", data_type=np.ndarray)
+        self.add_input("in1", data_type=torch.Tensor)
+        self.add_input("in2", data_type=torch.Tensor)
+        self.add_output("out", data_type=torch.Tensor)
         logger.debug(f"AddSignalsNode [{self.name}] initialized.")
 
     def process(self, input_data):
@@ -98,27 +98,27 @@ class AddSignalsNode(Node):
             return {"out": None}
         elif signal1 is None:
             # If only signal2 exists, pass it through (ensure correct type)
-            if isinstance(signal2, np.ndarray):
-                return {"out": signal2.astype(DEFAULT_DTYPE)}
+            if isinstance(signal2, torch.Tensor):
+                return {"out": signal2.to(DEFAULT_DTYPE)}
             else:
                 logger.warning(
-                    f"AddSignalsNode [{self.name}]: Input 'in1' is None, 'in2' is not a numpy array (type: {type(signal2)})."
+                    f"AddSignalsNode [{self.name}]: Input 'in1' is None, 'in2' is not a torch Tensor (type: {type(signal2)})."
                 )
                 return {"out": None}
         elif signal2 is None:
             # If only signal1 exists, pass it through (ensure correct type)
-            if isinstance(signal1, np.ndarray):
-                return {"out": signal1.astype(DEFAULT_DTYPE)}
+            if isinstance(signal1, torch.Tensor):
+                return {"out": signal1.to(DEFAULT_DTYPE)}
             else:
                 logger.warning(
-                    f"AddSignalsNode [{self.name}]: Input 'in2' is None, 'in1' is not a numpy array (type: {type(signal1)})."
+                    f"AddSignalsNode [{self.name}]: Input 'in2' is None, 'in1' is not a torch Tensor (type: {type(signal1)})."
                 )
                 return {"out": None}
 
-        # Both signals are present, check types are numpy arrays
-        if not isinstance(signal1, np.ndarray) or not isinstance(signal2, np.ndarray):
+        # Both signals are present, check types are torch Tensors
+        if not isinstance(signal1, torch.Tensor) or not isinstance(signal2, torch.Tensor):
             logger.warning(
-                f"AddSignalsNode [{self.name}]: Invalid input types. Expected numpy arrays, got ({type(signal1)}, {type(signal2)})."
+                f"AddSignalsNode [{self.name}]: Invalid input types. Expected torch Tensors, got ({type(signal1)}, {type(signal2)})."
             )
             return {"out": None}
 
@@ -127,7 +127,7 @@ class AddSignalsNode(Node):
             # Broadcasting might occur if shapes are compatible but not identical
             result = signal1 + signal2
             # Ensure output is the default float type
-            return {"out": result.astype(DEFAULT_DTYPE)}
+            return {"out": result.to(DEFAULT_DTYPE)}
         except ValueError as e:
             # Specifically catch ValueError which often indicates shape mismatch
             logger.warning(
@@ -146,10 +146,10 @@ class GainBiasNode(Node):
 
     def __init__(self, name, node_id=None):
         super().__init__(name, node_id)
-        self.add_input("in", data_type=np.ndarray)
+        self.add_input("in", data_type=torch.Tensor)
         self.add_input("gain", data_type=float)
         self.add_input("bias", data_type=float)
-        self.add_output("out", data_type=np.ndarray)
+        self.add_output("out", data_type=torch.Tensor)
 
     def process(self, input_data):
         signal = input_data.get("in")
@@ -159,8 +159,8 @@ class GainBiasNode(Node):
         # Handle missing or invalid signal input
         if signal is None:
             return {"out": None}
-        if not isinstance(signal, np.ndarray):
-            logger.warning(f"GainBiasNode [{self.name}]: 'in' signal is not a numpy array (type: {type(signal)}).")
+        if not isinstance(signal, torch.Tensor):
+            logger.warning(f"GainBiasNode [{self.name}]: 'in' signal is not a torch Tensor (type: {type(signal)}).")
             return {"out": None}
 
         gain_input = input_data.get("gain")
@@ -170,4 +170,4 @@ class GainBiasNode(Node):
         bias = float(bias_input) if bias_input is not None else 0.0
 
         result = (signal * gain) + bias
-        return {"out": result.astype(DEFAULT_DTYPE)}
+        return {"out": result.to(DEFAULT_DTYPE)}

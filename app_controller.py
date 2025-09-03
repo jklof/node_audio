@@ -3,7 +3,7 @@ import json
 from PySide6.QtCore import QObject, Slot
 from PySide6.QtWidgets import QFileDialog, QMessageBox, QWidget
 
-from engine import Engine
+from engine import Engine, EngineState
 from graph_view import NodeGraphWidget
 from node_system import Socket
 
@@ -27,6 +27,7 @@ class AppController(QObject):
         self.engine.signals.graphChanged.connect(self.graph_widget.graph_scene.sync_from_graph)
         self.engine.signals.processingError.connect(self._on_processing_error)
         self.engine.signals.nodeProcessingStatsUpdated.connect(self.graph_widget.graph_scene.on_node_stats_updated)
+        self.engine.signals.nodeErrorOccurred.connect(self.graph_widget.graph_scene.on_node_error)
 
         # Connect View (UI) request signals to Controller slots
         self.graph_widget.graph_scene.nodeCreationRequested.connect(self.on_node_creation_requested)
@@ -35,6 +36,17 @@ class AppController(QObject):
         self.graph_widget.connectionRequested.connect(self.on_connection_requested)
         self.graph_widget.nodeDeletionRequested.connect(self.on_node_deletion_requested)
         self.graph_widget.connectionDeletionRequested.connect(self.on_connection_deletion_requested)
+
+    @Slot(list)
+    def reload_all_plugins(self, plugin_dirs: list[str]):
+        """
+        Orchestrates the plugin reload process by delegating the entire
+        transactional operation to the engine.
+        """
+        logger.info("Controller: Requesting engine to perform transactional plugin reload.")
+
+        # Pass the plugin directories to the engine for a full rescan and reload.
+        self.engine.reload_plugins_and_graph(plugin_dirs)
 
     @Slot(type, str, tuple)
     def on_node_creation_requested(self, node_class, name, pos):

@@ -4,15 +4,15 @@ import time
 import subprocess
 import sys
 from collections import deque
-from typing import Optional, Dict, Tuple, Any
+from typing import Optional, Dict, Tuple
 
 import numpy as np
+import torch
 from pytubefix import YouTube, Stream
-from pytubefix.exceptions import AgeRestrictedError, VideoUnavailable, LiveStreamError
 
 from node_system import Node
 from constants import DEFAULT_SAMPLERATE, DEFAULT_BLOCKSIZE, DEFAULT_DTYPE
-from ui_elements import NodeItem, NODE_CONTENT_PADDING
+from ui_elements import NodeItem, NodeStateEmitter, NODE_CONTENT_PADDING
 
 from PySide6.QtWidgets import QWidget, QLabel, QVBoxLayout, QHBoxLayout, QPushButton, QLineEdit, QSlider
 from PySide6.QtCore import Qt, Slot, Signal, QObject, QTimer
@@ -39,15 +39,10 @@ class PlaybackState:
     ERROR = "ERROR"
 
 
-class YouTubePlayerSignalEmitter(QObject):
-    playbackStateChanged = Signal(dict)
-    newVideoFrame = Signal(QImage)
+class VideoSignalEmitter(QObject):
+    """A dedicated emitter for video frames to keep them separate from state dicts."""
 
-    def emit_state_change(self, state_dict: Dict):
-        try:
-            self.playbackStateChanged.emit(state_dict.copy())
-        except RuntimeError as e:
-            logger.debug(f"YouTube Emitter caught RuntimeError: {e}")
+    newVideoFrame = Signal(QImage)
 
     def emit_video_frame(self, frame: QImage):
         try:
@@ -116,19 +111,16 @@ class YouTubePlayerNodeItem(NodeItem):
         self.seek_slider.sliderReleased.connect(self._on_seek_slider_released)
         self.seek_slider.sliderMoved.connect(self._on_seek_slider_moved)
 
-        self.node_logic.emitter.playbackStateChanged.connect(self._on_playback_state_changed)
-        self.node_logic.emitter.newVideoFrame.connect(self._on_new_video_frame)
+        self.node_logic.emitter.stateUpdated.connect(self._on_state_updated)
+        self.node_logic.video_emitter.newVideoFrame.connect(self._on_new_video_frame)
 
-        # Defer loading from a saved file until after the main event loop has started
         QTimer.singleShot(0, self.node_logic.load_url_if_present)
-
         self.updateFromLogic()
 
     def _format_time(self, seconds: float) -> str:
         if seconds < 0:
             return "00:00"
-        mins = int(seconds // 60)
-        secs = int(seconds % 60)
+        mins, secs = int(seconds // 60), int(seconds % 60)
         return f"{mins:02d}:{secs:02d}"
 
     @Slot()
@@ -144,19 +136,13 @@ class YouTubePlayerNodeItem(NodeItem):
 
     @Slot(int)
     def _on_seek_slider_moved(self, value: int):
-        if not self.node_logic:
-            return
         duration = self.node_logic.get_current_state_snapshot().get("duration_s", 0.0)
         if duration > 0:
-            current_s = (value / 1000.0) * duration
-            self.time_label.setText(self._format_time(current_s))
+            self.time_label.setText(self._format_time((value / 1000.0) * duration))
 
     @Slot()
     def _on_seek_slider_released(self):
-        if not self.node_logic:
-            return
-        seek_proportion = self.seek_slider.value() / 1000.0
-        self.node_logic.seek(seek_proportion)
+        self.node_logic.seek(self.seek_slider.value() / 1000.0)
 
     @Slot(QImage)
     def _on_new_video_frame(self, frame: QImage):
@@ -164,7 +150,7 @@ class YouTubePlayerNodeItem(NodeItem):
             self.video_display.setPixmap(QPixmap.fromImage(frame))
 
     @Slot(dict)
-    def _on_playback_state_changed(self, state: Dict):
+    def _on_state_updated(self, state: Dict):
         playback_state = state.get("state")
         stream_info = state.get("stream_info", {})
         error_message = state.get("error_message", "")
@@ -175,11 +161,7 @@ class YouTubePlayerNodeItem(NodeItem):
         self.play_pause_button.setEnabled(has_stream)
         self.seek_slider.setEnabled(has_stream)
 
-        if playback_state == PlaybackState.PLAYING:
-            self.play_pause_button.setText("⏸")
-        else:
-            self.play_pause_button.setText("▶")
-
+        self.play_pause_button.setText("⏸" if playback_state == PlaybackState.PLAYING else "▶")
         self.title_label.setText(stream_info.get("title", "No stream loaded"))
         if not self.url_input.hasFocus():
             self.url_input.setText(state.get("url", ""))
@@ -187,7 +169,7 @@ class YouTubePlayerNodeItem(NodeItem):
         status_text = f"Status: {playback_state}"
         if playback_state == PlaybackState.ERROR:
             self.status_label.setStyleSheet("color: red;")
-            status_text = f"Status: ERROR"
+            status_text = "Status: ERROR"
             self.video_display.setText(f"Error:\n{error_message[:100]}")
         elif playback_state == PlaybackState.PLAYING:
             self.status_label.setStyleSheet("color: lightgreen;")
@@ -196,22 +178,20 @@ class YouTubePlayerNodeItem(NodeItem):
             self.video_display.setPixmap(QPixmap())
         else:
             self.status_label.setStyleSheet("color: lightgray;")
-
         self.status_label.setText(status_text)
 
         self.time_label.setText(self._format_time(current_position))
         self.duration_label.setText(self._format_time(total_duration))
 
         if total_duration > 0 and not self.seek_slider.isSliderDown():
-            slider_value = int((current_position / total_duration) * 1000)
-            self.seek_slider.setValue(slider_value)
+            self.seek_slider.setValue(int((current_position / total_duration) * 1000))
         elif total_duration == 0:
             self.seek_slider.setValue(0)
 
     @Slot()
     def updateFromLogic(self):
         state = self.node_logic.get_current_state_snapshot()
-        self._on_playback_state_changed(state)
+        self._on_state_updated(state)
         super().updateFromLogic()
 
 
@@ -223,54 +203,61 @@ class YouTubePlayerNode(Node):
 
     def __init__(self, name, node_id=None):
         super().__init__(name, node_id)
-        self.add_output("out", data_type=np.ndarray)
-        self.emitter = YouTubePlayerSignalEmitter()
+        self.add_output("out", data_type=torch.Tensor)
+        self.emitter = NodeStateEmitter()
+        self.video_emitter = VideoSignalEmitter()
         self._lock = threading.Lock()
 
         self._worker_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
         self._ffmpeg_process: Optional[subprocess.Popen] = None
-
         self._audio_buffer = deque()
-        self._state_snapshot: Dict = {
-            "state": PlaybackState.STOPPED,
-            "url": "",
-            "stream_info": {},
-            "error_message": "",
-            "position_s": 0.0,
-            "duration_s": 0.0,
-        }
+
+        # --- Explicit State Variables ---
         self._playback_state = PlaybackState.STOPPED
+        self._url: str = ""
+        self._stream_info: Dict = {}
+        self._error_message: str = ""
+        self._position_s: float = 0.0
+        self._duration_s: float = 0.0
         self._seek_request_s: float = -1.0
 
-    def get_current_state_snapshot(self) -> Dict:
+    def get_current_state_snapshot(self, locked: bool = False) -> Dict:
+        """Constructs a state dictionary from internal variables."""
+        state = {
+            "state": self._playback_state,
+            "url": self._url,
+            "stream_info": self._stream_info,
+            "error_message": self._error_message,
+            "position_s": self._position_s,
+            "duration_s": self._duration_s,
+        }
+        if locked:
+            return state
         with self._lock:
-            return self._state_snapshot.copy()
+            return state
 
     def load_url_if_present(self):
-        """Called by the UI after init to load a URL from a saved file."""
         with self._lock:
-            url = self._state_snapshot.get("url")
+            url = self._url
         if url:
-            logger.info(f"[{self.name}] Auto-loading URL from saved state: {url}")
+            logger.info(f"[{self.name}] Auto-loading URL: {url}")
             self.load_url(url)
-            # Restore position after loading info
             with self._lock:
-                initial_seek_pos = self._state_snapshot.get("position_s", 0.0)
-            if initial_seek_pos > 0:
-                self._seek_request_s = initial_seek_pos
+                initial_seek = self._position_s
+            if initial_seek > 0:
+                self._seek_request_s = initial_seek
 
     def load_url(self, url: str):
         self._stop_worker()
         state_to_emit = None
         with self._lock:
             self._playback_state = PlaybackState.LOADING
-            self._state_snapshot.update(
-                state=self._playback_state, url=url, stream_info={}, error_message="", position_s=0.0, duration_s=0.0
-            )
-            state_to_emit = self._state_snapshot.copy()
+            self._url, self._stream_info, self._error_message = url, {}, ""
+            self._position_s, self._duration_s = 0.0, 0.0
+            state_to_emit = self.get_current_state_snapshot(locked=True)
         if state_to_emit:
-            self.emitter.emit_state_change(state_to_emit)
+            self.emitter.stateUpdated.emit(state_to_emit)
 
         self._stop_event.clear()
         self._worker_thread = threading.Thread(target=self._stream_reader_loop, daemon=True)
@@ -279,56 +266,46 @@ class YouTubePlayerNode(Node):
     def toggle_playback(self):
         state_to_emit = None
         with self._lock:
-            if not self._state_snapshot.get("stream_info").get("title"):
+            if not self._stream_info.get("title"):
                 return
-
             if self._playback_state in [PlaybackState.PAUSED, PlaybackState.STOPPED]:
-                if (
-                    self._state_snapshot.get("position_s", 0) >= self._state_snapshot.get("duration_s", 0)
-                    and self._state_snapshot.get("duration_s", 0) > 0
-                ):
+                if self._position_s >= self._duration_s and self._duration_s > 0:
                     self._seek_request_s = 0.0
                 self._playback_state = PlaybackState.PLAYING
             else:
                 self._playback_state = PlaybackState.PAUSED
-            state_to_emit = self._update_state_snapshot_locked(state=self._playback_state)
-
+            state_to_emit = self.get_current_state_snapshot(locked=True)
         if state_to_emit:
-            self.emitter.emit_state_change(state_to_emit)
+            self.emitter.stateUpdated.emit(state_to_emit)
 
     def seek(self, proportion: float):
         state_to_emit = None
         with self._lock:
-            duration = self._state_snapshot.get("duration_s", 0.0)
-            if duration <= 0:
+            if self._duration_s <= 0:
                 return
-
-            target_s = max(0.0, min(duration, proportion * duration))
-            self._seek_request_s = target_s
+            self._seek_request_s = max(0.0, min(self._duration_s, proportion * self._duration_s))
+            self._position_s = self._seek_request_s
             self._playback_state = PlaybackState.BUFFERING
-            state_to_emit = self._update_state_snapshot_locked(state=self._playback_state, position_s=target_s)
-
+            state_to_emit = self.get_current_state_snapshot(locked=True)
         if state_to_emit:
-            self.emitter.emit_state_change(state_to_emit)
+            self.emitter.stateUpdated.emit(state_to_emit)
 
     def process(self, input_data: dict) -> dict:
         state_to_emit = None
         output_block = None
         with self._lock:
-            if len(self._audio_buffer) > 0:
+            if self._audio_buffer:
                 output_block = self._audio_buffer.popleft()
                 if self._playback_state == PlaybackState.BUFFERING:
                     self._playback_state = PlaybackState.PLAYING
-                    state_to_emit = self._update_state_snapshot_locked(state=self._playback_state)
+                    state_to_emit = self.get_current_state_snapshot(locked=True)
             else:
                 if self._playback_state == PlaybackState.PLAYING:
                     self._playback_state = PlaybackState.BUFFERING
-                    state_to_emit = self._update_state_snapshot_locked(state=self._playback_state)
-                output_block = np.zeros((DEFAULT_BLOCKSIZE, 2), dtype=DEFAULT_DTYPE)
-
+                    state_to_emit = self.get_current_state_snapshot(locked=True)
+                output_block = torch.zeros((2, DEFAULT_BLOCKSIZE), dtype=DEFAULT_DTYPE)
         if state_to_emit:
-            self.emitter.emit_state_change(state_to_emit)
-
+            self.emitter.stateUpdated.emit(state_to_emit)
         return {"out": output_block}
 
     def remove(self):
@@ -351,10 +328,6 @@ class YouTubePlayerNode(Node):
             self._audio_buffer.clear()
             self._seek_request_s = -1.0
 
-    def _update_state_snapshot_locked(self, **kwargs) -> Dict:
-        self._state_snapshot.update(kwargs)
-        return self._state_snapshot.copy()
-
     def _get_youtube_info(self, url: str) -> Optional[Tuple[str, float, str, Stream]]:
         try:
             yt = YouTube(url)
@@ -363,61 +336,56 @@ class YouTubePlayerNode(Node):
                 stream = yt.streams.get_highest_resolution()
             if not stream:
                 raise RuntimeError("No suitable MP4 stream found.")
-
-            stream_url = stream.url
-            title = yt.title or "Unknown Title"
-            duration_s = yt.length or 0.0
-
-            return title, duration_s, stream_url, stream
+            return yt.title or "Unknown", yt.length or 0.0, stream.url, stream
         except Exception as e:
             logger.error(f"[{self.name}] Error fetching YouTube info for {url}: {e}", exc_info=True)
+            with self._lock:
+                self._error_message = str(e)
             return None
 
     def _audio_reader_thread(self, pipe, start_time_s: float):
-        frames_read_since_start = 0
-        current_playback_time_s = start_time_s
-        last_ui_update_time = time.monotonic()
-
+        frames_read = 0
+        last_ui_update = time.monotonic()
         while not self._stop_event.is_set():
             with self._lock:
-                is_paused = self._playback_state == PlaybackState.PAUSED
-                is_buffer_full = len(self._audio_buffer) >= INTERNAL_BUFFER_MAX_BLOCKS
-
-            if is_paused or is_buffer_full:
+                is_paused_or_full = (
+                    self._playback_state == PlaybackState.PAUSED
+                    or len(self._audio_buffer) >= INTERNAL_BUFFER_MAX_BLOCKS
+                )
+            if is_paused_or_full:
                 time.sleep(0.01)
                 continue
-
             raw_audio = pipe.read(FFMPEG_AUDIO_CHUNK_SIZE)
             if not raw_audio:
                 break
 
-            audio_array = np.frombuffer(raw_audio, dtype=np.int16).astype(DEFAULT_DTYPE) / 32768.0
-            num_samples_in_chunk = audio_array.shape[0] // 2
-            if num_samples_in_chunk == 0:
+            # --- FIX: Create a writable copy of the numpy array ---
+            audio_array_np = np.frombuffer(raw_audio, dtype=np.int16).copy()
+
+            audio_tensor = torch.from_numpy(audio_array_np).to(DEFAULT_DTYPE) / 32768.0
+            num_samples = audio_tensor.shape[0] // 2
+            if num_samples == 0:
                 continue
+            reshaped = audio_tensor.reshape(num_samples, 2).T
 
-            reshaped_audio = audio_array.reshape(num_samples_in_chunk, 2)
-
-            for i in range(0, num_samples_in_chunk, DEFAULT_BLOCKSIZE):
-                block = reshaped_audio[i : i + DEFAULT_BLOCKSIZE]
-                if block.shape[0] == DEFAULT_BLOCKSIZE:
+            for i in range(0, num_samples, DEFAULT_BLOCKSIZE):
+                block = reshaped[:, i : i + DEFAULT_BLOCKSIZE]
+                if block.shape[1] == DEFAULT_BLOCKSIZE:
                     with self._lock:
                         self._audio_buffer.append(block)
-                    frames_read_since_start += DEFAULT_BLOCKSIZE
-
-            current_playback_time_s = start_time_s + (frames_read_since_start / DEFAULT_SAMPLERATE)
+                    frames_read += DEFAULT_BLOCKSIZE
 
             now = time.monotonic()
-            if now - last_ui_update_time > UI_UPDATE_INTERVAL_MS / 1000.0:
-                state_to_emit = None
+            if now - last_ui_update > UI_UPDATE_INTERVAL_MS / 1000.0:
                 with self._lock:
-                    state_to_emit = self._update_state_snapshot_locked(position_s=current_playback_time_s)
-                if state_to_emit:
-                    self.emitter.emit_state_change(state_to_emit)
-                last_ui_update_time = now
+                    self._position_s = start_time_s + (frames_read / DEFAULT_SAMPLERATE)
+                    state_to_emit = self.get_current_state_snapshot(locked=True)
+                self.emitter.stateUpdated.emit(state_to_emit)
+                last_ui_update = now
 
-        self._end_of_stream_actions(current_playback_time_s, start_time_s)
-
+        with self._lock:
+            final_pos = start_time_s + (frames_read / DEFAULT_SAMPLERATE)
+        self._end_of_stream_actions(final_pos)
         logger.info(f"[{self.name}] Audio reader thread finished.")
 
     def _video_reader_thread(self, pipe):
@@ -425,88 +393,62 @@ class YouTubePlayerNode(Node):
             raw_frame = pipe.read(VIDEO_FRAME_BYTES)
             if len(raw_frame) < VIDEO_FRAME_BYTES:
                 break
-            image = QImage(raw_frame, VIDEO_WIDTH, VIDEO_HEIGHT, QImage.Format.Format_ARGB32)
-            self.emitter.emit_video_frame(image.copy())
+            self.video_emitter.emit_video_frame(
+                QImage(raw_frame, VIDEO_WIDTH, VIDEO_HEIGHT, QImage.Format.Format_ARGB32).copy()
+            )
             time.sleep(1 / 20)
         logger.info(f"[{self.name}] Video reader thread finished.")
 
-    def _end_of_stream_actions(self, current_playback_time_s: float, start_time_s: float):
-        """Handle end of stream - implement looping by automatically restarting playback."""
+    def _end_of_stream_actions(self, final_playback_time_s: float):
         state_to_emit = None
         with self._lock:
-            duration_s = self._state_snapshot.get("duration_s", 0.0)
-
-            if current_playback_time_s >= duration_s and duration_s > 0:
-                # End of video reached - loop back to beginning
-                logger.info(f"[{self.name}] End of video reached, looping back to start.")
-                self._seek_request_s = 0.0
+            if abs(final_playback_time_s - self._duration_s) <= 0.5 and self._duration_s > 0:
+                logger.info(f"[{self.name}] End of video reached, looping.")
+                self._seek_request_s, self._position_s = 0.0, 0.0
                 self._playback_state = PlaybackState.PLAYING
-                self._state_snapshot["position_s"] = 0.0
-                state_to_emit = self._update_state_snapshot_locked()
             elif not self._stop_event.is_set():
-                # Natural end without reaching full duration
-                self._playback_state = PlaybackState.STOPPED
-                self._state_snapshot["position_s"] = current_playback_time_s
-                state_to_emit = self._update_state_snapshot_locked()
+                self._playback_state, self._position_s = PlaybackState.STOPPED, final_playback_time_s
             else:
-                # Stop event was set, just mark as stopped
                 self._playback_state = PlaybackState.STOPPED
-                state_to_emit = self._update_state_snapshot_locked()
-
+            state_to_emit = self.get_current_state_snapshot(locked=True)
         if state_to_emit:
-            self.emitter.emit_state_change(state_to_emit)
+            self.emitter.stateUpdated.emit(state_to_emit)
 
     def _stream_reader_loop(self):
-        url = self._state_snapshot["url"]
-        title, duration_s, stream_url = (None, 0.0, None)
-
-        try:
-            info = self._get_youtube_info(url)
-            if not info:
-                raise RuntimeError("Failed to get YouTube video information.")
-            title, duration_s, stream_url, _ = info
-            state_to_emit = None
+        with self._lock:
+            url = self._url
+        info = self._get_youtube_info(url)
+        if not info:
             with self._lock:
-                state_to_emit = self._update_state_snapshot_locked(
-                    stream_info={"title": title, "length": duration_s}, duration_s=duration_s
-                )
-            if state_to_emit:
-                self.emitter.emit_state_change(state_to_emit)
-        except Exception as e:
-            state_to_emit = None
-            with self._lock:
-                state_to_emit = self._update_state_snapshot_locked(state=PlaybackState.ERROR, error_message=str(e))
-            if state_to_emit:
-                self.emitter.emit_state_change(state_to_emit)
+                state_to_emit = self.get_current_state_snapshot(locked=True)
+            self.emitter.stateUpdated.emit(state_to_emit)
             return
 
-        current_stream_start_time = 0.0
+        title, duration_s, stream_url, _ = info
+        with self._lock:
+            self._stream_info, self._duration_s = {"title": title, "length": duration_s}, duration_s
+            state_to_emit = self.get_current_state_snapshot(locked=True)
+        self.emitter.stateUpdated.emit(state_to_emit)
 
         while not self._stop_event.is_set():
-            audio_thread, video_thread = None, None
-
+            start_time = 0.0
             with self._lock:
                 if self._seek_request_s != -1.0:
-                    current_stream_start_time = self._seek_request_s
-                    self._seek_request_s = -1.0
+                    start_time, self._seek_request_s = self._seek_request_s, -1.0
                     self._audio_buffer.clear()
-                elif self._ffmpeg_process is None:
-                    current_stream_start_time = self._state_snapshot.get("position_s", 0.0)
-                    if current_stream_start_time >= duration_s and duration_s > 0:
-                        current_stream_start_time = 0.0
-
+                elif not self._ffmpeg_process:
+                    start_time = self._position_s
+                    if start_time >= self._duration_s and self._duration_s > 0:
+                        start_time = 0.0
                 if self._playback_state != PlaybackState.PAUSED:
                     self._playback_state = PlaybackState.BUFFERING
-                    state_to_emit = self._update_state_snapshot_locked(state=self._playback_state)
+                    state_to_emit = self.get_current_state_snapshot(locked=True)
+            self.emitter.stateUpdated.emit(state_to_emit)
 
-            if state_to_emit:
-                self.emitter.emit_state_change(state_to_emit)
-
-            ffmpeg_command = ["ffmpeg", "-hide_banner", "-loglevel", "error"]
-            if current_stream_start_time > 0:
-                ffmpeg_command.extend(["-ss", str(current_stream_start_time)])
-
-            ffmpeg_command.extend(
+            ffmpeg_cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error"]
+            if start_time > 0:
+                ffmpeg_cmd.extend(["-ss", str(start_time)])
+            ffmpeg_cmd.extend(
                 [
                     "-i",
                     stream_url,
@@ -534,18 +476,16 @@ class YouTubePlayerNode(Node):
             )
 
             try:
-                creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+                flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
                 with self._lock:
                     self._ffmpeg_process = subprocess.Popen(
-                        ffmpeg_command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=creationflags
+                        ffmpeg_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=flags
                     )
                 if not self._ffmpeg_process:
-                    raise RuntimeError("Failed to start FFMPEG process.")
+                    raise RuntimeError("Failed to start FFMPEG.")
 
                 audio_thread = threading.Thread(
-                    target=self._audio_reader_thread,
-                    args=(self._ffmpeg_process.stdout, current_stream_start_time),
-                    daemon=True,
+                    target=self._audio_reader_thread, args=(self._ffmpeg_process.stdout, start_time), daemon=True
                 )
                 video_thread = threading.Thread(
                     target=self._video_reader_thread, args=(self._ffmpeg_process.stderr,), daemon=True
@@ -553,69 +493,41 @@ class YouTubePlayerNode(Node):
                 audio_thread.start()
                 video_thread.start()
 
-                # --- THIS IS THE FIX ---
-                # This loop is now interruptible by a seek request.
                 while self._ffmpeg_process.poll() is None and not self._stop_event.is_set():
                     with self._lock:
                         if self._seek_request_s != -1.0:
-                            logger.info(f"[{self.name}] Seek detected, interrupting current ffmpeg process.")
-                            break  # Exit the waiting loop to handle the seek
+                            break
                     time.sleep(0.1)
-
             except Exception as e:
-                logger.error(f"[{self.name}] FFmpeg pipeline error: {e}", exc_info=True)
-                state_to_emit = None
+                logger.error(f"[{self.name}] FFmpeg error: {e}", exc_info=True)
                 with self._lock:
-                    state_to_emit = self._update_state_snapshot_locked(
-                        state=PlaybackState.ERROR, error_message=f"Stream error: {e}"
-                    )
-                if state_to_emit:
-                    self.emitter.emit_state_change(state_to_emit)
+                    self._playback_state, self._error_message = PlaybackState.ERROR, f"Stream error: {e}"
                 break
-
             finally:
                 if self._ffmpeg_process:
                     self._ffmpeg_process.terminate()
-                if audio_thread and audio_thread.is_alive():
+                if "audio_thread" in locals() and audio_thread.is_alive():
                     audio_thread.join(timeout=1.0)
-                if video_thread and video_thread.is_alive():
+                if "video_thread" in locals() and video_thread.is_alive():
                     video_thread.join(timeout=1.0)
                 with self._lock:
                     self._ffmpeg_process = None
-
                 if self._stop_event.is_set():
                     break
-                with self._lock:
-                    # If we broke out of the loop but it wasn't a seek, it was end-of-stream
-                    if self._seek_request_s == -1.0:
-                        self._playback_state = PlaybackState.STOPPED
-                        state_to_emit = self._update_state_snapshot_locked()
-                if state_to_emit:
-                    self.emitter.emit_state_change(state_to_emit)
-
-                # Continue main loop to allow for looping (restart from beginning)
-                # The _end_of_stream_actions method will set _seek_request_s = 0.0 for looping
 
         logger.info(f"[{self.name}] Main worker loop finished.")
-        state_to_emit = None
         with self._lock:
             if self._playback_state != PlaybackState.ERROR:
                 self._playback_state = PlaybackState.STOPPED
-                state_to_emit = self._update_state_snapshot_locked(state=self._playback_state)
-        if state_to_emit:
-            self.emitter.emit_state_change(state_to_emit)
+            state_to_emit = self.get_current_state_snapshot(locked=True)
+        self.emitter.stateUpdated.emit(state_to_emit)
 
     def serialize_extra(self) -> dict:
         with self._lock:
-            return {
-                "youtube_url": self._state_snapshot.get("url", ""),
-                "saved_position_s": self._state_snapshot.get("position_s", 0.0),
-            }
+            return {"youtube_url": self._url, "saved_position_s": self._position_s}
 
     def deserialize_extra(self, data: dict):
-        url = data.get("youtube_url")
-        saved_position = data.get("saved_position_s", 0.0)
+        url, pos = data.get("youtube_url"), data.get("saved_position_s", 0.0)
         if url:
             with self._lock:
-                self._state_snapshot["url"] = url
-                self._state_snapshot["position_s"] = saved_position
+                self._url, self._position_s = url, pos

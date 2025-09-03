@@ -1,4 +1,4 @@
-import numpy as np
+import torch
 import logging
 from node_system import Node
 
@@ -14,22 +14,22 @@ class MonoMixdownNode(Node):
 
     def __init__(self, name, node_id=None):
         super().__init__(name, node_id)
-        self.add_input("in", data_type=np.ndarray)
-        self.add_output("out", data_type=np.ndarray)
+        self.add_input("in", data_type=torch.Tensor)
+        self.add_output("out", data_type=torch.Tensor)
         logger.debug(f"[{self.name}] MonoMixdownNode initialized.")
 
     def process(self, input_data: dict) -> dict:
         in_signal = input_data.get("in")
 
-        if not isinstance(in_signal, np.ndarray) or in_signal.ndim != 2:
+        if not isinstance(in_signal, torch.Tensor) or in_signal.ndim != 2:
             if in_signal is not None:
                 logger.warning(
-                    f"[{self.name}] Input is not a valid 2D numpy array. "
+                    f"[{self.name}] Input is not a valid 2D torch Tensor. "
                     f"Received type: {type(in_signal)}, ndim: {getattr(in_signal, 'ndim', 'N/A')}."
                 )
             return {"out": None}
 
-        _blocksize, num_channels = in_signal.shape
+        num_channels, _blocksize = in_signal.shape
 
         if num_channels == 0:
             logger.warning(f"[{self.name}] Input has 0 channels.")
@@ -41,10 +41,8 @@ class MonoMixdownNode(Node):
 
         # Mix down by averaging channels, preserving dtype as much as possible
         try:
-            # np.mean might change dtype (e.g., int to float64).
-            # If original dtype was complex, it should remain complex.
-            # If original was float, result will be float.
-            mono_signal = np.mean(in_signal, axis=1, keepdims=True)
+            # torch.mean preserves float and complex dtypes
+            mono_signal = torch.mean(in_signal, dim=0, keepdim=True)
             return {"out": mono_signal}
         except Exception as e:
             logger.error(f"[{self.name}] Error during mono mixdown: {e}", exc_info=True)
@@ -58,19 +56,19 @@ class StereoJoinNode(Node):
 
     def __init__(self, name, node_id=None):
         super().__init__(name, node_id)
-        self.add_input("in_left", data_type=np.ndarray)
-        self.add_input("in_right", data_type=np.ndarray)
-        self.add_output("out", data_type=np.ndarray)
+        self.add_input("in_left", data_type=torch.Tensor)
+        self.add_input("in_right", data_type=torch.Tensor)
+        self.add_output("out", data_type=torch.Tensor)
         logger.debug(f"[{self.name}] StereoJoinNode initialized.")
 
     def _validate_mono_input(
-        self, signal: np.ndarray, expected_blocksize: int | None, channel_name: str
-    ) -> np.ndarray | None:
-        if not isinstance(signal, np.ndarray) or signal.ndim != 2:
-            logger.warning(f"[{self.name}] Input '{channel_name}' is not a valid 2D numpy array.")
+        self, signal: torch.Tensor, expected_blocksize: int | None, channel_name: str
+    ) -> torch.Tensor | None:
+        if not isinstance(signal, torch.Tensor) or signal.ndim != 2:
+            logger.warning(f"[{self.name}] Input '{channel_name}' is not a valid 2D torch Tensor.")
             return None
 
-        blocksize, num_channels = signal.shape
+        num_channels, blocksize = signal.shape
 
         if num_channels != 1:
             # logger.warning(f"[{self.name}] Input '{channel_name}' is not mono (channels: {num_channels}).")
@@ -96,16 +94,16 @@ class StereoJoinNode(Node):
         if in_left is not None:
             valid_left = self._validate_mono_input(in_left, None, "in_left")
             if valid_left is not None:
-                determined_blocksize = valid_left.shape[0]
+                determined_blocksize = valid_left.shape[1]
 
         if in_right is not None:
             valid_right = self._validate_mono_input(in_right, determined_blocksize, "in_right")
             if valid_right is not None:
                 if determined_blocksize is None:
-                    determined_blocksize = valid_right.shape[0]
-                elif valid_left is not None and valid_left.shape[0] != determined_blocksize:
+                    determined_blocksize = valid_right.shape[1]
+                elif valid_left is not None and valid_left.shape[1] != determined_blocksize:
                     logger.warning(
-                        f"[{self.name}] Input 'in_left' blocksize ({valid_left.shape[0]}) "
+                        f"[{self.name}] Input 'in_left' blocksize ({valid_left.shape[1]}) "
                         f"mismatches 'in_right' blocksize ({determined_blocksize}). Discarding 'in_left'."
                     )
                     valid_left = None
@@ -126,19 +124,19 @@ class StereoJoinNode(Node):
             output_dtype = valid_right.dtype
 
         left_channel_data = (
-            valid_left if valid_left is not None else np.zeros((determined_blocksize, 1), dtype=output_dtype)
+            valid_left if valid_left is not None else torch.zeros((1, determined_blocksize), dtype=output_dtype)
         )
         right_channel_data = (
-            valid_right if valid_right is not None else np.zeros((determined_blocksize, 1), dtype=output_dtype)
+            valid_right if valid_right is not None else torch.zeros((1, determined_blocksize), dtype=output_dtype)
         )
 
         try:
-            # np.hstack will promote dtype if they are different (e.g., float32 and complex64 -> complex64)
-            stereo_out = np.hstack((left_channel_data, right_channel_data))
+            # torch.vstack will promote dtype if they are different
+            stereo_out = torch.vstack((left_channel_data, right_channel_data))
             return {"out": stereo_out}
         except ValueError as e:
             logger.error(
-                f"[{self.name}] Error during hstack, likely due to final blocksize mismatch: {e}", exc_info=True
+                f"[{self.name}] Error during vstack, likely due to final blocksize mismatch: {e}", exc_info=True
             )
             return {"out": None}
         except Exception as e:
@@ -153,23 +151,23 @@ class StereoChannelSplitterNode(Node):
 
     def __init__(self, name, node_id=None):
         super().__init__(name, node_id)
-        self.add_input("in", data_type=np.ndarray)
-        self.add_output("out_left", data_type=np.ndarray)
-        self.add_output("out_right", data_type=np.ndarray)
+        self.add_input("in", data_type=torch.Tensor)
+        self.add_output("out_left", data_type=torch.Tensor)
+        self.add_output("out_right", data_type=torch.Tensor)
         logger.debug(f"[{self.name}] StereoChannelSplitterNode initialized.")
 
     def process(self, input_data: dict) -> dict:
         in_signal = input_data.get("in")
 
-        if not isinstance(in_signal, np.ndarray) or in_signal.ndim != 2:
+        if not isinstance(in_signal, torch.Tensor) or in_signal.ndim != 2:
             if in_signal is not None:
                 logger.warning(
-                    f"[{self.name}] Input is not a valid 2D numpy array. "
+                    f"[{self.name}] Input is not a valid 2D torch Tensor. "
                     f"Received type: {type(in_signal)}, ndim: {getattr(in_signal, 'ndim', 'N/A')}."
                 )
             return {"out_left": None, "out_right": None}
 
-        _blocksize, num_channels = in_signal.shape
+        num_channels, _blocksize = in_signal.shape
 
         if num_channels == 0:
             logger.warning(f"[{self.name}] Input has 0 channels.")
@@ -182,11 +180,11 @@ class StereoChannelSplitterNode(Node):
             if num_channels == 1:
                 # Mono input: send same signal to L and R (views or copies, dtype preserved)
                 out_left_data = in_signal
-                out_right_data = in_signal.copy()  # Make a copy for right if it might be modified
+                out_right_data = in_signal.clone()  # Make a copy for right if it might be modified
             elif num_channels >= 2:
                 # Stereo or multi-channel input: take first as L, second as R
-                out_left_data = in_signal[:, 0:1]  # Slice, preserves dtype
-                out_right_data = in_signal[:, 1:2]  # Slice, preserves dtype
+                out_left_data = in_signal[0:1, :]  # Slice, preserves dtype
+                out_right_data = in_signal[1:2, :]  # Slice, preserves dtype
 
             return {"out_left": out_left_data, "out_right": out_right_data}
 

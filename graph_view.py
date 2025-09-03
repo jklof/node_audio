@@ -1,14 +1,15 @@
 import logging
-import threading
 import math
 from PySide6.QtWidgets import QGraphicsView, QGraphicsLineItem, QGraphicsProxyWidget
-from PySide6.QtCore import Qt, QPointF, QRectF, Signal, Slot, QLineF
+from PySide6.QtCore import Qt, QPointF, QRectF, Signal, Slot, QLineF, QByteArray
 from PySide6.QtGui import QPainter, QColor, QPen, QCursor
+from PySide6.QtSvg import QSvgRenderer
 from typing import Any
 
 from node_system import NodeGraph, Socket
 from ui_elements import NodeItem, SocketItem, ConnectionItem
 from graph_scene import NodeGraphScene
+from ui_icons import LOGO_SVG_DATA
 
 logger = logging.getLogger(__name__)
 
@@ -37,12 +38,34 @@ class NodeGraphWidget(QGraphicsView):
         self._is_panning = False
         self._last_pan_pos = QPointF()
 
+        self._logo_renderer = None
+        self._load_logo()
+
+    def _load_logo(self):
+        """Loads the SVG logo from an inline string for rendering."""
+        svg_bytes = QByteArray(LOGO_SVG_DATA.encode("utf-8"))
+        self._logo_renderer = QSvgRenderer(svg_bytes)
+        if not self._logo_renderer.isValid():
+            logger.error("Failed to load SVG logo for background.")
+            self._logo_renderer = None
+
     def drawBackground(self, painter: QPainter, rect: QRectF):
         """
         Draws a two-level grid as the background. The `rect` is the exposed
         area in scene coordinates, provided by the QGraphicsView framework.
         """
         super().drawBackground(painter, rect)
+
+        if self._logo_renderer and self._logo_renderer.isValid():
+            scale = 0.2
+            w = self._logo_renderer.defaultSize().width() * scale
+            h = self._logo_renderer.defaultSize().height() * scale
+            logo_rect = QRectF(-w / 2, -h / 2, w, h)
+            if rect.intersects(logo_rect):
+                painter.save()
+                painter.setOpacity(0.05)
+                self._logo_renderer.render(painter, logo_rect)
+                painter.restore()
 
         grid_size_fine = 15
         grid_size_coarse = 150
@@ -190,7 +213,7 @@ class NodeGraphWidget(QGraphicsView):
             start_logic = start_item.socket_logic
             end_logic = end_item.socket_logic
 
-            # --- NEW: UI-Level Type Validation Logic ---
+            # --- UI-Level Type Validation Logic ---
             start_type = start_logic.data_type if start_logic.data_type is not None else Any
             end_type = end_logic.data_type if end_logic.data_type is not None else Any
 
@@ -201,7 +224,6 @@ class NodeGraphWidget(QGraphicsView):
                     f"Connection rejected: Type mismatch between {start_logic} ({start_type.__name__}) and {end_logic} ({end_type.__name__})."
                 )
                 return  # Abort the connection attempt
-            # --- END NEW ---
 
             if start_logic.is_input and not end_logic.is_input:
                 self.connectionRequested.emit(end_logic, start_logic)
@@ -211,8 +233,21 @@ class NodeGraphWidget(QGraphicsView):
                 logger.warning("Connection must be between an input and an output.")
 
     def wheelEvent(self, event):
-        zoom_factor = 1.15 if event.angleDelta().y() > 0 else 1 / 1.15
-        self.scale(zoom_factor, zoom_factor)
+        """
+        This is the new, correct implementation. It checks if the mouse is over
+        an embedded UI widget. If so, it lets the base QGraphicsView handle
+        the event, which correctly forwards it. Otherwise, it performs the
+        custom graph zoom.
+        """
+        item_under_mouse = self.itemAt(event.position().toPoint())
+
+        if isinstance(item_under_mouse, QGraphicsProxyWidget):
+            # Let the default implementation handle event propagation to the widget.
+            super().wheelEvent(event)
+        else:
+            # Perform custom graph-wide zoom.
+            zoom_factor = 1.15 if event.angleDelta().y() > 0 else 1 / 1.15
+            self.scale(zoom_factor, zoom_factor)
 
     # --- Public Slots for Toolbar ---
     @Slot()

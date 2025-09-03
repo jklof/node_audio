@@ -2,12 +2,12 @@ import logging
 import threading
 from typing import Type
 
-from PySide6.QtWidgets import QGraphicsScene, QMenu, QGraphicsItem
+from PySide6.QtWidgets import QGraphicsScene, QMenu, QGraphicsItem, QGraphicsTextItem
 from PySide6.QtCore import Signal, Slot, QPointF
-from PySide6.QtGui import QTransform, QAction
+from PySide6.QtGui import QTransform, QAction, Qt
 
 from node_system import NodeGraph, Node
-from ui_elements import NodeItem, ConnectionItem
+from ui_elements import NodeItem, ConnectionItem, SocketItem
 from plugin_loader import registry
 
 logger = logging.getLogger(__name__)
@@ -80,14 +80,40 @@ class NodeGraphScene(QGraphicsScene):
                 node_item.set_processing_bar_visible(self._show_processing_load)
                 self.addItem(node_item)
                 self.node_items[node_id] = node_item
+                node_item.updateFromLogic()
                 logger.debug(f"UI Sync: Added new node item {node_id[:4]}")
             else:
-                # Node already exists, just update its state
+                # Node already exists, update its state
                 node_item = self.node_items[node_id]
+
+                # --- RECONCILE SOCKETS ---
+                current_ui_sockets = set(node_item._socket_items.keys())
+                desired_logic_sockets = set(node_logic.inputs.values()) | set(node_logic.outputs.values())
+
+                sockets_to_remove = current_ui_sockets - desired_logic_sockets
+                sockets_to_add = desired_logic_sockets - current_ui_sockets
+
+                if sockets_to_remove or sockets_to_add:
+                    logger.debug(f"UI Sync: Reconciling sockets for node {node_id[:4]}")
+                    for logic_socket in sockets_to_remove:
+                        socket_item_to_remove = node_item._socket_items.pop(logic_socket, None)
+                        label_item_to_remove = node_item._socket_labels.pop(logic_socket, None)
+                        if socket_item_to_remove and socket_item_to_remove.scene():
+                            self.removeItem(socket_item_to_remove)
+                        if label_item_to_remove and label_item_to_remove.scene():
+                            self.removeItem(label_item_to_remove)
+
+                    for logic_socket in sockets_to_add:
+                        node_item._socket_items[logic_socket] = SocketItem(logic_socket, node_item)
+                        label = QGraphicsTextItem(logic_socket.name, node_item)
+                        label.setDefaultTextColor(Qt.GlobalColor.lightGray)
+                        node_item._socket_labels[logic_socket] = label
+
                 # Update position if it has changed
                 if node_item.pos() != QPointF(*node_logic.pos):
                     node_item.setPos(QPointF(*node_logic.pos))
-                # Trigger a refresh of its internal content (name, controls, etc.)
+
+                # Directly tell the UI item to sync its state from its logic object.
                 node_item.updateFromLogic()
 
         # --- RECONCILE CONNECTIONS ---
@@ -160,3 +186,12 @@ class NodeGraphScene(QGraphicsScene):
         else:
             # Let the item handle its own context menu
             super().contextMenuEvent(event)
+
+    @Slot(str, str)
+    def on_node_error(self, node_id: str, error_message: str):
+        """Slot to handle a single node entering an error state."""
+        logger.warning(f"UI received error for node {node_id[:4]}: {error_message}")
+        if node_id in self.node_items:
+            node_item = self.node_items[node_id]
+            # Explicitly tell the UI item to update its state
+            node_item.set_error_display_state(error_message)

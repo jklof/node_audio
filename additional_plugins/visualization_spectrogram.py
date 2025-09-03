@@ -1,5 +1,4 @@
-# === File: additional_plugins/visualization_spectrogram.py ===
-
+import torch
 import numpy as np
 import time
 import threading
@@ -11,9 +10,9 @@ from constants import SpectralFrame
 
 # --- UI and Qt Imports ---
 from ui_elements import NodeItem
-from PySide6.QtWidgets import QWidget, QSizePolicy, QLabel, QVBoxLayout
-from PySide6.QtGui import QPainter, QColor, QPen, QImage, QFont, QFontMetrics, QPaintEvent
-from PySide6.QtCore import Qt, Signal, Slot, QObject, QPoint, QSize
+from PySide6.QtWidgets import QWidget, QSizePolicy
+from PySide6.QtGui import QPainter, QColor, QImage, QFont, QFontMetrics, QPaintEvent
+from PySide6.QtCore import Qt, Signal, Slot, QObject, QPoint, QSize, QRect
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -29,77 +28,55 @@ MIN_FREQ_DISPLAY = 20.0
 # 1. Custom Drawing Widget: SpectrogramWidget
 # ==============================================================================
 class SpectrogramWidget(QWidget):
-    """A QWidget that renders a scrolling spectrogram from FFT data."""
+    """A QWidget that renders a scrolling spectrogram from pre-rendered pixel columns."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setMinimumSize(250, 150)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self._image: QImage | None = None
-        self._colormap = self._create_colormap()
         self._font = QFont("Arial", 8)
         self._sample_rate = 44100
-        self._fft_size = 1024
-        self._freq_bins: np.ndarray | None = None
-        self._db_range = MAX_DB_DISPLAY - MIN_DB_DISPLAY
-        if self._db_range <= 0:
-            self._db_range = 1.0
-        self._recalculate_frequency_bins()
+        self._colormap = self._create_colormap()
 
     def sizeHint(self) -> QSize:
         return self.minimumSize()
 
     def _create_colormap(self) -> np.ndarray:
         size = 256
-        c = np.array(
-            [[68, 1, 84, 255], [59, 82, 139, 255], [33, 145, 140, 255], [94, 201, 98, 255], [253, 231, 37, 255]]
-        )
+        c = np.array([[68, 1, 84], [59, 82, 139], [33, 145, 140], [94, 201, 98], [253, 231, 37]])
         indices = np.linspace(0, 1, len(c))
         map_indices = np.linspace(0, 1, size)
         r = np.interp(map_indices, indices, c[:, 0])
         g = np.interp(map_indices, indices, c[:, 1])
         b = np.interp(map_indices, indices, c[:, 2])
-        return np.column_stack((r, g, b)).astype(np.uint8)
+        rgb_array = np.column_stack((b, g, r, np.zeros(size))).astype(np.uint8)
+        return rgb_array.flatten().view(np.uint32)
 
-    def _recalculate_frequency_bins(self):
-        if self._sample_rate > 0 and self._fft_size > 0:
-            self._freq_bins = np.fft.rfftfreq(self._fft_size, d=1.0 / self._sample_rate)
-        else:
-            self._freq_bins = None
-
-    @Slot(np.ndarray, int, int)
-    def update_data(self, fft_frame: np.ndarray | None, sample_rate: int, fft_size: int):
-        params_changed = False
-        if self._sample_rate != sample_rate:
-            self._sample_rate, params_changed = sample_rate, True
-        if self._fft_size != fft_size:
-            self._fft_size, params_changed = fft_size, True
-        if params_changed:
-            self._recalculate_frequency_bins()
+    @Slot(np.ndarray, int)
+    def update_column(self, new_column_rgb: np.ndarray, sample_rate: int):
+        """Scrolls the spectrogram and draws a new vertical line of pixel data."""
+        self._sample_rate = sample_rate
 
         if self._image is None or self._image.size() != self.size():
             self._image = QImage(self.size(), QImage.Format.Format_RGB32)
             self._image.fill(Qt.GlobalColor.black)
 
         painter = QPainter(self._image)
-        painter.drawImage(QPoint(-1, 0), self._image)
+        w, h = self._image.width(), self._image.height()
+
+        if w > 1:
+            source_rect = QRect(1, 0, w - 1, h)
+            dest_point = QPoint(0, 0)
+            painter.drawImage(dest_point, self._image, source_rect)
+
+        if len(new_column_rgb) == h:
+            column_image = QImage(new_column_rgb.data, 1, h, QImage.Format.Format_RGB32)
+            painter.drawImage(w - 1, 0, column_image)
+        else:
+            painter.fillRect(w - 1, 0, 1, h, Qt.GlobalColor.black)
+
         painter.end()
-
-        if fft_frame is not None and self._freq_bins is not None:
-            magnitudes_db = 20 * np.log10(np.abs(fft_frame) + 1e-12)
-            normalized_db = (np.clip(magnitudes_db, MIN_DB_DISPLAY, MAX_DB_DISPLAY) - MIN_DB_DISPLAY) / self._db_range
-            color_indices = (normalized_db * (len(self._colormap) - 1)).astype(np.uint8)
-
-            h = self.height()
-            nyquist = self._sample_rate / 2.0
-            y_coords = np.clip((h - 1) * (self._freq_bins / nyquist), 0, h - 1).astype(int)
-            column_x = self.width() - 1
-
-            if column_x >= 0:
-                for i in range(len(self._freq_bins)):
-                    y = (h - 1) - y_coords[i]
-                    color_rgb = self._colormap[color_indices[i]]
-                    self._image.setPixelColor(column_x, y, QColor(*color_rgb))
         self.update()
 
     def paintEvent(self, event: QPaintEvent):
@@ -127,34 +104,35 @@ class SpectrogramWidget(QWidget):
 
 
 # ==============================================================================
-# 2. Custom NodeItem for the Spectrogram Visualizer
+# 2. Custom NodeItem
 # ==============================================================================
 class SpectrogramVisualizerNodeItem(NodeItem):
-    """Custom NodeItem that embeds the SpectrogramWidget."""
-
-    # --- FIX 1: DEFINE A SUITABLE WIDTH FOR THIS NODE ---
     NODE_SPECIFIC_WIDTH = 270
 
     def __init__(self, node_logic: "SpectrogramVisualizerNode"):
-        # --- FIX 2: PASS THE CUSTOM WIDTH TO THE SUPERCLASS CONSTRUCTOR ---
         super().__init__(node_logic, width=self.NODE_SPECIFIC_WIDTH)
-
         self.display_widget = SpectrogramWidget()
         self.setContentWidget(self.display_widget)
-        node_logic.newDataReady.connect(self._update_visualization)
+        node_logic.newDataReady.connect(self._on_new_data_received)
 
-    @Slot(object, int, int)
-    def _update_visualization(self, fft_frame: np.ndarray, sample_rate: int, fft_size: int):
-        self.display_widget.update_data(fft_frame, sample_rate, fft_size)
+    @Slot(object, int)
+    def _on_new_data_received(self, new_column_rgb: np.ndarray | None, sample_rate: int):
+        if new_column_rgb is not None:
+            self.display_widget.update_column(new_column_rgb, sample_rate)
 
     @Slot()
     def updateFromLogic(self):
-        self.display_widget.update_data(None, 44100, 1024)
-        super().updateFromLogic()
+        """
+        This method is called during graph resyncs (e.g., when moving a node).
+        We explicitly DO NOT update the visual content here to prevent artifacts like
+        black lines. The widget will hold its last drawn state until new data
+        arrives from the processing thread via the newDataReady signal.
+        """
+        super().updateFromLogic()  # Call parent for any other essential updates
 
 
 # ==============================================================================
-# 3. Node Logic Class: SpectrogramVisualizerNode
+# 3. Node Logic Class
 # ==============================================================================
 class SpectrogramVisualizerNode(Node):
     NODE_TYPE = "Spectrogram Visualizer"
@@ -163,12 +141,11 @@ class SpectrogramVisualizerNode(Node):
     UI_CLASS = SpectrogramVisualizerNodeItem
 
     class WrappedSignal(QObject):
-        _s = Signal(object, int, int)
+        _s = Signal(object, int)
 
-        def emit(self, fft_frame: np.ndarray | None, sample_rate: int, fft_size: int):
+        def emit(self, new_column_rgb: np.ndarray | None, sample_rate: int):
             try:
-                data_copy = fft_frame.copy() if fft_frame is not None else None
-                self._s.emit(data_copy, sample_rate, fft_size)
+                self._s.emit(new_column_rgb, sample_rate)
             except RuntimeError as e:
                 logger.debug(f"SpectrogramVisualizerNode WrappedSignal: Error emitting signal: {e}")
 
@@ -180,21 +157,56 @@ class SpectrogramVisualizerNode(Node):
         self.newDataReady = self.WrappedSignal()
         self.add_input("spectral_frame_in", data_type=SpectralFrame)
         self._next_ui_update_time = 0
+        self._colormap = self._create_colormap()
+        self._db_range = MAX_DB_DISPLAY - MIN_DB_DISPLAY
+        self._cached_params_key = None
+        self._cached_y_coords_indices: torch.Tensor | None = None
+
+    def _create_colormap(self) -> np.ndarray:
+        size = 256
+        c = np.array([[68, 1, 84], [59, 82, 139], [33, 145, 140], [94, 201, 98], [253, 231, 37]])
+        indices = np.linspace(0, 1, len(c))
+        map_indices = np.linspace(0, 1, size)
+        r = np.interp(map_indices, indices, c[:, 0])
+        g = np.interp(map_indices, indices, c[:, 1])
+        b = np.interp(map_indices, indices, c[:, 2])
+        rgb_array = np.column_stack((b, g, r, np.zeros(size))).astype(np.uint8)
+        return rgb_array.flatten().view(np.uint32)
+
+    def _prepare_render_cache(self, frame: SpectralFrame, display_height: int):
+        self._cached_params_key = (frame.fft_size, frame.sample_rate, display_height)
+        full_freqs = torch.fft.rfftfreq(frame.fft_size, d=1.0 / frame.sample_rate)
+        nyquist = frame.sample_rate / 2.0
+        y_coords_float = torch.clamp((display_height - 1) * (full_freqs / nyquist), 0, display_height - 1)
+        self._cached_y_coords_indices = (display_height - 1) - y_coords_float.long()
+        logger.debug(f"[{self.name}] Recalculated spectrogram render cache.")
 
     def process(self, input_data: dict) -> dict:
         current_time = time.monotonic()
         if current_time < self._next_ui_update_time:
             return {}
         self._next_ui_update_time = current_time + UI_UPDATE_INTERVAL_S
-
         frame = input_data.get("spectral_frame_in")
-        if not isinstance(frame, SpectralFrame):
+        if not isinstance(frame, SpectralFrame) or not torch.is_complex(frame.data):
             return {}
+        try:
+            display_height = 150
+            params_key = (frame.fft_size, frame.sample_rate, display_height)
+            if self._cached_params_key != params_key:
+                self._prepare_render_cache(frame, display_height)
 
-        fft_data, sample_rate, fft_size = frame.data, frame.sample_rate, frame.fft_size
-        if not np.iscomplexobj(fft_data) or fft_data.shape[1] == 0:
-            return {}
-
-        mono_fft_frame = np.mean(fft_data, axis=1)
-        self.newDataReady.emit(mono_fft_frame, sample_rate, fft_size)
+            mono_fft_frame = torch.mean(torch.abs(frame.data), dim=0)
+            magnitudes_db = 20 * torch.log10(mono_fft_frame + 1e-12)
+            normalized_db = (
+                torch.clamp(magnitudes_db, MIN_DB_DISPLAY, MAX_DB_DISPLAY) - MIN_DB_DISPLAY
+            ) / self._db_range
+            column_tensor = torch.zeros(display_height, dtype=torch.float32)
+            column_tensor.scatter_reduce_(
+                0, self._cached_y_coords_indices, normalized_db, reduce="amax", include_self=False
+            )
+            final_color_indices = (column_tensor * (len(self._colormap) - 1)).long().numpy()
+            pixel_column = self._colormap[final_color_indices]
+            self.newDataReady.emit(pixel_column, frame.sample_rate)
+        except Exception as e:
+            logger.error(f"[{self.name}] Error processing spectrogram frame: {e}", exc_info=True)
         return {}

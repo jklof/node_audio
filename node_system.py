@@ -1,7 +1,7 @@
 import uuid
 import logging
 from collections import OrderedDict
-import numpy as np
+import torch
 import abc
 
 logger = logging.getLogger(__name__)
@@ -39,7 +39,7 @@ class IClockProvider(abc.ABC):
 class Socket:
     """Represents a connection point on a node."""
 
-    def __init__(self, name: str, node: "Node", is_input: bool, data_type: type = np.ndarray):
+    def __init__(self, name: str, node: "Node", is_input: bool, data_type: type = torch.Tensor):
         self.name = name
         self.node = node
         self.is_input = is_input
@@ -89,13 +89,18 @@ class Node:
         self.inputs = OrderedDict()
         self.outputs = OrderedDict()
         self.pos = (0.0, 0.0)
+        self.error_state: str | None = None  # Attribute to hold error messages
 
-    def add_input(self, name: str, data_type: type = np.ndarray) -> Socket:
+    def clear_error_state(self):
+        """Resets the node's error state."""
+        self.error_state = None
+
+    def add_input(self, name: str, data_type: type = torch.Tensor) -> Socket:
         socket = Socket(name, self, True, data_type)
         self.inputs[name] = socket
         return socket
 
-    def add_output(self, name: str, data_type: type = np.ndarray) -> Socket:
+    def add_output(self, name: str, data_type: type = torch.Tensor) -> Socket:
         socket = Socket(name, self, False, data_type)
         self.outputs[name] = socket
         return socket

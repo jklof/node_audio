@@ -6,12 +6,13 @@ from collections import deque
 from typing import Optional, Dict
 
 import numpy as np
+import torch
 import soundfile as sf
-import resampy
+import torchaudio.transforms as T
 
 from node_system import Node
 from constants import DEFAULT_SAMPLERATE, DEFAULT_BLOCKSIZE, DEFAULT_DTYPE
-from ui_elements import NodeItem, NODE_CONTENT_PADDING
+from ui_elements import NodeItem, NodeStateEmitter, NODE_CONTENT_PADDING
 
 from PySide6.QtWidgets import QWidget, QLabel, QSlider, QVBoxLayout, QHBoxLayout, QFileDialog, QPushButton
 from PySide6.QtCore import Qt, Slot, Signal, QObject
@@ -33,18 +34,6 @@ class PlaybackState:
     PAUSED = "PAUSED"
     LOADING = "LOADING"
     ERROR = "ERROR"
-
-
-class PlayerNodeSignalEmitter(QObject):
-    """A dedicated QObject to safely emit signals to the UI thread."""
-
-    playbackStateChanged = Signal(dict)
-
-    def emit_state_change(self, state_dict: Dict):
-        try:
-            self.playbackStateChanged.emit(state_dict.copy())
-        except RuntimeError as e:
-            logger.debug(f"Signal emitter caught RuntimeError: {e}")
 
 
 class AudioFilePlayerNodeItem(NodeItem):
@@ -92,9 +81,16 @@ class AudioFilePlayerNodeItem(NodeItem):
         self.load_button.clicked.connect(self._on_load_button_clicked)
         self.play_pause_button.clicked.connect(self._on_play_pause_clicked)
         self.seek_slider.sliderReleased.connect(self._on_seek)
-        self.node_logic.emitter.playbackStateChanged.connect(self._on_playback_state_changed)
+        self.node_logic.emitter.stateUpdated.connect(self._on_playback_state_changed)
 
-        self.updateFromLogic()
+    @Slot()
+    def updateFromLogic(self):
+        """
+        Pulls the current state from the logic node to initialize the UI.
+        """
+        state = self.node_logic.get_current_state_snapshot()
+        self._on_playback_state_changed(state)
+        super().updateFromLogic()
 
     def _format_time(self, seconds: float) -> str:
         if seconds < 0:
@@ -159,12 +155,6 @@ class AudioFilePlayerNodeItem(NodeItem):
             self.seek_slider.setEnabled(False)
             self.seek_slider.setValue(0)
 
-    @Slot()
-    def updateFromLogic(self):
-        state = self.node_logic.get_current_state_snapshot()
-        self._on_playback_state_changed(state)
-        super().updateFromLogic()
-
 
 class AudioFilePlayerNode(Node):
     NODE_TYPE = "Audio File Player"
@@ -175,8 +165,8 @@ class AudioFilePlayerNode(Node):
 
     def __init__(self, name, node_id=None):
         super().__init__(name, node_id)
-        self.add_output("out", data_type=np.ndarray)
-        self.emitter = PlayerNodeSignalEmitter()
+        self.add_output("out", data_type=torch.Tensor)
+        self.emitter = NodeStateEmitter()
         self._lock = threading.Lock()
         self._worker_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
@@ -194,6 +184,7 @@ class AudioFilePlayerNode(Node):
         self._audio_buffer = deque()
         self._output_channels = 1
         self._initial_seek_seconds: float = -1.0
+        self._silence = {"out": torch.zeros((self._output_channels, DEFAULT_BLOCKSIZE), dtype=DEFAULT_DTYPE)}
 
     def load_file(self, file_path: str):
         logger.info(f"[{self.name}] Load requested for: {file_path}")
@@ -208,7 +199,7 @@ class AudioFilePlayerNode(Node):
             )
 
         if state_to_emit:
-            self.emitter.emit_state_change(state_to_emit)
+            self.emitter.stateUpdated.emit(state_to_emit)
 
         self._stop_event.clear()
         self._worker_thread = threading.Thread(target=self._file_reader_loop, daemon=True)
@@ -232,7 +223,7 @@ class AudioFilePlayerNode(Node):
             state_to_emit = self._update_state_snapshot_locked(state=self._playback_state)
 
         if state_to_emit:
-            self.emitter.emit_state_change(state_to_emit)
+            self.emitter.stateUpdated.emit(state_to_emit)
 
     def seek(self, proportion: float):
         with self._lock:
@@ -244,12 +235,13 @@ class AudioFilePlayerNode(Node):
         with self._lock:
             return self._state_snapshot.copy()
 
+    def emit_initial_state(self):
+        """Emits the current state for UI initialization."""
+        with self._lock:
+            state = self._state_snapshot.copy()
+        self.emitter.stateUpdated.emit(state)
+
     def start(self):
-        """
-        Called when graph processing starts.
-        This method restores the node's effective playback state to match
-        the user's intended state, allowing playback to resume automatically.
-        """
         super().start()
         state_to_emit = None
         with self._lock:
@@ -261,16 +253,9 @@ class AudioFilePlayerNode(Node):
                 logger.info(f"[{self.name}] Graph started. Node is active but will remain paused.")
 
         if state_to_emit:
-            self.emitter.emit_state_change(state_to_emit)
+            self.emitter.stateUpdated.emit(state_to_emit)
 
     def stop(self):
-        """
-        Called when graph processing stops.
-        Even though no ticks are processed when the graph is stopped,
-        we explicitly pause the worker thread to prevent it from
-        needlessly reading the file into the buffer. The user's
-        intended state is preserved in a separate variable.
-        """
         super().stop()
         state_to_emit = None
         with self._lock:
@@ -280,7 +265,7 @@ class AudioFilePlayerNode(Node):
                 state_to_emit = self._update_state_snapshot_locked(state=self._playback_state)
 
         if state_to_emit:
-            self.emitter.emit_state_change(state_to_emit)
+            self.emitter.stateUpdated.emit(state_to_emit)
 
     def remove(self):
         logger.info(f"[{self.name}] Remove called. Stopping worker thread.")
@@ -292,7 +277,8 @@ class AudioFilePlayerNode(Node):
             if len(self._audio_buffer) > 0:
                 return {"out": self._audio_buffer.popleft()}
             else:
-                return {"out": np.zeros((DEFAULT_BLOCKSIZE, self._output_channels), dtype=DEFAULT_DTYPE)}
+                # Return a silent torch.Tensor with shape (channels, samples)
+                return self._silence
 
     def _stop_worker(self):
         if self._worker_thread and self._worker_thread.is_alive():
@@ -304,24 +290,33 @@ class AudioFilePlayerNode(Node):
         self._worker_thread = None
 
     def _update_state_snapshot_locked(self, **kwargs) -> Dict:
-        """
-        Helper to update the state dictionary and return a copy for emission.
-        MUST be called with the lock already held.
-        """
         self._state_snapshot.update(kwargs)
         return self._state_snapshot.copy()
 
     def _file_reader_loop(self):
         current_frame = 0
         state_to_emit = None
+        resampler = None
         try:
             with sf.SoundFile(self._file_path, "r") as sf_file:
                 file_info = {"samplerate": sf_file.samplerate, "channels": sf_file.channels, "frames": sf_file.frames}
                 duration = sf_file.frames / sf_file.samplerate if sf_file.samplerate > 0 else 0.0
-                # This buffer holds resampled audio data before it's chunked into blocks.
-                resampling_buffer = np.zeros((0, file_info["channels"]), dtype="float32")
+
+                # --- Torchaudio Integration ---
+                if file_info["samplerate"] != DEFAULT_SAMPLERATE:
+                    resampler = T.Resample(
+                        orig_freq=file_info["samplerate"], new_freq=DEFAULT_SAMPLERATE, dtype=DEFAULT_DTYPE
+                    )
+
+                # This buffer holds resampled audio data as a tensor before it's chunked into blocks.
+                tensor_buffer = torch.empty((file_info["channels"], 0), dtype=DEFAULT_DTYPE)
+
                 with self._lock:
                     self._output_channels = file_info["channels"]
+                    # Update the silence block to match the new channel count
+                    self._silence = {
+                        "out": torch.zeros((self._output_channels, DEFAULT_BLOCKSIZE), dtype=DEFAULT_DTYPE)
+                    }
                     self._playback_state = PlaybackState.PLAYING
                     self._user_intended_state = PlaybackState.PLAYING
                     initial_seek_seconds = self._initial_seek_seconds
@@ -335,7 +330,7 @@ class AudioFilePlayerNode(Node):
                     )
 
                 if state_to_emit:
-                    self.emitter.emit_state_change(state_to_emit)
+                    self.emitter.stateUpdated.emit(state_to_emit)
 
                 if initial_seek_seconds > 0 and duration > 0:
                     seek_proportion = min(1.0, initial_seek_seconds / duration)
@@ -343,18 +338,14 @@ class AudioFilePlayerNode(Node):
                     sf_file.seek(target_frame)
                     current_frame = target_frame
                     logger.info(f"[{self.name}] Worker performed initial seek to {initial_seek_seconds:.2f}s")
-
-                    state_to_emit = None
                     with self._lock:
                         state_to_emit = self._update_state_snapshot_locked(
                             position=(current_frame / file_info["samplerate"])
                         )
-
                     if state_to_emit:
-                        self.emitter.emit_state_change(state_to_emit)
+                        self.emitter.stateUpdated.emit(state_to_emit)
 
                 last_ui_update_time = 0
-
                 while not self._stop_event.is_set():
                     with self._lock:
                         current_playback_state = self._playback_state
@@ -367,42 +358,37 @@ class AudioFilePlayerNode(Node):
                         current_frame = target_frame
                         with self._lock:
                             self._audio_buffer.clear()
-                        # Also clear the intermediate resampling buffer on seek
-                        resampling_buffer = np.zeros((0, file_info["channels"]), dtype="float32")
+                        tensor_buffer = torch.empty((file_info["channels"], 0), dtype=DEFAULT_DTYPE)
                         logger.info(f"[{self.name}] Worker seeked to frame {target_frame}")
 
                     if (
                         current_playback_state == PlaybackState.PLAYING
                         and len(self._audio_buffer) < INTERNAL_BUFFER_MAX_BLOCKS
                     ):
-                        raw_chunk = sf_file.read(CHUNK_SIZE_FRAMES, dtype="float32", always_2d=True)
+                        raw_chunk_np = sf_file.read(CHUNK_SIZE_FRAMES, dtype="float32", always_2d=True)
 
-                        if raw_chunk is None or raw_chunk.shape[0] == 0:
+                        if raw_chunk_np is None or raw_chunk_np.shape[0] == 0:
                             logger.info(f"[{self.name}] End of file, looping back to start.")
                             sf_file.seek(0)
                             current_frame = 0
                             continue
 
-                        current_frame += raw_chunk.shape[0]
+                        current_frame += raw_chunk_np.shape[0]
 
-                        if file_info["samplerate"] != DEFAULT_SAMPLERATE:
-                            resampled_chunk = resampy.resample(
-                                raw_chunk, file_info["samplerate"], DEFAULT_SAMPLERATE, axis=0, filter="kaiser_fast"
-                            )
-                        else:
-                            resampled_chunk = raw_chunk
+                        # Convert NumPy chunk (samples, channels) to Tensor (channels, samples)
+                        raw_tensor = torch.from_numpy(raw_chunk_np.T.copy()).to(DEFAULT_DTYPE)
 
-                        # Add new resampled data to the intermediate buffer
-                        if resampled_chunk.shape[0] > 0:
-                            resampling_buffer = np.vstack((resampling_buffer, resampled_chunk))
+                        # Resample if necessary
+                        resampled_tensor = resampler(raw_tensor) if resampler else raw_tensor
 
-                        # Create as many fixed-size blocks as possible from the buffer
-                        while resampling_buffer.shape[0] >= DEFAULT_BLOCKSIZE:
+                        if resampled_tensor.shape[1] > 0:
+                            tensor_buffer = torch.cat((tensor_buffer, resampled_tensor), dim=1)
+
+                        while tensor_buffer.shape[1] >= DEFAULT_BLOCKSIZE:
                             # Slice one block from the start
-                            block = resampling_buffer[:DEFAULT_BLOCKSIZE]
-                            # Remove the sliced block from the intermediate buffer
-                            resampling_buffer = resampling_buffer[DEFAULT_BLOCKSIZE:]
-                            # Add the complete block to the output buffer for consumption
+                            block = tensor_buffer[:, :DEFAULT_BLOCKSIZE]
+                            tensor_buffer = tensor_buffer[:, DEFAULT_BLOCKSIZE:]
+
                             with self._lock:
                                 self._audio_buffer.append(block)
                     else:
@@ -411,38 +397,36 @@ class AudioFilePlayerNode(Node):
                     now = time.monotonic()
                     if now - last_ui_update_time > UI_UPDATE_INTERVAL_MS / 1000.0:
                         position = current_frame / file_info["samplerate"]
-                        state_to_emit = None
                         with self._lock:
                             state_to_emit = self._update_state_snapshot_locked(
                                 position=position, state=current_playback_state
                             )
-
                         if state_to_emit:
-                            self.emitter.emit_state_change(state_to_emit)
-
+                            self.emitter.stateUpdated.emit(state_to_emit)
                         last_ui_update_time = now
 
         except Exception as e:
             logger.error(f"[{self.name}] Error in file reader thread: {e}", exc_info=True)
-            state_to_emit = None
             with self._lock:
                 state_to_emit = self._update_state_snapshot_locked(state=PlaybackState.ERROR, file_path=self._file_path)
-
             if state_to_emit:
-                self.emitter.emit_state_change(state_to_emit)
+                try:
+                    self.emitter.stateUpdated.emit(state_to_emit)
+                except RuntimeError:
+                    logger.debug(f"[{self.name}] Emitter deleted before final error state could be sent.")
 
         logger.info(f"[{self.name}] File reader thread finished.")
-        state_to_emit = None
         with self._lock:
             if self._playback_state != PlaybackState.ERROR:
                 state_to_emit = self._update_state_snapshot_locked(state=PlaybackState.STOPPED, position=0.0)
-
         if state_to_emit:
-            self.emitter.emit_state_change(state_to_emit)
+            try:
+                self.emitter.stateUpdated.emit(state_to_emit)
+            except RuntimeError:
+                logger.debug(f"[{self.name}] Emitter deleted before final stopped state could be sent.")
 
     def serialize_extra(self) -> dict:
         with self._lock:
-            # We can use the getter here as a shortcut
             state = self._state_snapshot
             return {"file_path": state.get("file_path"), "position_seconds": state.get("position", 0.0)}
 

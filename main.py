@@ -2,11 +2,12 @@ import sys
 import logging
 import os
 import argparse
+import atexit
 from PySide6.QtWidgets import QApplication, QMainWindow, QMessageBox, QToolBar, QWidget, QSizePolicy, QLabel
 from PySide6.QtGui import QAction
 from PySide6.QtCore import Slot, QTimer, Qt, QSettings
 
-from plugin_loader import load_plugins
+from plugin_loader import scan_and_load_plugins, finalize_plugins
 from engine import Engine
 from app_controller import AppController
 from graph_view import NodeGraphWidget
@@ -25,8 +26,9 @@ class MainWindow(QMainWindow):
             logger.info("Clean startup requested. Clearing all saved settings.")
             QSettings("ReNode", "ReNodeProcessor").clear()
 
-        load_plugins("plugins")
-        load_plugins("additional_plugins")
+        # Store plugin directories and perform the initial scan and load.
+        self.plugin_dirs = ["plugins", "additional_plugins"]
+        self.plugin_modules = scan_and_load_plugins(self.plugin_dirs, clear_registry=True)
 
         self.engine = Engine()
         self.graph_widget = NodeGraphWidget(self.engine.graph, self)
@@ -148,7 +150,7 @@ class MainWindow(QMainWindow):
         menu_bar = self.menuBar()
         file_menu = menu_bar.addMenu("&File")
         process_menu = menu_bar.addMenu("&Process")
-        view_menu = menu_bar.addMenu("&View")
+        dev_menu = menu_bar.addMenu("&Developer")  # <-- New Menu
 
         # File Menu Actions
         save_action = QAction("Save Graph", self, triggered=self.controller.save_graph)
@@ -175,11 +177,23 @@ class MainWindow(QMainWindow):
         process_menu.addAction(self.start_action)
         process_menu.addAction(self.stop_action)
 
-        # View Menu Actions
+        # --- Developer Menu Actions ---
+        reload_plugins_action = QAction("Reload Plugins", self, triggered=self.on_reload_plugins)
+        reload_plugins_action.setShortcut("Ctrl+R")
         self.show_load_action = QAction("Show Processing Load", self, checkable=True)
         self.show_load_action.setChecked(False)
         self.show_load_action.toggled.connect(self.on_toggle_processing_load_view)
-        view_menu.addAction(self.show_load_action)
+        dev_menu.addAction(reload_plugins_action)
+        dev_menu.addAction(self.show_load_action)
+
+    @Slot()
+    def on_reload_plugins(self):
+        """Slot to handle the reload request from the UI."""
+        logger.info("UI: Manual plugin reload requested.")
+        self.statusBar().showMessage("Reloading plugins...", 3000)
+        # Pass the list of plugin directories to the controller for a full rescan.
+        self.controller.reload_all_plugins(self.plugin_dirs)
+        self.statusBar().showMessage("Plugins reloaded.", 5000)
 
     @Slot(bool)
     def update_ui_for_processing_state(self, is_processing: bool):
@@ -224,6 +238,9 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     app = QApplication(sys.argv)
+
+    # Register the encapsulated cleanup function from the plugin_loader.
+    atexit.register(finalize_plugins)
 
     # Pass the clean flag to the MainWindow. This must happen before it reads any settings.
     window = MainWindow(clean_start=args.clean)

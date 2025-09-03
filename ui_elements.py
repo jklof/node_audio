@@ -1,4 +1,5 @@
 import logging
+import numpy as np
 from PySide6.QtWidgets import (
     QGraphicsItem,
     QGraphicsObject,
@@ -10,9 +11,23 @@ from PySide6.QtWidgets import (
     QGraphicsProxyWidget,
     QInputDialog,
     QLineEdit,
+    QVBoxLayout,
+    QSlider,
+    QLabel,
+    QDial,
+    QComboBox,
 )
-from PySide6.QtGui import QPainter, QPen, QColor, QBrush, QPainterPath, QPainterPathStroker, QAction
-from PySide6.QtCore import Qt, QRectF, QPointF, Signal, Slot, QTimer
+from PySide6.QtGui import (
+    QPainter,
+    QPen,
+    QColor,
+    QBrush,
+    QPainterPath,
+    QPainterPathStroker,
+    QAction,
+    QLinearGradient,
+)
+from PySide6.QtCore import Qt, QRectF, QPointF, Signal, Slot, QTimer, QObject, Signal, QSignalBlocker
 from typing import Any
 
 # Import the interface to check against
@@ -29,6 +44,18 @@ SOCKET_Y_SPACING = 25
 NODE_CONTENT_PADDING = 5
 
 
+class NodeStateEmitter(QObject):
+    """
+    A generic emitter for sending state updates from a logic Node to its UI NodeItem.
+    Centralized in ui_common.py to keep it separate from core system logic.
+    """
+
+    def __init__(self):
+        super().__init__()
+
+    stateUpdated = Signal(dict)
+
+
 class SocketItem(QGraphicsObject):
     """Visual representation of a socket in the scene."""
 
@@ -40,7 +67,6 @@ class SocketItem(QGraphicsObject):
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemSendsScenePositionChanges)
         self.setAcceptHoverEvents(True)
 
-        # --- MODIFIED: Use central color map ---
         socket_type = self.socket_logic.data_type
         # Normalize None to Any for the color lookup
         if socket_type is None:
@@ -53,7 +79,6 @@ class SocketItem(QGraphicsObject):
         self._hover_brush = QBrush(color.lighter(130))
         self._pen = QPen(Qt.GlobalColor.black, 1)
         self._is_hovered = False
-        # --- END MODIFICATION ---
 
     def boundingRect(self):
         return QRectF(-SOCKET_SIZE / 2, -SOCKET_SIZE / 2, SOCKET_SIZE, SOCKET_SIZE)
@@ -101,12 +126,14 @@ class NodeItem(QGraphicsObject):
         self._is_updating_geometry = False  # Re-entrancy guard for update_geometry
         self._processing_percentage = 0.0
         self._show_processing_bar = False
+        self._is_in_error_state = False
 
         # --- Set Flags ---
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges)
         self.setCacheMode(QGraphicsItem.CacheMode.DeviceCoordinateCache)
+        self.setToolTip("")
 
         # --- Create UI Children ---
         self.title_item = QGraphicsTextItem(self.node_logic.name, self)
@@ -166,6 +193,13 @@ class NodeItem(QGraphicsObject):
         if self._show_processing_bar != visible:
             self._show_processing_bar = visible
             self.update()
+
+    @Slot(str)
+    def set_error_display_state(self, error_message: str | None):
+        """Updates the UI's internal error state."""
+        self._is_in_error_state = error_message is not None
+        self.setToolTip(error_message or "")
+        self.update()  # Schedule a repaint
 
     @Slot()
     def _schedule_geometry_update(self):
@@ -296,6 +330,13 @@ class NodeItem(QGraphicsObject):
             painter.setPen(Qt.PenStyle.NoPen)
             painter.drawRect(bar_rect)
 
+        # Draw an error outline if the node is in an error state
+        if self._is_in_error_state:
+            error_pen = QPen(QColor(255, 50, 50), 2.5)  # A bright red pen
+            painter.setPen(error_pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRoundedRect(body_rect, 5, 5)
+
         # Selection outline
         if self.isSelected():
             painter.setPen(QPen(QColor("orange"), 1.5))
@@ -324,6 +365,10 @@ class NodeItem(QGraphicsObject):
         # Explicitly check and update the title text from the logic object
         if self.title_item.toPlainText() != self.node_logic.name:
             self.title_item.setPlainText(self.node_logic.name)
+
+        # Update the UI's error state from the logic's state
+        self.set_error_display_state(self.node_logic.error_state)
+
         self.update_geometry()
         self.update()
 
@@ -368,14 +413,27 @@ class ConnectionItem(QGraphicsPathItem):
         self.connection_logic = conn_logic
         self.start_socket = start_socket
         self.end_socket = end_socket
-        self._pen = QPen(QColor("white"), 2)
-        self._pen_hover = QPen(QColor("cyan"), 2.5)
+
+        # Helper to get color from data type
+        def get_color_for_type(data_type):
+            lookup_type = data_type
+            if lookup_type is None:
+                lookup_type = Any
+            return SOCKET_TYPE_COLORS.get(lookup_type, SOCKET_TYPE_COLORS["default"])
+
+        # Store base colors for the gradient
+        self._start_color = get_color_for_type(self.start_socket.socket_logic.data_type)
+        self._end_color = get_color_for_type(self.end_socket.socket_logic.data_type)
+
+        # Store a separate, solid pen for selection highlight
         self._pen_selected = QPen(QColor("orange"), 2.5)
+
         self._is_hovered = False
-        self.setPen(self._pen)
         self.setZValue(-1)
         self.setAcceptHoverEvents(True)
         self.setFlag(QGraphicsPathItem.GraphicsItemFlag.ItemIsSelectable)
+
+        # Connect signals and perform initial path update
         self.start_socket.positionChanged.connect(self.update_path)
         self.end_socket.positionChanged.connect(self.update_path)
         self.update_path()
@@ -407,13 +465,33 @@ class ConnectionItem(QGraphicsPathItem):
         self.setPath(path)
 
     def paint(self, painter: QPainter, option, widget=None):
+        # Use a distinct solid color for selected items
         if self.isSelected():
             painter.setPen(self._pen_selected)
-        elif self._is_hovered:
-            painter.setPen(self._pen_hover)
-        else:
-            painter.setPen(self._pen)
-        painter.drawPath(self.path())
+            painter.drawPath(self.path())
+            return
+
+        # Determine start and end colors for the gradient, brightening on hover
+        start_c = self._start_color.lighter(140) if self._is_hovered else self._start_color
+        end_c = self._end_color.lighter(140) if self._is_hovered else self._end_color
+        width = 2.5 if self._is_hovered else 2.0
+
+        # Apply the rule: if originating socket is 'Any', use the endpoint color for the whole line
+        # start_type = self.start_socket.socket_logic.data_type
+        # if start_type is Any or start_type is None:
+        #    start_c = end_c  # This makes the gradient a solid color
+
+        # Create the gradient along the path's start and end points
+        path = self.path()
+        gradient = QLinearGradient(path.pointAtPercent(0), path.pointAtPercent(1))
+        gradient.setColorAt(0, start_c)
+        gradient.setColorAt(1, end_c)
+
+        # Create and set a pen using the gradient
+        pen = QPen(gradient, width)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen)
+        painter.drawPath(path)
 
     def shape(self) -> QPainterPath:
         stroker = QPainterPathStroker()
@@ -436,3 +514,161 @@ class ConnectionItem(QGraphicsPathItem):
             delete_action.triggered.connect(lambda: view.connectionDeletionRequested.emit(self.connection_logic.id))
         menu.exec(event.screenPos())
         event.accept()
+
+
+# --- Constants ---
+EPSILON = 1e-9
+
+
+class ParameterNodeItem(NodeItem):
+    """
+    Generic NodeItem base class that creates UI controls from a parameter configuration.
+    Supports sliders, dials, and combo boxes.
+    """
+
+    def __init__(self, node_logic, parameters: list[dict], width=200, **kwargs):
+        super().__init__(node_logic, width=width, **kwargs)
+
+        self.parameters = parameters
+        self._controls = {}
+
+        # Create container widget
+        self.container_widget = QWidget()
+        main_layout = QVBoxLayout(self.container_widget)
+        main_layout.setContentsMargins(
+            NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING
+        )
+        main_layout.setSpacing(5)
+
+        # Create controls from parameters list
+        for param in self.parameters:
+            control_type = param.get("type", "slider")  # default if not specified
+            if control_type == "slider":
+                self._create_slider_control(param, main_layout)
+            elif control_type == "dial":
+                self._create_dial_control(param, main_layout)
+            elif control_type == "combobox":
+                self._create_combobox_control(param, main_layout)
+
+        self.setContentWidget(self.container_widget)
+
+        # Connect logic node's state updates to UI
+        self.node_logic.emitter.stateUpdated.connect(lambda state: self._on_state_updated(state))
+        self.updateFromLogic()
+
+    def _create_slider_control(self, param: dict, layout: QVBoxLayout):
+        """Creates a slider and its label."""
+        key, name = param["key"], param["name"]
+        label = QLabel(f"{name}: ...")
+        slider = QSlider(Qt.Orientation.Horizontal)
+        slider.setRange(0, 1000)
+        layout.addWidget(label)
+        layout.addWidget(slider)
+
+        self._controls[key] = {**param, "widget": slider, "label": label, "type": "slider"}
+        slider.valueChanged.connect(lambda value, k=key: self._on_generic_slider_change(k))
+
+    def _create_dial_control(self, param: dict, layout: QVBoxLayout):
+        """Creates a dial and its label."""
+        key, name = param["key"], param["name"]
+        label = QLabel(f"{name}: ...")
+        dial = QDial()
+        dial.setRange(0, 1000)
+        dial.setNotchesVisible(True)
+        layout.addWidget(label)
+        layout.addWidget(dial)
+
+        self._controls[key] = {**param, "widget": dial, "label": label, "type": "dial"}
+        dial.valueChanged.connect(lambda value, k=key: self._on_generic_slider_change(k))
+
+    def _create_combobox_control(self, param: dict, layout: QVBoxLayout):
+        """Creates a combo box and its label."""
+        key, name = param["key"], param["name"]
+        label = QLabel(f"{name}:")
+        combo = QComboBox()
+        for text, data in param.get("items", []):
+            combo.addItem(text, userData=data)
+        layout.addWidget(label)
+        layout.addWidget(combo)
+
+        self._controls[key] = {**param, "widget": combo, "label": label, "type": "combobox"}
+        combo.currentIndexChanged.connect(lambda idx, k=key: self._on_generic_combobox_change(k))
+
+    def _map_slider_to_logical(self, key: str, value: int) -> float:
+        """Maps slider/dial value (0-1000) to logical parameter value."""
+        info = self._controls[key]
+        norm = value / 1000.0
+        if info.get("is_log", False):
+            log_min = np.log10(info["min"])
+            log_max = np.log10(info["max"])
+            return 10 ** (log_min + norm * (log_max - log_min))
+        else:
+            return info["min"] + norm * (info["max"] - info["min"])
+
+    def _map_logical_to_slider(self, key: str, value: float) -> int:
+        """Maps logical parameter value to slider/dial value (0-1000)."""
+        info = self._controls[key]
+        if info.get("is_log", False):
+            log_min, log_max = np.log10(info["min"]), np.log10(info["max"])
+            range_val = log_max - log_min
+            if abs(range_val) < EPSILON:
+                return 0
+            safe_val = np.clip(value, info["min"], info["max"])
+            norm = (np.log10(safe_val) - log_min) / range_val
+            return int(round(norm * 1000.0))
+        else:
+            range_val = info["max"] - info["min"]
+            if abs(range_val) < EPSILON:
+                return 0
+            norm = (np.clip(value, info["min"], info["max"]) - info["min"]) / range_val
+            return int(round(norm * 1000.0))
+
+    @Slot(str)
+    def _on_generic_slider_change(self, key: str):
+        """Generic handler for slider/dial value changes."""
+        control = self._controls[key]["widget"]
+        logical_val = self._map_slider_to_logical(key, control.value())
+        setter_name = f"set_{key}"
+        if hasattr(self.node_logic, setter_name):
+            getattr(self.node_logic, setter_name)(logical_val)
+
+    @Slot(str)
+    def _on_generic_combobox_change(self, key: str):
+        """Generic handler for combobox selection changes."""
+        combo = self._controls[key]["widget"]
+        data = combo.currentData()
+        setter_name = f"set_{key}"
+        if hasattr(self.node_logic, setter_name):
+            getattr(self.node_logic, setter_name)(data)
+
+    @Slot(dict)
+    def _on_state_updated(self, state: dict):
+        """Updates all controls based on the incoming state dictionary."""
+        for key, info in self._controls.items():
+            value = state.get(key)
+            widget = info["widget"]
+            label = info["label"]
+            control_type = info["type"]
+            is_connected = key in self.node_logic.inputs and self.node_logic.inputs[key].connections
+
+            widget.setEnabled(not is_connected)
+
+            with QSignalBlocker(widget):
+                if control_type in ("slider", "dial"):
+                    widget.setValue(self._map_logical_to_slider(key, value))
+                    label_text = f"{info['name']}: {info['format'].format(value)}"
+                elif control_type == "combobox":
+                    index = widget.findData(value)
+                    if index != -1:
+                        widget.setCurrentIndex(index)
+                    label_text = f"{info['name']}"
+
+            if is_connected and control_type != "combobox":
+                label_text += " (ext)"
+            label.setText(label_text)
+
+    @Slot()
+    def updateFromLogic(self):
+        state = self.node_logic.get_current_state_snapshot()
+        self._on_state_updated(state)
+        super().updateFromLogic()
