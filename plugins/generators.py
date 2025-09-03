@@ -39,7 +39,7 @@ class SineSourceNode(Node):
         # We use np.mod to wrap the phase and prevent it from growing indefinitely, which avoids potential floating-point precision issues over time.
         self._phase = np.mod(phases[-1] + phase_increment, 2 * np.pi)
 
-        # Tile to match channel count
-        output_2d = np.tile(output_1d[:, np.newaxis], (1, self.channels))
+        # Tile to match channel count, creating (channels, samples) shape
+        output_2d = np.tile(output_1d[np.newaxis, :], (self.channels, 1))
 
         return {"out": output_2d.astype(DEFAULT_DTYPE)}

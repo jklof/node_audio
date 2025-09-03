@@ -26,7 +26,7 @@ class MainWindow(QMainWindow):
             QSettings("ReNode", "ReNodeProcessor").clear()
 
         load_plugins("plugins")
-        load_plugins("additional_plugins")
+        #load_plugins("additional_plugins")
 
         self.engine = Engine()
         self.graph_widget = NodeGraphWidget(self.engine.graph, self)

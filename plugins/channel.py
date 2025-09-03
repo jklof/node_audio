@@ -29,7 +29,7 @@ class MonoMixdownNode(Node):
                 )
             return {"out": None}
 
-        _blocksize, num_channels = in_signal.shape
+        num_channels, _blocksize = in_signal.shape
 
         if num_channels == 0:
             logger.warning(f"[{self.name}] Input has 0 channels.")
@@ -44,7 +44,7 @@ class MonoMixdownNode(Node):
             # np.mean might change dtype (e.g., int to float64).
             # If original dtype was complex, it should remain complex.
             # If original was float, result will be float.
-            mono_signal = np.mean(in_signal, axis=1, keepdims=True)
+            mono_signal = np.mean(in_signal, axis=0, keepdims=True)
             return {"out": mono_signal}
         except Exception as e:
             logger.error(f"[{self.name}] Error during mono mixdown: {e}", exc_info=True)
@@ -70,7 +70,7 @@ class StereoJoinNode(Node):
             logger.warning(f"[{self.name}] Input '{channel_name}' is not a valid 2D numpy array.")
             return None
 
-        blocksize, num_channels = signal.shape
+        num_channels, blocksize = signal.shape
 
         if num_channels != 1:
             # logger.warning(f"[{self.name}] Input '{channel_name}' is not mono (channels: {num_channels}).")
@@ -96,16 +96,16 @@ class StereoJoinNode(Node):
         if in_left is not None:
             valid_left = self._validate_mono_input(in_left, None, "in_left")
             if valid_left is not None:
-                determined_blocksize = valid_left.shape[0]
+                determined_blocksize = valid_left.shape[1]
 
         if in_right is not None:
             valid_right = self._validate_mono_input(in_right, determined_blocksize, "in_right")
             if valid_right is not None:
                 if determined_blocksize is None:
-                    determined_blocksize = valid_right.shape[0]
-                elif valid_left is not None and valid_left.shape[0] != determined_blocksize:
+                    determined_blocksize = valid_right.shape[1]
+                elif valid_left is not None and valid_left.shape[1] != determined_blocksize:
                     logger.warning(
-                        f"[{self.name}] Input 'in_left' blocksize ({valid_left.shape[0]}) "
+                        f"[{self.name}] Input 'in_left' blocksize ({valid_left.shape[1]}) "
                         f"mismatches 'in_right' blocksize ({determined_blocksize}). Discarding 'in_left'."
                     )
                     valid_left = None
@@ -126,19 +126,19 @@ class StereoJoinNode(Node):
             output_dtype = valid_right.dtype
 
         left_channel_data = (
-            valid_left if valid_left is not None else np.zeros((determined_blocksize, 1), dtype=output_dtype)
+            valid_left if valid_left is not None else np.zeros((1, determined_blocksize), dtype=output_dtype)
         )
         right_channel_data = (
-            valid_right if valid_right is not None else np.zeros((determined_blocksize, 1), dtype=output_dtype)
+            valid_right if valid_right is not None else np.zeros((1, determined_blocksize), dtype=output_dtype)
         )
 
         try:
-            # np.hstack will promote dtype if they are different (e.g., float32 and complex64 -> complex64)
-            stereo_out = np.hstack((left_channel_data, right_channel_data))
+            # np.vstack will promote dtype if they are different
+            stereo_out = np.vstack((left_channel_data, right_channel_data))
             return {"out": stereo_out}
         except ValueError as e:
             logger.error(
-                f"[{self.name}] Error during hstack, likely due to final blocksize mismatch: {e}", exc_info=True
+                f"[{self.name}] Error during vstack, likely due to final blocksize mismatch: {e}", exc_info=True
             )
             return {"out": None}
         except Exception as e:
@@ -169,7 +169,7 @@ class StereoChannelSplitterNode(Node):
                 )
             return {"out_left": None, "out_right": None}
 
-        _blocksize, num_channels = in_signal.shape
+        num_channels, _blocksize = in_signal.shape
 
         if num_channels == 0:
             logger.warning(f"[{self.name}] Input has 0 channels.")
@@ -185,8 +185,8 @@ class StereoChannelSplitterNode(Node):
                 out_right_data = in_signal.copy()  # Make a copy for right if it might be modified
             elif num_channels >= 2:
                 # Stereo or multi-channel input: take first as L, second as R
-                out_left_data = in_signal[:, 0:1]  # Slice, preserves dtype
-                out_right_data = in_signal[:, 1:2]  # Slice, preserves dtype
+                out_left_data = in_signal[0:1, :]  # Slice, preserves dtype
+                out_right_data = in_signal[1:2, :]  # Slice, preserves dtype
 
             return {"out_left": out_left_data, "out_right": out_right_data}
 

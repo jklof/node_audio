@@ -220,8 +220,8 @@ class SignalAnalyzer(Node):
             # Ensure float dtype for calculations and get a mono signal
             signal = signal.astype(DEFAULT_DTYPE)
             if signal.ndim > 1:
-                # Average across channels to get a mono representation
-                mono_signal = np.mean(signal, axis=1)
+                # Average across channels (axis=0) to get a mono representation
+                mono_signal = np.mean(signal, axis=0)
             else:
                 mono_signal = signal
 

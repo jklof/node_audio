@@ -128,10 +128,8 @@ class STFTNode(Node):
             return {"spectral_frame_out": None}
 
         proc_chunk = np.atleast_2d(audio_chunk.astype(DEFAULT_DTYPE))
-        if proc_chunk.shape[0] < proc_chunk.shape[1]:
-            proc_chunk = proc_chunk.T
 
-        _, num_channels = proc_chunk.shape
+        num_channels, _ = proc_chunk.shape
 
         with self._lock:
             # If channel count is uninitialized or has changed, reset state here.
@@ -141,14 +139,16 @@ class STFTNode(Node):
                 )
                 self._expected_channels = num_channels
                 # Correctly initialize the buffer as a 2D array with the new channel count.
-                self._buffer = np.zeros((0, num_channels), dtype=DEFAULT_DTYPE)
+                self._buffer = np.zeros((num_channels, 0), dtype=DEFAULT_DTYPE)
 
-            self._buffer = np.vstack((self._buffer, proc_chunk))
+            self._buffer = np.hstack((self._buffer, proc_chunk))
 
-            if len(self._buffer) >= self._window_size:
-                frame_data = self._buffer[: self._window_size]
-                windowed_frame = frame_data * self._analysis_window[:, np.newaxis]
-                fft_data = np.fft.rfft(windowed_frame, n=self._fft_size, axis=0).astype(DEFAULT_COMPLEX_DTYPE)
+            if self._buffer.shape[1] >= self._window_size:
+                frame_data = self._buffer[:, : self._window_size]
+                # Broadcasting (channels, samples) * (samples,) works correctly
+                windowed_frame = frame_data * self._analysis_window
+                # Perform FFT along the sample axis (axis=1)
+                fft_data = np.fft.rfft(windowed_frame, n=self._fft_size, axis=1).astype(DEFAULT_COMPLEX_DTYPE)
 
                 output_frame = SpectralFrame(
                     data=fft_data,
@@ -159,7 +159,7 @@ class STFTNode(Node):
                     analysis_window=self._analysis_window,
                 )
 
-                self._buffer = self._buffer[self._hop_size :]
+                self._buffer = self._buffer[:, self._hop_size :]
                 return {"spectral_frame_out": output_frame}
 
         return {"spectral_frame_out": None}
@@ -192,12 +192,14 @@ class ISTFTNode(Node):
         for i in range(0, win_size, hop):
             sum_of_squares += np.roll(win**2, i)
         sum_of_squares[sum_of_squares < 1e-9] = 1.0
-        self._synthesis_window = (win / sum_of_squares)[:, np.newaxis]
+        # Keep window as 1D array for broadcasting
+        self._synthesis_window = win / sum_of_squares
         logger.info(f"[{self.name}] Recalculated synthesis window for Win={win_size}, Hop={hop}.")
 
     def _initialize_buffers(self, frame: SpectralFrame, num_channels: int):
         self._recalculate_synthesis_params(frame)
-        self._ola_buffer = np.zeros((frame.window_size, num_channels), dtype=DEFAULT_DTYPE)
+        # Buffer shape is (channels, samples)
+        self._ola_buffer = np.zeros((num_channels, frame.window_size), dtype=DEFAULT_DTYPE)
         self._expected_channels = num_channels
         self._last_params = (frame.window_size, frame.hop_size, frame.fft_size)
         logger.info(f"[{self.name}] Initialized ISTFT for {num_channels} channels.")
@@ -213,9 +215,10 @@ class ISTFTNode(Node):
 
         if not isinstance(frame, SpectralFrame):
             channels = self._expected_channels if self._expected_channels is not None else 1
-            return {"audio_out": np.zeros((DEFAULT_BLOCKSIZE, channels), dtype=DEFAULT_DTYPE)}
+            # Output silent block with (channels, samples)
+            return {"audio_out": np.zeros((channels, DEFAULT_BLOCKSIZE), dtype=DEFAULT_DTYPE)}
 
-        num_channels = frame.data.shape[1]
+        num_channels = frame.data.shape[0]
 
         with self._lock:
             if (
@@ -226,19 +229,22 @@ class ISTFTNode(Node):
                 self._initialize_buffers(frame, num_channels)
 
             if self._ola_buffer is None:
-                return {"audio_out": np.zeros((DEFAULT_BLOCKSIZE, num_channels), dtype=DEFAULT_DTYPE)}
+                return {"audio_out": np.zeros((num_channels, DEFAULT_BLOCKSIZE), dtype=DEFAULT_DTYPE)}
 
-            ifft_frame_full = np.fft.irfft(frame.data, n=frame.fft_size, axis=0).astype(DEFAULT_DTYPE)
-            ifft_frame = ifft_frame_full[: frame.window_size]
+            # Perform iFFT along the frequency bin axis (axis=1)
+            ifft_frame_full = np.fft.irfft(frame.data, n=frame.fft_size, axis=1).astype(DEFAULT_DTYPE)
+            ifft_frame = ifft_frame_full[:, : frame.window_size]
 
+            # Broadcasting (channels, samples) * (samples,) works
             windowed_ifft = ifft_frame * self._synthesis_window
 
-            self._ola_buffer[: frame.window_size] += windowed_ifft
+            self._ola_buffer[:, : frame.window_size] += windowed_ifft
 
-            output_block = self._ola_buffer[: frame.hop_size].copy()
+            output_block = self._ola_buffer[:, : frame.hop_size].copy()
 
-            self._ola_buffer = np.roll(self._ola_buffer, -frame.hop_size, axis=0)
-            self._ola_buffer[-frame.hop_size :, :] = 0.0
+            # Roll along the sample axis (axis=1)
+            self._ola_buffer = np.roll(self._ola_buffer, -frame.hop_size, axis=1)
+            self._ola_buffer[:, -frame.hop_size :] = 0.0
 
             return {"audio_out": output_block}
 
@@ -404,18 +410,18 @@ class SpectralFilterNode(Node):
         bin1 = int(round(fc1 / freq_per_bin))
         bin2 = int(round(fc2 / freq_per_bin))
 
-        num_bins = modified_data.shape[0]
+        num_bins = modified_data.shape[1]
         bin1 = np.clip(bin1, 0, num_bins)
         bin2 = np.clip(bin2, 0, num_bins)
 
         if filter_type == "Low Pass":
-            modified_data[bin1:, :] = 0.0
+            modified_data[:, bin1:] = 0.0
         elif filter_type == "High Pass":
-            modified_data[:bin1, :] = 0.0
+            modified_data[:, :bin1] = 0.0
         elif filter_type == "Band Pass":
             low, high = min(bin1, bin2), max(bin1, bin2)
-            modified_data[:low, :] = 0.0
-            modified_data[high:, :] = 0.0
+            modified_data[:, :low] = 0.0
+            modified_data[:, high:] = 0.0
 
         output_frame = SpectralFrame(
             data=modified_data,

@@ -770,7 +770,8 @@ class AudioSourceNode(BaseAudioNode):
                 self._last_overflow_time = now
         try:
             with self._lock:
-                self._buffer.append(indata.copy())
+                # Transpose from (samples, channels) to (channels, samples)
+                self._buffer.append(indata.copy().T)
         except Exception as e:
             self._stream_error_count += 1
             if self._stream_error_count < 5:
@@ -782,13 +783,15 @@ class AudioSourceNode(BaseAudioNode):
             output_block = self._buffer.popleft() if self._buffer else None
 
         if output_block is None:
-            output_block = np.zeros((self.blocksize, stream_ch), dtype=self.dtype)
+            # Create silent block with (channels, samples)
+            output_block = np.zeros((stream_ch, self.blocksize), dtype=self.dtype)
 
-        if output_block.shape[1] != stream_ch:
-            temp = np.zeros((self.blocksize, stream_ch), dtype=self.dtype)
-            ch_to_copy = min(output_block.shape[1], stream_ch)
+        # Handle channel mismatch
+        if output_block.shape[0] != stream_ch:
+            temp = np.zeros((stream_ch, self.blocksize), dtype=self.dtype)
+            ch_to_copy = min(output_block.shape[0], stream_ch)
             if ch_to_copy > 0:
-                temp[:, :ch_to_copy] = output_block[:, :ch_to_copy]
+                temp[:ch_to_copy, :] = output_block[:ch_to_copy, :]
             output_block = temp
 
         return {"out": output_block}
@@ -856,8 +859,9 @@ class AudioSinkNode(BaseAudioNode, IClockProvider):
         with self._lock:
             if self._buffer:
                 data_block = self._buffer.popleft()
-                if data_block.shape == outdata.shape:
-                    outdata[:] = data_block
+                # Transpose from (channels, samples) to (samples, channels) for sounddevice
+                if data_block.T.shape == outdata.shape:
+                    outdata[:] = data_block.T
                 else:
                     outdata.fill(0)
             else:
@@ -877,18 +881,19 @@ class AudioSinkNode(BaseAudioNode, IClockProvider):
         with self._lock:
             target_chans = self._active_stream_channels
 
-        processed_block = np.zeros((self.blocksize, target_chans), dtype=self.dtype)
-        if isinstance(signal_block, np.ndarray) and signal_block.shape[0] == self.blocksize and signal_block.ndim == 2:
-            input_chans = signal_block.shape[1]
+        # Create silent block with (channels, samples)
+        processed_block = np.zeros((target_chans, self.blocksize), dtype=self.dtype)
+        if isinstance(signal_block, np.ndarray) and signal_block.shape[1] == self.blocksize and signal_block.ndim == 2:
+            input_chans = signal_block.shape[0]
             if input_chans == target_chans:
                 processed_block = signal_block
             else:
                 ch_to_copy = min(input_chans, target_chans)
                 if ch_to_copy > 0:
-                    processed_block[:, :ch_to_copy] = signal_block[:, :ch_to_copy]
+                    processed_block[:ch_to_copy, :] = signal_block[:ch_to_copy, :]
                 if target_chans > input_chans and input_chans > 0:
-                    last_ch = signal_block[:, -1:]
-                    processed_block[:, input_chans:] = np.tile(last_ch, (1, target_chans - input_chans))
+                    last_ch = signal_block[-1:, :]
+                    processed_block[input_chans:, :] = np.tile(last_ch, (target_chans - input_chans, 1))
 
         try:
             with self._lock:
