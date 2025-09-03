@@ -1,8 +1,9 @@
+import torch
 import numpy as np
 import threading
 import logging
 import time
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 # The librosa library is required for the 'PYIN' and 'YIN' methods to function.
 # It can be installed via: pip install librosa
@@ -155,7 +156,7 @@ class F0EstimatorNode(Node):
             self.prev_sample = audio_block[-1]
             return filtered
 
-        def autocorrelation_f0(self, audio_block: np.ndarray) -> (float, float):
+        def autocorrelation_f0(self, audio_block: np.ndarray) -> "Tuple[float, float]":
             processed = self._preprocess(audio_block)
             autocorr = np.correlate(processed, processed, mode="full")
             autocorr = autocorr[len(autocorr) // 2 :]
@@ -184,7 +185,8 @@ class F0EstimatorNode(Node):
         super().__init__(name, node_id)
         self.emitter = F0EstimatorEmitter()
 
-        self.add_input("in", data_type=np.ndarray)
+        # --- MODIFIED: Input socket now expects a torch.Tensor ---
+        self.add_input("in", data_type=torch.Tensor)
         self.add_output("f0_hz", data_type=float)
         self.add_output("confidence", data_type=float)
 
@@ -192,7 +194,7 @@ class F0EstimatorNode(Node):
         self._method = "pyin" if LIBROSA_AVAILABLE else "autocorr"
         self._last_f0 = 0.0
         self._next_ui_update_time = 0
-        self._buffer = np.array([], dtype=DEFAULT_DTYPE)
+        self._buffer = np.array([], dtype=np.float32)
 
         self._pitch_engine = self._PitchEngine(DEFAULT_SAMPLERATE, REQUIRED_FRAME_LENGTH)
 
@@ -210,26 +212,32 @@ class F0EstimatorNode(Node):
     def process(self, input_data: dict) -> dict:
         audio_in = input_data.get("in")
         output_f0 = 0.0
+        output_confidence = 0.0
 
-        if audio_in is None or not isinstance(audio_in, np.ndarray) or audio_in.size == 0:
+        # --- MODIFIED: Handle torch.Tensor input ---
+        if not isinstance(audio_in, torch.Tensor) or audio_in.numel() == 0:
             return {"f0_hz": 0.0, "confidence": 0.0}
 
         try:
+            # --- MODIFIED: Voice Activity Detection with PyTorch ---
             if audio_in.ndim > 1:
-                mono_signal = np.mean(audio_in, axis=1)
+                mono_tensor = torch.mean(audio_in, dim=0)
             else:
-                mono_signal = audio_in
-            mono_signal = mono_signal.astype(np.float32)
+                mono_tensor = audio_in
 
-            energy = np.sum(mono_signal**2)
+            energy = torch.sum(mono_tensor**2)
             if energy < VAD_ENERGY_THRESHOLD:
                 self._last_f0 = 0.0
                 return {"f0_hz": 0.0, "confidence": 0.0}
 
+            # --- MODIFIED: Convert to NumPy for librosa/numpy processing ---
+            mono_signal_np = mono_tensor.numpy().astype(np.float32)
+
             with self._lock:
-                self._buffer = np.concatenate((self._buffer, mono_signal))
+                self._buffer = np.concatenate((self._buffer, mono_signal_np))
                 if len(self._buffer) < REQUIRED_FRAME_LENGTH:
-                    return {"f0_hz": 0.0, "confidence": 0.0}
+                    # Return last smoothed F0 if buffer is not full yet
+                    return {"f0_hz": self._last_f0, "confidence": 0.0}
                 analysis_chunk = self._buffer[:REQUIRED_FRAME_LENGTH]
                 self._buffer = self._buffer[DEFAULT_BLOCKSIZE:]
                 method = self._method
@@ -272,8 +280,7 @@ class F0EstimatorNode(Node):
                 else:
                     output_f0 = raw_f0
                 self._last_f0 = output_f0 if output_f0 > 0 else 0.0
-
-            output_confidence = confidence
+                output_confidence = confidence
 
             current_time = time.monotonic()
             if current_time >= self._next_ui_update_time:
@@ -289,7 +296,7 @@ class F0EstimatorNode(Node):
     def start(self):
         super().start()
         with self._lock:
-            self._buffer = np.array([], dtype=DEFAULT_DTYPE)
+            self._buffer = np.array([], dtype=np.float32)
             self._last_f0 = 0.0
             self._next_ui_update_time = 0
             self._pitch_engine.prev_sample = 0.0

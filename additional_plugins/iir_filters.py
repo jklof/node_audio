@@ -15,7 +15,9 @@ except ImportError:
 # --- Node System Imports ---
 from node_system import Node
 from ui_elements import NodeItem, NODE_CONTENT_PADDING
-from constants import DEFAULT_SAMPLERATE, DEFAULT_DTYPE
+
+# --- MODIFIED: Import torch ---
+from constants import DEFAULT_SAMPLERATE, DEFAULT_DTYPE, torch
 
 # --- Qt Imports ---
 from PySide6.QtCore import Qt, Slot, QSignalBlocker, Signal, QObject
@@ -31,11 +33,10 @@ MAX_CUTOFF_HZ = 20000.0
 MIN_Q = 0.1
 MAX_Q = 20.0
 
-# ==============================================================================
-# 1. Custom UI Class (IIRFilterNodeItem)
-# ==============================================================================
 
-
+# ==============================================================================
+# 1. Custom UI Class (IIRFilterNodeItem) - No changes needed
+# ==============================================================================
 class IIRFilterNodeItem(NodeItem):
     """Custom UI for all IIR Filter nodes."""
 
@@ -123,33 +124,24 @@ class IIRFilterNodeItem(NodeItem):
         if SCIPY_AVAILABLE:
             state = self.node_logic.get_state_snapshot()
             self._on_state_updated(state)
-
             cutoff_socket = self.node_logic.inputs.get("cutoff_hz")
             q_socket = self.node_logic.inputs.get("Q")
-
             cutoff_connected = cutoff_socket and len(cutoff_socket.connections) > 0
             q_connected = q_socket and len(q_socket.connections) > 0
-
             self.cutoff_slider.setEnabled(not cutoff_connected)
             self.q_slider.setEnabled(not q_connected and self.q_widget.isVisible())
-
-            # --- FIX: Override label text if the corresponding input is connected ---
             if cutoff_connected:
-                self.cutoff_label.setText("Cutoff Freq: --")
-
+                self.cutoff_label.setText(f"Cutoff Freq: ... Hz (ext)")
             if q_connected and self.q_widget.isVisible():
-                self.q_label.setText("Q: --")
-
+                self.q_label.setText(f"Q: ... (ext)")
         super().updateFromLogic()
 
 
 # ==============================================================================
-# 2. Refactored Base Class for IIR Filters
+# 2. Refactored Base Class for IIR Filters (CONVERTED TO TORCH)
 # ==============================================================================
-
-
 class BaseIIRFilterNode(Node):
-    NODE_TYPE = None  # This is an abstract base class
+    NODE_TYPE = None
     CATEGORY = "Filters"
     UI_CLASS = IIRFilterNodeItem
     FILTER_ORDER = DEFAULT_FILTER_ORDER
@@ -163,9 +155,10 @@ class BaseIIRFilterNode(Node):
         self.emitter = self.Emitter()
         self._lock = threading.Lock()
 
-        self.add_input("in", data_type=np.ndarray)
+        # --- MODIFIED: Use torch.Tensor for sockets ---
+        self.add_input("in", data_type=torch.Tensor)
         self.add_input("cutoff_hz", data_type=float)
-        self.add_output("out", data_type=np.ndarray)
+        self.add_output("out", data_type=torch.Tensor)
 
         self._samplerate = float(DEFAULT_SAMPLERATE)
         self._default_cutoff_hz = 1000.0
@@ -173,7 +166,6 @@ class BaseIIRFilterNode(Node):
 
         self._active_cutoff = 0.0
         self._active_Q = 0.0
-
         self._sos = None
         self._filter_state_zi = None
 
@@ -189,11 +181,9 @@ class BaseIIRFilterNode(Node):
         if not SCIPY_AVAILABLE or not self.filter_type:
             self._sos = None
             return
-
         nyquist = self._samplerate / 2.0
         clamped_cutoff = np.clip(cutoff_to_use, MIN_CUTOFF_HZ, nyquist * 0.99)
         clamped_Q = np.clip(q_to_use, MIN_Q, MAX_Q)
-
         try:
             Wn = self._calculate_wn(clamped_cutoff, clamped_Q)
             self._sos = scipy.signal.iirfilter(
@@ -229,41 +219,40 @@ class BaseIIRFilterNode(Node):
         cutoff_in = input_data.get("cutoff_hz")
         q_in = input_data.get("Q")
 
-        if signal_in is None or not SCIPY_AVAILABLE:
+        # --- MODIFIED: Check for torch.Tensor and handle conversion ---
+        if not isinstance(signal_in, torch.Tensor) or not SCIPY_AVAILABLE:
             return {"out": signal_in}
 
         with self._lock:
-            final_cutoff = cutoff_in if cutoff_in is not None else self._default_cutoff_hz
-            final_q = q_in if q_in is not None else self._default_Q
-
+            final_cutoff = float(cutoff_in) if cutoff_in is not None else self._default_cutoff_hz
+            final_q = float(q_in) if q_in is not None else self._default_Q
             cutoff_changed = abs(final_cutoff - self._active_cutoff) > 1e-3
             q_changed = abs(final_q - self._active_Q) > 1e-3
-
             if cutoff_changed or q_changed:
                 self._active_cutoff = final_cutoff
                 self._active_Q = final_q
                 self._update_coefficients(self._active_cutoff, self._active_Q)
-
             if self._sos is None:
                 return {"out": signal_in}
 
-            num_channels = signal_in.shape[1] if signal_in.ndim == 2 else 1
-            signal_in_2d = np.atleast_2d(signal_in).T if signal_in.ndim == 1 else signal_in
+            # Convert tensor to numpy for scipy, transposing from (channels, samples) to (samples, channels)
+            signal_in_np = signal_in.T.numpy()
+            num_channels = signal_in_np.shape[1]
 
             if self._filter_state_zi is None or self._filter_state_zi.shape[-1] != num_channels:
                 zi_init_single = scipy.signal.sosfilt_zi(self._sos)
                 self._filter_state_zi = np.repeat(zi_init_single[:, :, np.newaxis], num_channels, axis=2)
-
             try:
-                signal_out_2d, self._filter_state_zi = scipy.signal.sosfilt(
-                    self._sos, signal_in_2d, axis=0, zi=self._filter_state_zi
+                signal_out_np, self._filter_state_zi = scipy.signal.sosfilt(
+                    self._sos, signal_in_np, axis=0, zi=self._filter_state_zi
                 )
-                output = signal_out_2d.flatten() if signal_in.ndim == 1 else signal_out_2d
-                return {"out": output.astype(DEFAULT_DTYPE)}
+                # Convert back to torch tensor, transposing back to (channels, samples)
+                output_tensor = torch.from_numpy(signal_out_np.T.copy()).to(DEFAULT_DTYPE)
+                return {"out": output_tensor}
             except Exception as e:
                 logger.error(f"[{self.name}] Error during sosfilt: {e}. Resetting state.")
                 self._filter_state_zi = None
-                return {"out": np.zeros_like(signal_in)}
+                return {"out": torch.zeros_like(signal_in)}
 
     def start(self):
         with self._lock:
@@ -280,7 +269,7 @@ class BaseIIRFilterNode(Node):
     def deserialize_extra(self, data: dict):
         with self._lock:
             self._default_cutoff_hz = data.get("cutoff_hz", 1000.0)
-            self._default_Q = data.get("Q", 1.0 / np.sqrt(2))
+            self._default_Q = data.get("Q", 1.0 / torch.sqrt(torch.tensor(2.0)))
             if SCIPY_AVAILABLE:
                 self._active_cutoff = self._default_cutoff_hz
                 self._active_Q = self._default_Q
@@ -288,10 +277,8 @@ class BaseIIRFilterNode(Node):
 
 
 # ==============================================================================
-# 3. Concrete Filter Node Implementations
+# 3. Concrete Filter Node Implementations (MODIFIED)
 # ==============================================================================
-
-
 class LowpassFilterNode(BaseIIRFilterNode):
     NODE_TYPE = "IIR Lowpass Filter"
     DESCRIPTION = f"Applies a {DEFAULT_FILTER_ORDER}th order Butterworth lowpass filter."
@@ -314,19 +301,8 @@ class BandpassFilterNode(BaseIIRFilterNode):
         self.add_input("Q", data_type=float)
 
     def _calculate_wn(self, cutoff, q):
-        center_freq = cutoff
-        Q = q
-        nyquist = self._samplerate / 2.0
-
+        center_freq, Q, nyquist = cutoff, q, self._samplerate / 2.0
         bandwidth = center_freq / Q
-        low_cutoff = center_freq - (bandwidth / 2.0)
-        high_cutoff = center_freq + (bandwidth / 2.0)
-
-        low_cutoff = max(MIN_CUTOFF_HZ, low_cutoff)
-        high_cutoff = min(nyquist * 0.99, high_cutoff)
-
-        if low_cutoff >= high_cutoff:
-            # Fallback to prevent crash if range is invalid
-            return [center_freq - 1, center_freq]
-
-        return [low_cutoff, high_cutoff]
+        low_cutoff = max(MIN_CUTOFF_HZ, center_freq - (bandwidth / 2.0))
+        high_cutoff = min(nyquist * 0.99, center_freq + (bandwidth / 2.0))
+        return [low_cutoff, high_cutoff] if low_cutoff < high_cutoff else [center_freq - 1, center_freq]

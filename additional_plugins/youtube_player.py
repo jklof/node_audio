@@ -7,6 +7,7 @@ from collections import deque
 from typing import Optional, Dict, Tuple, Any
 
 import numpy as np
+import torch
 from pytubefix import YouTube, Stream
 from pytubefix.exceptions import AgeRestrictedError, VideoUnavailable, LiveStreamError
 
@@ -26,7 +27,8 @@ INTERNAL_BUFFER_MAX_BLOCKS = 50
 VIDEO_WIDTH = 280
 VIDEO_HEIGHT = 158
 VIDEO_FRAME_BYTES = VIDEO_WIDTH * VIDEO_HEIGHT * 4
-FFMPEG_AUDIO_CHUNK_SIZE = DEFAULT_BLOCKSIZE * 2 * 2
+# Calculate bytes needed for one block of stereo 16-bit audio
+FFMPEG_AUDIO_CHUNK_SIZE = DEFAULT_BLOCKSIZE * 2 * 2  # samples * channels * bytes_per_sample
 UI_UPDATE_INTERVAL_MS = 250
 
 
@@ -223,7 +225,8 @@ class YouTubePlayerNode(Node):
 
     def __init__(self, name, node_id=None):
         super().__init__(name, node_id)
-        self.add_output("out", data_type=np.ndarray)
+        # --- MODIFIED: Output socket now uses torch.Tensor ---
+        self.add_output("out", data_type=torch.Tensor)
         self.emitter = YouTubePlayerSignalEmitter()
         self._lock = threading.Lock()
 
@@ -324,7 +327,8 @@ class YouTubePlayerNode(Node):
                 if self._playback_state == PlaybackState.PLAYING:
                     self._playback_state = PlaybackState.BUFFERING
                     state_to_emit = self._update_state_snapshot_locked(state=self._playback_state)
-                output_block = np.zeros((DEFAULT_BLOCKSIZE, 2), dtype=DEFAULT_DTYPE)
+                # --- MODIFIED: Create a silent torch.Tensor with shape (channels, samples) ---
+                output_block = torch.zeros((2, DEFAULT_BLOCKSIZE), dtype=DEFAULT_DTYPE)
 
         if state_to_emit:
             self.emitter.emit_state_change(state_to_emit)
@@ -374,6 +378,7 @@ class YouTubePlayerNode(Node):
             return None
 
     def _audio_reader_thread(self, pipe, start_time_s: float):
+        """--- MODIFIED: This entire method now processes into torch.Tensors ---"""
         frames_read_since_start = 0
         current_playback_time_s = start_time_s
         last_ui_update_time = time.monotonic()
@@ -391,16 +396,23 @@ class YouTubePlayerNode(Node):
             if not raw_audio:
                 break
 
-            audio_array = np.frombuffer(raw_audio, dtype=np.int16).astype(DEFAULT_DTYPE) / 32768.0
-            num_samples_in_chunk = audio_array.shape[0] // 2
+            # 1. Convert raw bytes to a NumPy array of int16
+            audio_array_np = np.frombuffer(raw_audio, dtype=np.int16)
+
+            # 2. Convert to a PyTorch tensor, normalize, and change dtype
+            audio_tensor = torch.from_numpy(audio_array_np).to(DEFAULT_DTYPE) / 32768.0
+
+            # 3. Reshape and transpose to (channels, samples)
+            num_samples_in_chunk = audio_tensor.shape[0] // 2
             if num_samples_in_chunk == 0:
                 continue
+            # Reshape to (samples, 2) then transpose to (2, samples)
+            reshaped_audio = audio_tensor.reshape(num_samples_in_chunk, 2).T
 
-            reshaped_audio = audio_array.reshape(num_samples_in_chunk, 2)
-
+            # 4. Split the chunk into blocks of the correct size and buffer them
             for i in range(0, num_samples_in_chunk, DEFAULT_BLOCKSIZE):
-                block = reshaped_audio[i : i + DEFAULT_BLOCKSIZE]
-                if block.shape[0] == DEFAULT_BLOCKSIZE:
+                block = reshaped_audio[:, i : i + DEFAULT_BLOCKSIZE]
+                if block.shape[1] == DEFAULT_BLOCKSIZE:
                     with self._lock:
                         self._audio_buffer.append(block)
                     frames_read_since_start += DEFAULT_BLOCKSIZE
@@ -417,7 +429,6 @@ class YouTubePlayerNode(Node):
                 last_ui_update_time = now
 
         self._end_of_stream_actions(current_playback_time_s, start_time_s)
-
         logger.info(f"[{self.name}] Audio reader thread finished.")
 
     def _video_reader_thread(self, pipe):
@@ -427,7 +438,7 @@ class YouTubePlayerNode(Node):
                 break
             image = QImage(raw_frame, VIDEO_WIDTH, VIDEO_HEIGHT, QImage.Format.Format_ARGB32)
             self.emitter.emit_video_frame(image.copy())
-            time.sleep(1 / 20)
+            time.sleep(1 / 20)  # ~20 FPS video playback
         logger.info(f"[{self.name}] Video reader thread finished.")
 
     def _end_of_stream_actions(self, current_playback_time_s: float, start_time_s: float):
@@ -437,19 +448,16 @@ class YouTubePlayerNode(Node):
             duration_s = self._state_snapshot.get("duration_s", 0.0)
 
             if current_playback_time_s >= duration_s and duration_s > 0:
-                # End of video reached - loop back to beginning
                 logger.info(f"[{self.name}] End of video reached, looping back to start.")
                 self._seek_request_s = 0.0
                 self._playback_state = PlaybackState.PLAYING
                 self._state_snapshot["position_s"] = 0.0
                 state_to_emit = self._update_state_snapshot_locked()
             elif not self._stop_event.is_set():
-                # Natural end without reaching full duration
                 self._playback_state = PlaybackState.STOPPED
                 self._state_snapshot["position_s"] = current_playback_time_s
                 state_to_emit = self._update_state_snapshot_locked()
             else:
-                # Stop event was set, just mark as stopped
                 self._playback_state = PlaybackState.STOPPED
                 state_to_emit = self._update_state_snapshot_locked()
 
@@ -553,13 +561,11 @@ class YouTubePlayerNode(Node):
                 audio_thread.start()
                 video_thread.start()
 
-                # --- THIS IS THE FIX ---
-                # This loop is now interruptible by a seek request.
                 while self._ffmpeg_process.poll() is None and not self._stop_event.is_set():
                     with self._lock:
                         if self._seek_request_s != -1.0:
                             logger.info(f"[{self.name}] Seek detected, interrupting current ffmpeg process.")
-                            break  # Exit the waiting loop to handle the seek
+                            break
                     time.sleep(0.1)
 
             except Exception as e:
@@ -586,15 +592,11 @@ class YouTubePlayerNode(Node):
                 if self._stop_event.is_set():
                     break
                 with self._lock:
-                    # If we broke out of the loop but it wasn't a seek, it was end-of-stream
                     if self._seek_request_s == -1.0:
                         self._playback_state = PlaybackState.STOPPED
                         state_to_emit = self._update_state_snapshot_locked()
                 if state_to_emit:
                     self.emitter.emit_state_change(state_to_emit)
-
-                # Continue main loop to allow for looping (restart from beginning)
-                # The _end_of_stream_actions method will set _seek_request_s = 0.0 for looping
 
         logger.info(f"[{self.name}] Main worker loop finished.")
         state_to_emit = None

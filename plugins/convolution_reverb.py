@@ -2,16 +2,16 @@ import os
 import threading
 import logging
 import weakref
-from collections import deque
 from typing import Dict, Optional, List
 
-import numpy as np
+import torch
+import numpy as np  # Kept for UI slider mapping
 import soundfile as sf
-import resampy
+import torchaudio.transforms as T
 
 # --- Node System Imports ---
 from node_system import Node
-from constants import DEFAULT_SAMPLERATE, DEFAULT_BLOCKSIZE, DEFAULT_DTYPE
+from constants import DEFAULT_SAMPLERATE, DEFAULT_BLOCKSIZE, DEFAULT_DTYPE, DEFAULT_COMPLEX_DTYPE
 from ui_elements import NodeItem, NODE_CONTENT_PADDING
 
 # --- Qt Imports ---
@@ -20,20 +20,6 @@ from PySide6.QtWidgets import QWidget, QLabel, QPushButton, QVBoxLayout, QHBoxLa
 
 # --- Logging ---
 logger = logging.getLogger(__name__)
-
-# --- Numba Setup with Fallback ---
-try:
-    from numba import njit
-
-    logging.info("Numba detected in convolution_reverb. JIT compilation enabled.")
-except ImportError:
-    logging.warning("Numba not found in convolution_reverb. Using pure Python fallback.")
-
-    def njit(func=None, **kwargs):
-        if func:
-            return func
-        else:
-            return lambda f: f
 
 
 # --- Node-Specific Constants ---
@@ -66,25 +52,35 @@ class IRLoadRunnable(QRunnable):
 
         try:
             logger.info(f"[{node.name}] Starting IR load for: {self.file_path}")
-            ir_data, source_sr = sf.read(self.file_path, dtype="float32")
-            if ir_data.ndim > 1:
-                ir_data = np.mean(ir_data, axis=1)
+            # Load with soundfile (numpy) and immediately convert to torch tensor
+            ir_data_np, source_sr = sf.read(self.file_path, dtype="float32")
+            ir_data = torch.from_numpy(ir_data_np)
+
+            if ir_data.dim() > 1:
+                ir_data = torch.mean(ir_data, dim=1)  # Mixdown to mono
+
+            # --- Use torchaudio for resampling ---
             if source_sr != self.target_sr:
-                ir_data = resampy.resample(ir_data, source_sr, self.target_sr, filter="kaiser_fast")
-            max_val = np.max(np.abs(ir_data))
+                logger.info(
+                    f"[{node.name}] Resampling IR from {source_sr} Hz to {self.target_sr} Hz using torchaudio..."
+                )
+                resampler = T.Resample(orig_freq=source_sr, new_freq=self.target_sr, dtype=ir_data.dtype)
+                # Resample expects (..., time), so add a channel dimension for mono and remove it after
+                ir_data = resampler(ir_data.unsqueeze(0)).squeeze(0)
+
+            max_val = torch.max(torch.abs(ir_data))
             if max_val > 0:
                 ir_data /= max_val
             logger.info(f"[{node.name}] IR loaded. Now calculating FFT partitions...")
 
-            num_partitions = int(np.ceil(len(ir_data) / PARTITION_SIZE))
+            num_partitions = int(np.ceil(ir_data.shape[0] / PARTITION_SIZE))
             padded_len = num_partitions * PARTITION_SIZE
-            padded_ir = np.pad(ir_data, (0, padded_len - len(ir_data)), "constant")
+            pad_amount = padded_len - ir_data.shape[0]
+            padded_ir = torch.nn.functional.pad(ir_data, (0, pad_amount), "constant", 0)
 
             fft_partitions = [
-                np.ascontiguousarray(
-                    np.fft.rfft(padded_ir[i * PARTITION_SIZE : (i + 1) * PARTITION_SIZE], n=FFT_SIZE).astype(
-                        np.complex64
-                    )
+                torch.fft.rfft(padded_ir[i * PARTITION_SIZE : (i + 1) * PARTITION_SIZE], n=FFT_SIZE).to(
+                    DEFAULT_COMPLEX_DTYPE
                 )
                 for i in range(num_partitions)
             ]
@@ -264,29 +260,6 @@ class ConvolutionReverbNodeItem(NodeItem):
 # ==============================================================================
 # 4. Node Logic Class (ConvolutionReverbNode)
 # ==============================================================================
-@njit(fastmath=True, cache=True)
-def perform_convolution_sum(ir_partitions_fft, input_fft_history, current_history_idx):
-    num_parts = len(ir_partitions_fft)
-    history_len = len(input_fft_history)
-
-    # Create the output buffer for the sum
-    output_fft_sum = np.zeros_like(input_fft_history[0])
-
-    for i in range(num_parts):
-        # This is the tricky part: access the circular buffer correctly.
-        # The most recent item is at current_history_idx.
-        # The one before that is at (current_history_idx - 1), etc.
-        # We use modulo arithmetic to wrap around the buffer.
-        history_index = (current_history_idx - i + history_len) % history_len
-
-        input_block_fft = input_fft_history[history_index]
-        ir_part_fft = ir_partitions_fft[i]
-
-        output_fft_sum += input_block_fft * ir_part_fft[:, np.newaxis]
-
-    return output_fft_sum
-
-
 class ConvolutionReverbNode(Node):
     NODE_TYPE = "Convolution Reverb"
     UI_CLASS = ConvolutionReverbNodeItem
@@ -296,11 +269,11 @@ class ConvolutionReverbNode(Node):
     def __init__(self, name: str, node_id: Optional[str] = None):
         super().__init__(name, node_id)
         self.emitter = ConvolutionReverbEmitter()
-        self.add_input("in", data_type=np.ndarray)
+        self.add_input("in", data_type=torch.Tensor)
         self.add_input("input_gain_db", data_type=float)
         self.add_input("mix", data_type=float)
         self.add_input("output_gain_db", data_type=float)
-        self.add_output("out", data_type=np.ndarray)
+        self.add_output("out", data_type=torch.Tensor)
         self._lock = threading.Lock()
         self._ir_filepath: Optional[str] = None
         self._input_gain_db: float = 0.0
@@ -310,14 +283,10 @@ class ConvolutionReverbNode(Node):
         self._status: str = "No IR Loaded"
         self._is_loading: bool = False
 
-        # Use a List for IR partitions, as they are read-only
-        self._ir_partitions_fft: List[np.ndarray] = []
-
-        # circular buffer for input FFT history
-        self._input_fft_history: Optional[np.ndarray] = None
-        self._history_idx: int = 0  # Pointer for our circular buffer
-
-        self._overlap_add_buffer: Optional[np.ndarray] = None
+        self._ir_partitions_fft: List[torch.Tensor] = []
+        self._input_fft_history: Optional[torch.Tensor] = None
+        self._history_idx: int = 0
+        self._overlap_add_buffer: Optional[torch.Tensor] = None
         self._expected_channels: Optional[int] = None
         self.ir_loader_signaller = IRLoadSignaller()
         self.ir_loader_signaller.load_finished.connect(self._on_ir_load_finished)
@@ -331,7 +300,7 @@ class ConvolutionReverbNode(Node):
             self._is_loading = True
             self._ir_filepath = file_path
             self._status = "Loading..."
-            state_snapshot = self.get_current_state_snapshot(locked=True)
+            state_snapshot = self._get_current_state_snapshot_locked()
 
         self.emitter.stateUpdated.emit(state_snapshot)
 
@@ -340,31 +309,22 @@ class ConvolutionReverbNode(Node):
 
     @Slot(tuple)
     def _on_ir_load_finished(self, result: tuple):
-        """
-        This slot is connected to the IRLoadSignaller and is executed on the main thread
-        when the background IR loading task is complete.
-        """
         result_type, data, file_path = result
-
         state_snapshot = None
         with self._lock:
             if file_path != self._ir_filepath:
                 logger.warning(f"[{self.name}] Ignoring stale load result for {file_path}")
                 return
-
             self._is_loading = False
             if result_type == "success":
-                # Store IR partitions as a list of arrays
                 self._ir_partitions_fft = data
                 if self._expected_channels is not None:
                     self._reset_dsp_state_locked(self._expected_channels)
                 self._status = "Ready"
-            else:  # 'failure'
+            else:
                 self._ir_partitions_fft = []
                 self._status = f"Error: {data}"
-
-            state_snapshot = self.get_current_state_snapshot(locked=True)
-
+            state_snapshot = self._get_current_state_snapshot_locked()
         self.emitter.stateUpdated.emit(state_snapshot)
 
     @Slot(float)
@@ -380,45 +340,39 @@ class ConvolutionReverbNode(Node):
     @Slot(float)
     def set_mix(self, value: float):
         with self._lock:
-            self._mix = np.clip(value, 0.0, 1.0)
+            self._mix = np.clip(value, 0.0, 1.0).item()
 
     @Slot(bool)
     def set_bypass(self, value: bool):
         with self._lock:
             self._bypass = value
 
-    def get_current_state_snapshot(self, locked: bool = False) -> Dict:
-        if locked:
-            return {
-                "status": self._status,
-                "ir_filepath": self._ir_filepath,
-                "input_gain_db": self._input_gain_db,
-                "output_gain_db": self._output_gain_db,
-                "mix": self._mix,
-                "bypass": self._bypass,
-            }
+    def _get_current_state_snapshot_locked(self) -> Dict:
+        return {
+            "status": self._status,
+            "ir_filepath": self._ir_filepath,
+            "input_gain_db": self._input_gain_db,
+            "output_gain_db": self._output_gain_db,
+            "mix": self._mix,
+            "bypass": self._bypass,
+        }
+
+    def get_current_state_snapshot(self) -> Dict:
         with self._lock:
-            return {
-                "status": self._status,
-                "ir_filepath": self._ir_filepath,
-                "input_gain_db": self._input_gain_db,
-                "output_gain_db": self._output_gain_db,
-                "mix": self._mix,
-                "bypass": self._bypass,
-            }
+            return self._get_current_state_snapshot_locked()
 
     def _reset_dsp_state_locked(self, num_channels: int):
         self._expected_channels = num_channels
         num_ir_partitions = len(self._ir_partitions_fft)
-
-        # Pre-allocate the entire history buffer as one big NumPy array
         if num_ir_partitions > 0:
-            self._input_fft_history = np.zeros((num_ir_partitions, FFT_SIZE // 2 + 1, num_channels), dtype=np.complex64)
+            fft_bins = self._ir_partitions_fft[0].shape[0]
+            self._input_fft_history = torch.zeros(
+                (num_ir_partitions, num_channels, fft_bins), dtype=DEFAULT_COMPLEX_DTYPE
+            )
         else:
             self._input_fft_history = None
-
         self._history_idx = 0
-        self._overlap_add_buffer = np.zeros((PARTITION_SIZE, num_channels), dtype=DEFAULT_DTYPE)
+        self._overlap_add_buffer = torch.zeros((num_channels, PARTITION_SIZE), dtype=DEFAULT_DTYPE)
         logger.debug(f"[{self.name}] DSP state reset for {num_channels} channels.")
 
     def process(self, input_data: dict) -> dict:
@@ -464,7 +418,7 @@ class ConvolutionReverbNode(Node):
 
             # If the state changed, prepare a snapshot to be emitted after releasing the lock.
             if ui_update_needed:
-                state_snapshot_to_emit = self.get_current_state_snapshot(locked=True)
+                state_snapshot_to_emit = self._get_current_state_snapshot_locked()
 
             # Get parameters for this processing tick using the most up-to-date state.
             input_gain_db = self._input_gain_db
@@ -486,10 +440,10 @@ class ConvolutionReverbNode(Node):
 
         dry_signal_gained = dry_signal * input_gain
 
-        if dry_signal_gained.ndim == 1:
-            dry_signal_gained = dry_signal_gained[:, np.newaxis]
+        if dry_signal_gained.dim() == 1:
+            dry_signal_gained = dry_signal_gained.unsqueeze(0)
 
-        num_samples, num_channels = dry_signal_gained.shape
+        num_channels, num_samples = dry_signal_gained.shape
         if num_samples != PARTITION_SIZE:
             logger.warning(
                 f"[{self.name}] Input block size ({num_samples}) differs from partition size ({PARTITION_SIZE}). Skipping."
@@ -499,32 +453,29 @@ class ConvolutionReverbNode(Node):
         with self._lock:
             if self._expected_channels != num_channels:
                 self._reset_dsp_state_locked(num_channels)
-
             if self._input_fft_history is None or not self._ir_partitions_fft:
                 return {"out": dry_signal}
 
-            fft_result = np.fft.rfft(dry_signal_gained, n=FFT_SIZE, axis=0).astype(np.complex64)
-            input_fft = np.ascontiguousarray(fft_result)
+            input_fft = torch.fft.rfft(dry_signal_gained, n=FFT_SIZE, dim=1)
 
-            # Update the circular buffer
-            # Increment index, wrapping around if necessary
-            self._history_idx = (self._history_idx + 1) % len(self._input_fft_history)
-            # Place the new FFT into the correct slot in our pre-allocated array
+            self._history_idx = (self._history_idx + 1) % self._input_fft_history.shape[0]
             self._input_fft_history[self._history_idx] = input_fft
 
-            # Call the JIT function
-            output_fft_sum = perform_convolution_sum(
-                self._ir_partitions_fft, self._input_fft_history, self._history_idx
-            )
+            output_fft_sum = torch.zeros_like(input_fft)
+            num_parts = len(self._ir_partitions_fft)
+            history_len = self._input_fft_history.shape[0]
 
-            convolved_block = np.fft.irfft(output_fft_sum, n=FFT_SIZE, axis=0)
+            for i in range(num_parts):
+                history_index = (self._history_idx - i + history_len) % history_len
+                output_fft_sum += self._input_fft_history[history_index] * self._ir_partitions_fft[i].unsqueeze(0)
 
-            wet_signal = (convolved_block[:PARTITION_SIZE] + self._overlap_add_buffer).astype(DEFAULT_DTYPE)
-            self._overlap_add_buffer = convolved_block[PARTITION_SIZE:].astype(DEFAULT_DTYPE)
+            convolved_block = torch.fft.irfft(output_fft_sum, n=FFT_SIZE, dim=1)
+
+            wet_signal = (convolved_block[:, :PARTITION_SIZE] + self._overlap_add_buffer).to(DEFAULT_DTYPE)
+            self._overlap_add_buffer = convolved_block[:, PARTITION_SIZE:].to(DEFAULT_DTYPE)
 
         wet_signal_gained = wet_signal * output_gain
         final_output = (dry_signal * (1.0 - mix)) + (wet_signal_gained * mix)
-
         return {"out": final_output}
 
     def start(self):

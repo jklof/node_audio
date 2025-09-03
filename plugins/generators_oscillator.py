@@ -1,5 +1,5 @@
-import numpy as np
-import scipy.signal
+import torch
+import numpy as np  # Kept for UI-specific logarithmic mapping
 import threading
 import logging
 from enum import Enum
@@ -18,7 +18,6 @@ from PySide6.QtWidgets import (
     QDial,
     QVBoxLayout,
     QHBoxLayout,
-    QSizePolicy,
 )
 from PySide6.QtCore import Qt, Slot, QSignalBlocker, Signal, QObject
 from PySide6.QtGui import QFontMetrics
@@ -204,7 +203,7 @@ class OscillatorNode(Node):
         self.emitter = OscillatorEmitter()
         self.add_input("freq", data_type=float)
         self.add_input("pulse_width", data_type=float)
-        self.add_output("out", data_type=np.ndarray)
+        self.add_output("out", data_type=torch.Tensor)
 
         self._lock = threading.Lock()
         self.samplerate = DEFAULT_SAMPLERATE
@@ -250,7 +249,7 @@ class OscillatorNode(Node):
     def set_pulse_width(self, pulse_width: float):
         state_to_emit = None
         with self._lock:
-            new_pw = np.clip(float(pulse_width), 0.0, 1.0)
+            new_pw = np.clip(float(pulse_width), 0.01, 0.99)  # Avoid extremes
             if self._pulse_width != new_pw:
                 self._pulse_width = new_pw
                 state_to_emit = self._get_current_state_snapshot_locked()
@@ -270,7 +269,7 @@ class OscillatorNode(Node):
 
             pw_socket = input_data.get("pulse_width")
             if pw_socket is not None:
-                new_pw = np.clip(float(pw_socket), 0.0, 1.0)
+                new_pw = np.clip(float(pw_socket), 0.01, 0.99)
                 if abs(self._pulse_width - new_pw) > 1e-6:
                     self._pulse_width = new_pw
                     state_snapshot_to_emit = self._get_current_state_snapshot_locked()
@@ -284,26 +283,33 @@ class OscillatorNode(Node):
         if state_snapshot_to_emit:
             self.emitter.stateUpdated.emit(state_snapshot_to_emit)
 
-        # --- Generate Waveform ---
-        phase_increment = (2 * np.pi * frequency) / self.samplerate
-        phases = self._phase + np.arange(self.blocksize) * phase_increment
+        # --- Generate Waveform using PyTorch ---
+        phase_increment = (2 * torch.pi * frequency) / self.samplerate
+        phases = self._phase + torch.arange(self.blocksize, dtype=DEFAULT_DTYPE) * phase_increment
 
         output_1d = None
+        # Normalize phase to [0, 2*pi) for periodic functions
+        norm_phases = torch.fmod(phases, 2 * torch.pi)
+
         if waveform == Waveform.SINE:
-            output_1d = 0.5 * np.sin(phases)
+            output_1d = 0.5 * torch.sin(norm_phases)
         elif waveform == Waveform.SQUARE:
-            output_1d = 0.5 * scipy.signal.square(phases, duty=pulse_width)
+            # Create square wave from -0.5 to 0.5
+            output_1d = torch.where(norm_phases < (2 * torch.pi * pulse_width), 0.5, -0.5)
         elif waveform == Waveform.SAWTOOTH:
-            output_1d = 0.5 * scipy.signal.sawtooth(phases, width=1)  # "width=1" gives a rising ramp
+            # Create sawtooth from -0.5 to 0.5
+            output_1d = (norm_phases / (2 * torch.pi)) - 0.5
         elif waveform == Waveform.TRIANGLE:
-            output_1d = 0.5 * scipy.signal.sawtooth(phases, width=0.5)
+            # Create triangle from -0.5 to 0.5
+            output_1d = 2 * torch.abs((norm_phases / (2 * torch.pi)) - 0.5) - 0.5
 
         # Update phase for the next block
-        self._phase = np.mod(phases[-1] + phase_increment, 2 * np.pi)
+        self._phase = torch.fmod(phases[-1] + phase_increment, 2 * torch.pi).item()
 
-        # Tile to match channel count and return
-        output_2d = np.tile(output_1d[:, np.newaxis], (1, self.channels))
-        return {"out": output_2d.astype(DEFAULT_DTYPE)}
+        # Tile to match channel count, creating (channels, samples) shape
+        output_2d = output_1d.unsqueeze(0).expand(self.channels, -1)
+
+        return {"out": output_2d}
 
     def serialize_extra(self) -> dict:
         with self._lock:

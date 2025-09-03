@@ -1,4 +1,5 @@
 import numpy as np
+import torch
 import sounddevice as sd
 from collections import deque
 import threading
@@ -406,6 +407,8 @@ class BaseAudioNode(Node):
         self.samplerate = AudioDeviceManager.TARGET_SAMPLERATE
         self.blocksize = DEFAULT_BLOCKSIZE
         self.dtype = DEFAULT_DTYPE
+        self.sd_dtype = "float32"  # Sounddevice uses numpy dtype strings
+
         self.channels = DEFAULT_CHANNELS
 
         self._buffer = deque(maxlen=DEFAULT_BUFFER_SIZE_BLOCKS)
@@ -591,7 +594,7 @@ class BaseAudioNode(Node):
                             blocksize=self.blocksize,
                             device=effective_device_index,
                             channels=stream_config_channels,
-                            dtype=self.dtype,
+                            dtype=self.sd_dtype,
                             callback=audio_callback,
                         )
                         self._stream.start()
@@ -664,7 +667,7 @@ class BaseAudioNode(Node):
             return {
                 "samplerate": self.samplerate,
                 "blocksize": self.blocksize,
-                "dtype_name": np.dtype(self.dtype).name,
+                "dtype_name": str(self.dtype).replace("torch.", ""),
                 "user_selected_device_identifier": self._user_selected_device_identifier,
                 "user_selected_device_name": self._user_selected_device_name,
                 "user_selected_device_hostapi_name": self._user_selected_device_hostapi_name,
@@ -677,7 +680,10 @@ class BaseAudioNode(Node):
         with self._lock:
             self.samplerate = data.get("samplerate", DEFAULT_SAMPLERATE)
             self.blocksize = data.get("blocksize", DEFAULT_BLOCKSIZE)
-            self.dtype = np.dtype(data.get("dtype_name", DEFAULT_DTYPE))
+            dtype_name = data.get("dtype_name", "float32")
+            if hasattr(torch, dtype_name):
+                self.dtype = getattr(torch, dtype_name)
+            self.sd_dtype = "float32"  # Keep this simple for sounddevice
             self.channels = data.get("channels", DEFAULT_CHANNELS)
 
             loaded_id = data.get("user_selected_device_identifier")
@@ -731,7 +737,7 @@ class AudioSourceNode(BaseAudioNode):
         super().__init__(name, node_id)
         self._overflow_count = 0
         self._last_overflow_time = 0
-        self.add_output("out", data_type=np.ndarray)
+        self.add_output("out", data_type=torch.Tensor)
         if self.signal_emitter:
             self.signal_emitter.emit_channels_changed(self.channels)
 
@@ -770,8 +776,9 @@ class AudioSourceNode(BaseAudioNode):
                 self._last_overflow_time = now
         try:
             with self._lock:
-                # Transpose from (samples, channels) to (channels, samples)
-                self._buffer.append(indata.copy().T)
+                # Convert numpy array from sounddevice to torch.Tensor and transpose to (channels, samples)
+                tensor_data = torch.from_numpy(indata.copy().T)
+                self._buffer.append(tensor_data)
         except Exception as e:
             self._stream_error_count += 1
             if self._stream_error_count < 5:
@@ -784,11 +791,11 @@ class AudioSourceNode(BaseAudioNode):
 
         if output_block is None:
             # Create silent block with (channels, samples)
-            output_block = np.zeros((stream_ch, self.blocksize), dtype=self.dtype)
+            output_block = torch.zeros((stream_ch, self.blocksize), dtype=self.dtype)
 
         # Handle channel mismatch
         if output_block.shape[0] != stream_ch:
-            temp = np.zeros((stream_ch, self.blocksize), dtype=self.dtype)
+            temp = torch.zeros((stream_ch, self.blocksize), dtype=self.dtype)
             ch_to_copy = min(output_block.shape[0], stream_ch)
             if ch_to_copy > 0:
                 temp[:ch_to_copy, :] = output_block[:ch_to_copy, :]
@@ -810,7 +817,7 @@ class AudioSinkNode(BaseAudioNode, IClockProvider):
         self._last_underflow_time = 0
         self._tick_callback: Optional[Callable] = None
         self._active_stream_channels = self.channels
-        self.add_input("in", data_type=np.ndarray)
+        self.add_input("in", data_type=torch.Tensor)
         if self.signal_emitter:
             self.signal_emitter.emit_channels_changed(self.channels)
 
@@ -858,10 +865,11 @@ class AudioSinkNode(BaseAudioNode, IClockProvider):
 
         with self._lock:
             if self._buffer:
-                data_block = self._buffer.popleft()
-                # Transpose from (channels, samples) to (samples, channels) for sounddevice
-                if data_block.T.shape == outdata.shape:
-                    outdata[:] = data_block.T
+                data_block: torch.Tensor = self._buffer.popleft()
+                # Transpose from (channels, samples) to (samples, channels) and convert to numpy for sounddevice
+                numpy_block = data_block.numpy().T
+                if numpy_block.shape == outdata.shape:
+                    outdata[:] = numpy_block
                 else:
                     outdata.fill(0)
             else:
@@ -882,8 +890,12 @@ class AudioSinkNode(BaseAudioNode, IClockProvider):
             target_chans = self._active_stream_channels
 
         # Create silent block with (channels, samples)
-        processed_block = np.zeros((target_chans, self.blocksize), dtype=self.dtype)
-        if isinstance(signal_block, np.ndarray) and signal_block.shape[1] == self.blocksize and signal_block.ndim == 2:
+        processed_block = torch.zeros((target_chans, self.blocksize), dtype=self.dtype)
+        if (
+            isinstance(signal_block, torch.Tensor)
+            and signal_block.shape[1] == self.blocksize
+            and signal_block.ndim == 2
+        ):
             input_chans = signal_block.shape[0]
             if input_chans == target_chans:
                 processed_block = signal_block
@@ -893,7 +905,7 @@ class AudioSinkNode(BaseAudioNode, IClockProvider):
                     processed_block[:ch_to_copy, :] = signal_block[:ch_to_copy, :]
                 if target_chans > input_chans and input_chans > 0:
                     last_ch = signal_block[-1:, :]
-                    processed_block[input_chans:, :] = np.tile(last_ch, (target_chans - input_chans, 1))
+                    processed_block[input_chans:, :] = last_ch.tile((target_chans - input_chans, 1))
 
         try:
             with self._lock:

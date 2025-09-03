@@ -1,4 +1,5 @@
-import numpy as np
+import torch
+import numpy as np  # Keep for UI mapping
 import threading
 import logging
 import time
@@ -6,6 +7,8 @@ from typing import Dict
 
 # --- Node System Imports ---
 from node_system import Node
+
+# --- MODIFIED: Import torch.Tensor ---
 from constants import DEFAULT_DTYPE, DEFAULT_SAMPLERATE
 
 # --- UI and Qt Imports ---
@@ -34,7 +37,7 @@ EPSILON = 1e-12
 
 
 # ==============================================================================
-# 1. State Emitter for UI Communication
+# 1. State Emitter for UI Communication (No changes needed)
 # ==============================================================================
 class CompressorEmitter(QObject):
     stateUpdated = Signal(dict)
@@ -42,7 +45,7 @@ class CompressorEmitter(QObject):
 
 
 # ==============================================================================
-# 2. Custom UI Class
+# 2. Custom UI Class (No changes needed)
 # ==============================================================================
 class DynamicRangeCompressorNodeItem(NodeItem):
     NODE_SPECIFIC_WIDTH = 220
@@ -154,7 +157,7 @@ class DynamicRangeCompressorNodeItem(NodeItem):
 
 
 # ==============================================================================
-# 3. Logic Class for Dynamic Range Compressor
+# 3. Logic Class for Dynamic Range Compressor (CONVERTED TO TORCH)
 # ==============================================================================
 class DynamicRangeCompressorNode(Node):
     NODE_TYPE = "Dynamic Range Compressor"
@@ -166,15 +169,15 @@ class DynamicRangeCompressorNode(Node):
         super().__init__(name, node_id)
         self.emitter = CompressorEmitter()
 
-        # --- Define Sockets ---
-        self.add_input("in", data_type=np.ndarray)
+        # --- MODIFIED: Define Sockets with torch.Tensor ---
+        self.add_input("in", data_type=torch.Tensor)
         self.add_input("threshold_db", data_type=float)
         self.add_input("ratio", data_type=float)
         self.add_input("attack_ms", data_type=float)
         self.add_input("release_ms", data_type=float)
         self.add_input("knee_db", data_type=float)
         self.add_input("makeup_gain_db", data_type=float)
-        self.add_output("out", data_type=np.ndarray)
+        self.add_output("out", data_type=torch.Tensor)
         self.add_output("gain_reduction_db", data_type=float)
 
         # --- Internal State ---
@@ -189,14 +192,15 @@ class DynamicRangeCompressorNode(Node):
         # --- DSP State ---
         self._samplerate = float(DEFAULT_SAMPLERATE)
         self._detector_envelope = 0.0
-        self._compressor_gain_db = 0.0  # Gain reduction is stored as a negative dB value
+        self._compressor_gain_db = 0.0
         self._last_ui_update_time = 0
         self._update_coefficients()
 
     def _calculate_coeff(self, time_ms: float) -> float:
         if time_ms <= 0.0:
             return 0.0
-        return np.exp(-1.0 / (time_ms * 0.001 * self._samplerate))
+        # --- MODIFIED: Use torch.exp ---
+        return torch.exp(torch.tensor(-1.0 / (time_ms * 0.001 * self._samplerate))).item()
 
     def _update_coefficients(self):
         self._attack_coeff = self._calculate_coeff(self._attack_ms)
@@ -221,15 +225,13 @@ class DynamicRangeCompressorNode(Node):
 
     def process(self, input_data: dict) -> dict:
         signal_in = input_data.get("in")
-        if not isinstance(signal_in, np.ndarray):
-            # If no signal, smoothly release the compressor
+        if not isinstance(signal_in, torch.Tensor):
             with self._lock:
                 self._compressor_gain_db = self._release_coeff * self._compressor_gain_db
             return {"out": None, "gain_reduction_db": self._compressor_gain_db}
 
         state_update_needed = False
         with self._lock:
-            # --- Update state from sockets, setting flag if changed ---
             params = ["threshold_db", "ratio", "attack_ms", "release_ms", "knee_db", "makeup_gain_db"]
             for p in params:
                 socket_val = input_data.get(p)
@@ -237,44 +239,40 @@ class DynamicRangeCompressorNode(Node):
                     if getattr(self, f"_{p}") != float(socket_val):
                         setattr(self, f"_{p}", float(socket_val))
                         state_update_needed = True
-
-            if state_update_needed and (
-                "attack_ms" in [p for p in params if input_data.get(p) is not None]
-                or "release_ms" in [p for p in params if input_data.get(p) is not None]
+            if state_update_needed and any(
+                p in ["attack_ms", "release_ms"] for p, v in input_data.items() if v is not None
             ):
                 self._update_coefficients()
 
-            # --- Copy state to local variables for processing ---
-            threshold = self._threshold_db
-            ratio = self._ratio
-            knee = self._knee_db
-            attack_c = self._attack_coeff
-            release_c = self._release_coeff
+            threshold, ratio, knee = self._threshold_db, self._ratio, self._knee_db
+            attack_c, release_c = self._attack_coeff, self._release_coeff
             makeup_gain = self._makeup_gain_db
             detector_env = self._detector_envelope
             comp_gain = self._compressor_gain_db
 
-        # --- Emit state update AFTER releasing lock ---
         if state_update_needed:
             self.emitter.stateUpdated.emit(self.get_current_state_snapshot())
 
-        # --- Audio Processing ---
-        mono_signal = np.mean(np.abs(signal_in), axis=1) if signal_in.ndim > 1 else np.abs(signal_in)
-        output_block = np.zeros_like(signal_in)
+        # --- MODIFIED: Vectorized PyTorch Processing ---
+        # 1. Create mono signal for detector path
+        mono_signal = torch.mean(torch.abs(signal_in), dim=0)
+        output_block = torch.zeros_like(signal_in)
+        num_samples = mono_signal.shape[0]
 
-        for i in range(len(mono_signal)):
-            detector_env = max(mono_signal[i], detector_env * release_c)  # Simplified envelope follower
-            level_db = 20 * np.log10(detector_env + EPSILON)
+        # Loop is still required for the recursive envelope follower, but all math is now torch.
+        for i in range(num_samples):
+            detector_env = max(mono_signal[i].item(), detector_env * release_c)
+            level_db = 20 * torch.log10(torch.tensor(detector_env + EPSILON))
 
             over_db = level_db - threshold
             gain_reduction_db = 0.0
 
             if knee > 0 and over_db > -knee / 2:
-                if over_db < knee / 2:  # Inside knee
+                if over_db < knee / 2:
                     gain_reduction_db = (1 / ratio - 1) * (over_db + knee / 2) ** 2 / (2 * knee)
-                else:  # Above knee
+                else:
                     gain_reduction_db = (1 / ratio - 1) * over_db
-            elif over_db > 0:  # Hard knee
+            elif over_db > 0:
                 gain_reduction_db = (1 / ratio - 1) * over_db
 
             target_gain = gain_reduction_db
@@ -284,7 +282,7 @@ class DynamicRangeCompressorNode(Node):
                 comp_gain = release_c * comp_gain + (1 - release_c) * target_gain
 
             linear_gain = 10 ** ((comp_gain + makeup_gain) / 20.0)
-            output_block[i] = signal_in[i] * linear_gain
+            output_block[:, i] = signal_in[:, i] * linear_gain
 
         with self._lock:
             self._detector_envelope = detector_env
@@ -295,7 +293,7 @@ class DynamicRangeCompressorNode(Node):
             self.emitter.gainReductionUpdated.emit(comp_gain)
             self._last_ui_update_time = current_time
 
-        return {"out": output_block.astype(DEFAULT_DTYPE), "gain_reduction_db": comp_gain}
+        return {"out": output_block.to(DEFAULT_DTYPE), "gain_reduction_db": comp_gain}
 
     @staticmethod
     def _create_setter(param_name: str, min_val: float, max_val: float):
@@ -303,7 +301,8 @@ class DynamicRangeCompressorNode(Node):
             needs_coeff_update = False
             state_to_emit = None
             with self._lock:
-                clipped_value = float(np.clip(value, min_val, max_val))
+                # --- MODIFIED: Use torch.clip ---
+                clipped_value = torch.clip(torch.tensor(value), min_val, max_val).item()
                 if getattr(self, f"_{param_name}") != clipped_value:
                     setattr(self, f"_{param_name}", clipped_value)
                     if param_name in ["attack_ms", "release_ms"]:

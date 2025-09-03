@@ -1,5 +1,4 @@
-# File: additional_plugins/effects_waveshaper.py
-
+import torch
 import numpy as np
 import threading
 import logging
@@ -203,10 +202,11 @@ class WaveShaperNode(Node):
     def __init__(self, name, node_id=None):
         super().__init__(name, node_id)
         self.emitter = WaveShaperEmitter()
-        self.add_input("in", data_type=np.ndarray)
+        # --- MODIFIED: Sockets now use torch.Tensor ---
+        self.add_input("in", data_type=torch.Tensor)
         self.add_input("drive", data_type=float)
         self.add_input("mix", data_type=float)
-        self.add_output("out", data_type=np.ndarray)
+        self.add_output("out", data_type=torch.Tensor)
 
         self._lock = threading.Lock()
         self._shaper_type: ShaperType = ShaperType.SOFT_CLIP
@@ -255,7 +255,8 @@ class WaveShaperNode(Node):
 
     def process(self, input_data: dict) -> dict:
         signal = input_data.get("in")
-        if not isinstance(signal, np.ndarray):
+        # --- MODIFIED: Check for torch.Tensor ---
+        if not isinstance(signal, torch.Tensor):
             return {"out": None}
 
         state_snapshot_to_emit = None
@@ -277,32 +278,31 @@ class WaveShaperNode(Node):
                     state_snapshot_to_emit = self._get_current_state_snapshot_locked()
 
             drive = self._drive
+            mix = self._mix
             shaper_type = self._shaper_type
 
         if state_snapshot_to_emit:
             self.emitter.stateUpdated.emit(state_snapshot_to_emit)
 
-        # 1. Apply drive
+        # --- MODIFIED: All processing is now done with PyTorch ---
         driven_signal = signal * drive
-
-        # 2. Apply shaping function
         output_signal = None
+
         if shaper_type == ShaperType.SOFT_CLIP:
-            output_signal = np.tanh(driven_signal)
+            output_signal = torch.tanh(driven_signal)
         elif shaper_type == ShaperType.HARD_CLIP:
-            output_signal = np.clip(driven_signal, -1.0, 1.0)
+            output_signal = torch.clamp(driven_signal, -1.0, 1.0)
         elif shaper_type == ShaperType.FOLD:
-            output_signal = np.abs(np.mod(driven_signal + 1, 4) - 2) - 1
+            output_signal = torch.abs(torch.fmod(driven_signal + 1, 4) - 2) - 1
         elif shaper_type == ShaperType.SINE:
-            # Clip the input to [-1, 1] first to ensure the sine function maps correctly
-            clipped_driven_signal = np.clip(driven_signal, -1.0, 1.0)
-            output_signal = np.sin(0.5 * np.pi * clipped_driven_signal)
+            clipped_driven_signal = torch.clamp(driven_signal, -1.0, 1.0)
+            output_signal = torch.sin(0.5 * torch.pi * clipped_driven_signal)
 
         # Apply dry-wet mix
-        final_mix = self._mix
+        final_mix = mix
         output_signal = signal * (1 - final_mix) + output_signal * final_mix
 
-        return {"out": output_signal.astype(DEFAULT_DTYPE)}
+        return {"out": output_signal.to(DEFAULT_DTYPE)}
 
     def serialize_extra(self) -> dict:
         with self._lock:

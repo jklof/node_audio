@@ -1,3 +1,4 @@
+import torch
 import numpy as np
 import scipy.signal
 import threading
@@ -11,15 +12,7 @@ from constants import DEFAULT_DTYPE, DEFAULT_SAMPLERATE, DEFAULT_BLOCKSIZE, DEFA
 
 # --- UI and Qt Imports ---
 from ui_elements import NodeItem, NODE_CONTENT_PADDING
-from PySide6.QtWidgets import (
-    QWidget,
-    QLabel,
-    QComboBox,
-    QDial,
-    QVBoxLayout,
-    QHBoxLayout,
-    QSizePolicy,
-)
+from PySide6.QtWidgets import QWidget, QLabel, QComboBox, QDial, QVBoxLayout, QHBoxLayout, QSizePolicy
 from PySide6.QtCore import Qt, Slot, QSignalBlocker, Signal, QObject
 from PySide6.QtGui import QFontMetrics
 
@@ -96,8 +89,8 @@ class NoiseGeneratorNodeItem(NodeItem):
         level_label_vbox.addWidget(self.level_title_label)
         level_label_vbox.addWidget(self.level_value_label)
 
-        level_controls_layout.addWidget(self.level_dial)
         level_controls_layout.addLayout(level_label_vbox)
+        level_controls_layout.addWidget(self.level_dial)
         main_layout.addLayout(level_controls_layout)
 
         self.setContentWidget(self.container_widget)
@@ -164,7 +157,7 @@ class NoiseGeneratorNode(Node):
         super().__init__(name, node_id)
         self.emitter = NoiseGeneratorEmitter()
         self.add_input("level", data_type=float)
-        self.add_output("out", data_type=np.ndarray)
+        self.add_output("out", data_type=torch.Tensor)
 
         self._lock = threading.Lock()
         self.samplerate = DEFAULT_SAMPLERATE
@@ -173,39 +166,47 @@ class NoiseGeneratorNode(Node):
         self._noise_type: NoiseType = NoiseType.WHITE
         self._level: float = 0.5
 
-        # Filter states
-        self._b_pink = np.array([0.049922035, -0.095993537, 0.050612699, -0.004408786])
-        self._a_pink = np.array([1, -2.494956002, 2.017265875, -0.522189400])
-        self._b_brown, self._a_brown = None, None
-        self._b_blue, self._a_blue = None, None
-        self._b_violet, self._a_violet = None, None
-        self._zi_pink, self._zi_brown, self._zi_blue, self._zi_violet = [None] * 4
+        # Filter states and coefficients will be NumPy arrays for SciPy
+        self._filter_coeffs = {}
+        self._filter_states = {}
 
         self._init_filter_coeffs_and_states()
         logger.info(f"NoiseGeneratorNode [{self.name}] initialized.")
 
     def _init_filter_coeffs_and_states(self):
+        """Initialize SciPy filter coefficients and state arrays."""
         nyquist = self.samplerate / 2.0
+        # Pink Noise approximation
+        b_pink = np.array([0.049922035, -0.095993537, 0.050612699, -0.004408786])
+        a_pink = np.array([1, -2.494956002, 2.017265875, -0.522189400])
         # Brown Noise: 1st order LPF @ 40Hz
-        self._b_brown, self._a_brown = scipy.signal.butter(1, 40.0 / nyquist, btype="low")
+        b_brown, a_brown = scipy.signal.butter(1, 40.0 / nyquist, btype="low")
         # Blue Noise: 1st order HPF @ 1000Hz
-        self._b_blue, self._a_blue = scipy.signal.butter(1, 1000.0 / nyquist, btype="high")
+        b_blue, a_blue = scipy.signal.butter(1, 1000.0 / nyquist, btype="high")
         # Violet Noise: 2nd order HPF @ 4000Hz
-        self._b_violet, self._a_violet = scipy.signal.butter(2, 4000.0 / nyquist, btype="high")
+        b_violet, a_violet = scipy.signal.butter(2, 4000.0 / nyquist, btype="high")
 
-        # Reset initial filter conditions (zi)
-        self._zi_pink = scipy.signal.lfilter_zi(self._b_pink, self._a_pink) * 0.0
-        self._zi_brown = scipy.signal.lfilter_zi(self._b_brown, self._a_brown) * 0.0
-        self._zi_blue = scipy.signal.lfilter_zi(self._b_blue, self._a_blue) * 0.0
-        self._zi_violet = scipy.signal.lfilter_zi(self._b_violet, self._a_violet) * 0.0
-        logger.debug(f"[{self.name}] Filters initialized for samplerate {self.samplerate}Hz.")
+        self._filter_coeffs = {
+            NoiseType.PINK: (b_pink, a_pink),
+            NoiseType.BROWN: (b_brown, a_brown),
+            NoiseType.BLUE: (b_blue, a_blue),
+            NoiseType.VIOLET: (b_violet, a_violet),
+        }
 
-    def get_current_state_snapshot(self, locked: bool = False) -> Dict:
-        """Returns a copy of the current parameters for UI synchronization."""
-        if locked:
-            return {"noise_type": self._noise_type, "level": self._level}
+        # Reset initial filter conditions (zi) for each channel
+        for nt, (b, a) in self._filter_coeffs.items():
+            zi = scipy.signal.lfilter_zi(b, a)
+            # The shape must be (num_channels, filter_order)
+            self._filter_states[nt] = np.tile(zi, (self.channels, 1))
+
+        logger.debug(f"[{self.name}] Filters initialized for {self.channels} channels at {self.samplerate}Hz.")
+
+    def _get_current_state_snapshot_locked(self) -> Dict:
+        return {"noise_type": self._noise_type, "level": self._level}
+
+    def get_current_state_snapshot(self) -> Dict:
         with self._lock:
-            return {"noise_type": self._noise_type, "level": self._level}
+            return self._get_current_state_snapshot_locked()
 
     @Slot(NoiseType)
     def set_noise_type(self, noise_type: NoiseType):
@@ -214,8 +215,8 @@ class NoiseGeneratorNode(Node):
             if self._noise_type != noise_type:
                 logger.info(f"[{self.name}] Changing noise type to: {noise_type.value}")
                 self._noise_type = noise_type
-                self._init_filter_coeffs_and_states()
-                state_to_emit = self.get_current_state_snapshot(locked=True)
+                # No need to re-init filters, just use the correct one
+                state_to_emit = self._get_current_state_snapshot_locked()
         if state_to_emit:
             self.emitter.stateUpdated.emit(state_to_emit)
 
@@ -226,64 +227,47 @@ class NoiseGeneratorNode(Node):
             new_level = np.clip(float(level), 0.0, 1.0)
             if self._level != new_level:
                 self._level = new_level
-                state_to_emit = self.get_current_state_snapshot(locked=True)
+                state_to_emit = self._get_current_state_snapshot_locked()
         if state_to_emit:
             self.emitter.stateUpdated.emit(state_to_emit)
 
     def process(self, input_data: dict) -> dict:
         state_snapshot_to_emit = None
         with self._lock:
-            # Prioritize socket input for level
             level_socket = input_data.get("level")
             if level_socket is not None:
                 new_level = np.clip(float(level_socket), 0.0, 1.0)
                 if abs(self._level - new_level) > 1e-6:
                     self._level = new_level
-                    state_snapshot_to_emit = self.get_current_state_snapshot(locked=True)
-
-            # Get parameters for this processing tick
+                    state_snapshot_to_emit = self._get_current_state_snapshot_locked()
             noise_type = self._noise_type
             level = self._level
-            zi_pink = self._zi_pink.copy()
-            zi_brown = self._zi_brown.copy()
-            zi_blue = self._zi_blue.copy()
-            zi_violet = self._zi_violet.copy()
 
-        # Emit signal after releasing the lock
         if state_snapshot_to_emit:
             self.emitter.stateUpdated.emit(state_snapshot_to_emit)
 
-        # Generate mono white noise with headroom
-        mono_white_noise = np.random.uniform(-0.8, 0.8, self.blocksize).astype(DEFAULT_DTYPE)
-        processed_mono_signal = mono_white_noise
+        # Generate white noise directly as a torch tensor
+        white_noise = torch.rand(self.channels, self.blocksize, dtype=DEFAULT_DTYPE) * 2.0 - 1.0
 
-        # Apply filter based on noise type
-        if noise_type == NoiseType.PINK:
-            processed_mono_signal, zf = scipy.signal.lfilter(self._b_pink, self._a_pink, mono_white_noise, zi=zi_pink)
-            with self._lock:
-                self._zi_pink = zf
-        elif noise_type == NoiseType.BROWN:
-            processed_mono_signal, zf = scipy.signal.lfilter(
-                self._b_brown, self._a_brown, mono_white_noise, zi=zi_brown
-            )
-            with self._lock:
-                self._zi_brown = zf
-        elif noise_type == NoiseType.BLUE:
-            processed_mono_signal, zf = scipy.signal.lfilter(self._b_blue, self._a_blue, mono_white_noise, zi=zi_blue)
-            with self._lock:
-                self._zi_blue = zf
-        elif noise_type == NoiseType.VIOLET:
-            processed_mono_signal, zf = scipy.signal.lfilter(
-                self._b_violet, self._a_violet, mono_white_noise, zi=zi_violet
-            )
-            with self._lock:
-                self._zi_violet = zf
+        if noise_type == NoiseType.WHITE:
+            processed_signal = white_noise
+        else:
+            # Hybrid approach: Convert to NumPy for fast filtering
+            white_noise_np = white_noise.numpy()
 
-        processed_mono_signal *= level
-        np.clip(processed_mono_signal, -1.0, 1.0, out=processed_mono_signal)
-        output_block = np.tile(processed_mono_signal[:, np.newaxis], (1, self.channels))
+            with self._lock:  # Lock only when accessing shared filter state
+                b, a = self._filter_coeffs[noise_type]
+                zi = self._filter_states[noise_type]
+                processed_signal_np, zf = scipy.signal.lfilter(b, a, white_noise_np, axis=1, zi=zi)
+                self._filter_states[noise_type] = zf
 
-        return {"out": output_block.astype(DEFAULT_DTYPE)}
+            # Convert back to a torch tensor
+            processed_signal = torch.from_numpy(processed_signal_np.astype(np.float32))
+
+        # Apply level and clipping
+        output_block = torch.clamp(processed_signal * level, -1.0, 1.0)
+
+        return {"out": output_block}
 
     def start(self):
         with self._lock:

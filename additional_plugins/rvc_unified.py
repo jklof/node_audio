@@ -1,10 +1,3 @@
-# File: plugins/rvc_unified.py
-# DESCRIPTION: A single, synchronized node for the entire RVC pipeline.
-# VERSION: CONTEXTUAL_SOLA_FINAL - Implements a voice_changer-inspired
-# sliding window with extra pre-buffer context. This provides the model with
-# "look-behind" audio, ensuring phase-coherent output and eliminating the
-# robotic artifacts and buzzes caused by stateless chunk processing.
-
 import os
 import json
 import torch
@@ -197,7 +190,6 @@ class RVCUnifiedNodeItem(NodeItem):
         sola_layout.addLayout(sola_search_layout)
         layout.addLayout(sola_layout)
 
-        # --- FIX: Added UI control for the pre-buffer context ---
         prebuffer_layout = QVBoxLayout()
         self.prebuffer_spin = QSpinBox()
         self.prebuffer_spin.setRange(0, 1000)
@@ -209,7 +201,6 @@ class RVCUnifiedNodeItem(NodeItem):
         prebuffer_layout.addWidget(QLabel("Pre-Buffer (ms):"))
         prebuffer_layout.addWidget(self.prebuffer_spin)
         layout.addLayout(prebuffer_layout)
-        # --- END FIX ---
 
         status_layout = QHBoxLayout()
         self.status_label = QLabel("Status: Idle")
@@ -237,7 +228,6 @@ class RVCUnifiedNodeItem(NodeItem):
         self.chunk_spin.valueChanged.connect(self.node_logic.set_chunk_size_ms)
         self.crossfade_spin.valueChanged.connect(self.node_logic.set_crossfade_ms)
         self.sola_search_spin.valueChanged.connect(self.node_logic.set_sola_search_ms)
-        # --- FIX: Connect the new pre-buffer UI control ---
         self.prebuffer_spin.valueChanged.connect(self.node_logic.set_extra_conversion_ms)
 
         self.ui_updater = QTimer(self)
@@ -298,7 +288,6 @@ class RVCUnifiedNodeItem(NodeItem):
             self.crossfade_spin.setValue(state.get("crossfade_ms", 100))
         with QSignalBlocker(self.sola_search_spin):
             self.sola_search_spin.setValue(state.get("sola_search_ms", 10))
-        # --- FIX: Update the new pre-buffer spinbox from state ---
         with QSignalBlocker(self.prebuffer_spin):
             self.prebuffer_spin.setValue(state.get("extra_conversion_ms", 100))
 
@@ -337,8 +326,9 @@ class RVCUnifiedNode(Node):
 
     def __init__(self, name: str, node_id: Optional[str] = None):
         super().__init__(name, node_id)
-        self.add_input("audio_in", data_type=np.ndarray)
-        self.add_output("audio_out", data_type=np.ndarray)
+        # --- MODIFIED: Sockets now use torch.Tensor ---
+        self.add_input("audio_in", data_type=torch.Tensor)
+        self.add_output("audio_out", data_type=torch.Tensor)
         self._lock = threading.Lock()
 
         self._model_paths = {"rvc": None, "rmvpe": None}
@@ -366,12 +356,14 @@ class RVCUnifiedNode(Node):
         self._status: str = "Idle"
         self._is_processing = False
         self._is_strained = False
-        self._input_buffer = np.array([], dtype=DEFAULT_DTYPE)
-        self._output_buffer = np.array([], dtype=DEFAULT_DTYPE)
-        self._last_valid_output = np.zeros(DEFAULT_BLOCKSIZE, dtype=DEFAULT_DTYPE)
+        # --- MODIFIED: Buffers are now torch.Tensors ---
+        self._input_buffer = torch.tensor([], dtype=DEFAULT_DTYPE)
+        self._output_buffer = torch.tensor([], dtype=DEFAULT_DTYPE)
+        self._last_valid_output = torch.zeros(DEFAULT_BLOCKSIZE, dtype=DEFAULT_DTYPE)
         self._stop_event = threading.Event()
         self._worker_thread: Optional[threading.Thread] = None
 
+        # SOLA buffers remain NumPy as the algorithm is NumPy-based
         self._sola_buffer: Optional[np.ndarray] = None
         self._np_prev_strength: Optional[np.ndarray] = None
         self._np_cur_strength: Optional[np.ndarray] = None
@@ -438,8 +430,8 @@ class RVCUnifiedNode(Node):
             if self._last_crossfade_ms == self._crossfade_ms:
                 return
             if crossfade_samples <= 0:
-                self._np_prev_strength = np.array([], dtype=DEFAULT_DTYPE)
-                self._np_cur_strength = np.array([], dtype=DEFAULT_DTYPE)
+                self._np_prev_strength = np.array([], dtype=np.float32)
+                self._np_cur_strength = np.array([], dtype=np.float32)
             else:
                 fade_range = np.arange(crossfade_samples) / crossfade_samples
                 self._np_prev_strength = np.cos(fade_range * 0.5 * np.pi) ** 2
@@ -456,21 +448,19 @@ class RVCUnifiedNode(Node):
                 sola_search_samples = int(self._sola_search_ms / 1000 * DEFAULT_SAMPLERATE)
                 extra_samples = int(self._extra_conversion_ms / 1000 * DEFAULT_SAMPLERATE)
 
-                # --- FIX: This is the total audio needed for one full conversion cycle ---
                 required_input_len = chunk_samples + crossfade_samples + sola_search_samples + extra_samples
 
-                has_enough_data = len(self._input_buffer) >= required_input_len
-                self._is_strained = len(self._input_buffer) > required_input_len * MAX_BUFFER_CHUNKS_INPUT
+                # --- MODIFIED: Use tensor shape for length check ---
+                has_enough_data = self._input_buffer.shape[0] >= required_input_len
+                self._is_strained = self._input_buffer.shape[0] > required_input_len * MAX_BUFFER_CHUNKS_INPUT
 
             if has_enough_data and self._are_all_models_loaded():
                 try:
                     with self._lock:
-                        # --- FIX: Slice the required audio from the end of the input buffer ---
-                        audio_to_process = self._input_buffer[-required_input_len:]
-                        # --- FIX: Slide the buffer window forward, keeping the context for the next round ---
+                        # --- MODIFIED: Slice the tensor buffer ---
+                        audio_to_process_tensor = self._input_buffer[-required_input_len:]
                         self._input_buffer = self._input_buffer[-(required_input_len - chunk_samples) :]
 
-                        # (Copying state variables to local scope remains the same)
                         hubert_model, rmvpe_session, rvc_session = (
                             self._hubert_model,
                             self._rmvpe_session,
@@ -488,17 +478,18 @@ class RVCUnifiedNode(Node):
                             self._model_sr,
                         )
 
-                    # VAD check on the actual chunk that will be output (after the pre-buffer)
-                    vad_check_region = audio_to_process[extra_samples : extra_samples + chunk_samples]
-                    rms = np.sqrt(np.mean(np.square(vad_check_region)) + EPSILON)
+                    # --- MODIFIED: VAD check on the tensor ---
+                    vad_check_region = audio_to_process_tensor[extra_samples : extra_samples + chunk_samples]
+                    rms = torch.sqrt(torch.mean(torch.square(vad_check_region)) + EPSILON)
 
                     if vad_enabled and rms < silent_threshold:
-                        # If silent, generate silence for the output chunk length
-                        stable_audio_out = np.zeros(chunk_samples, dtype=DEFAULT_DTYPE)
+                        stable_audio_out = np.zeros(chunk_samples, dtype=np.float32)
                     else:
-                        # Full processing path
+                        # --- MODIFIED: Convert tensor to NumPy array for processing ---
+                        audio_to_process_np = audio_to_process_tensor.numpy()
+
                         audio_16k = resampy.resample(
-                            np.ascontiguousarray(audio_to_process),
+                            np.ascontiguousarray(audio_to_process_np),
                             sr_orig=DEFAULT_SAMPLERATE,
                             sr_new=RVC_REQUIRED_SR,
                             filter="kaiser_fast",
@@ -530,12 +521,11 @@ class RVCUnifiedNode(Node):
 
                         audio_out_model_sr = rvc_session.run(["audio"], input_dict)[0].squeeze()
 
-                        # --- CRITICAL FIX: DISCARD PRE-BUFFER OUTPUT ---
                         extra_samples_at_model_sr = int(self._extra_conversion_ms / 1000 * model_sr)
                         stable_audio_out_model_sr = audio_out_model_sr[extra_samples_at_model_sr:]
 
                         if len(stable_audio_out_model_sr) == 0:
-                            stable_audio_out = np.zeros(chunk_samples, dtype=DEFAULT_DTYPE)
+                            stable_audio_out = np.zeros(chunk_samples, dtype=np.float32)
                         elif model_sr != DEFAULT_SAMPLERATE:
                             stable_audio_out = resampy.resample(
                                 np.ascontiguousarray(stable_audio_out_model_sr),
@@ -546,7 +536,6 @@ class RVCUnifiedNode(Node):
                         else:
                             stable_audio_out = stable_audio_out_model_sr
 
-                    # Perform SOLA stitching with the high-quality, stable output
                     self._perform_sola_stitching(
                         stable_audio_out, chunk_samples, crossfade_samples, sola_search_samples
                     )
@@ -574,12 +563,12 @@ class RVCUnifiedNode(Node):
                     else:
                         sola_offset = 0
 
-                output_block = stable_audio_out[sola_offset : sola_offset + chunk_samples]
+                output_block_np = stable_audio_out[sola_offset : sola_offset + chunk_samples]
 
-                if crossfade_samples > 0 and len(output_block) >= crossfade_samples:
-                    min_len = min(len(output_block), len(self._sola_buffer), len(self._np_cur_strength))
-                    output_block[:min_len] *= self._np_cur_strength[:min_len]
-                    output_block[:min_len] += self._sola_buffer[:min_len]
+                if crossfade_samples > 0 and len(output_block_np) >= crossfade_samples:
+                    min_len = min(len(output_block_np), len(self._sola_buffer), len(self._np_cur_strength))
+                    output_block_np[:min_len] *= self._np_cur_strength[:min_len]
+                    output_block_np[:min_len] += self._sola_buffer[:min_len]
 
                 buffer_start_idx = sola_offset + chunk_samples
                 sola_slice = stable_audio_out[buffer_start_idx : buffer_start_idx + crossfade_samples]
@@ -591,7 +580,7 @@ class RVCUnifiedNode(Node):
                 self._sola_buffer = padded_slice * self._np_prev_strength
             else:
                 logger.info(f"[{self.name}] Priming SOLA buffer.")
-                output_block = stable_audio_out[:chunk_samples]
+                output_block_np = stable_audio_out[:chunk_samples]
                 sola_slice = stable_audio_out[chunk_samples : chunk_samples + crossfade_samples]
                 padded_slice = (
                     np.pad(sola_slice, (0, crossfade_samples - len(sola_slice)), "constant")
@@ -600,7 +589,9 @@ class RVCUnifiedNode(Node):
                 )
                 self._sola_buffer = padded_slice * self._np_prev_strength
 
-            self._output_buffer = np.concatenate((self._output_buffer, output_block))
+            # --- MODIFIED: Convert output NumPy block to a tensor and append to buffer ---
+            output_block_tensor = torch.from_numpy(output_block_np.astype(np.float32))
+            self._output_buffer = torch.cat((self._output_buffer, output_block_tensor))
 
     @Slot(str, str)
     def set_model_path(self, model_type: str, path: str):
@@ -681,40 +672,43 @@ class RVCUnifiedNode(Node):
                 "is_strained": self._is_strained,
                 "status": self._status,
                 "info": info,
-                "input_buffer_len_ms": len(self._input_buffer) / DEFAULT_SAMPLERATE * 1000,
-                "output_buffer_len_ms": len(self._output_buffer) / DEFAULT_SAMPLERATE * 1000,
+                "input_buffer_len_ms": self._input_buffer.shape[0] / DEFAULT_SAMPLERATE * 1000,
+                "output_buffer_len_ms": self._output_buffer.shape[0] / DEFAULT_SAMPLERATE * 1000,
             }
 
     def process(self, input_data: dict) -> dict:
         audio_in = input_data.get("audio_in")
         with self._lock:
-            if audio_in is not None:
-                mono_signal = np.mean(audio_in, axis=1) if audio_in.ndim > 1 else audio_in
-                self._input_buffer = np.concatenate((self._input_buffer, mono_signal.astype(DEFAULT_DTYPE)))
+            # --- MODIFIED: Process input tensor ---
+            if isinstance(audio_in, torch.Tensor):
+                mono_signal = torch.mean(audio_in, dim=0) if audio_in.ndim > 1 else audio_in
+                self._input_buffer = torch.cat((self._input_buffer, mono_signal.to(DEFAULT_DTYPE)))
 
-            if len(self._output_buffer) >= DEFAULT_BLOCKSIZE:
+            if self._output_buffer.shape[0] >= DEFAULT_BLOCKSIZE:
                 final_output_block = self._output_buffer[:DEFAULT_BLOCKSIZE]
                 self._output_buffer = self._output_buffer[DEFAULT_BLOCKSIZE:]
                 self._last_valid_output = final_output_block
             else:
                 final_output_block = self._last_valid_output
 
-        return {"audio_out": final_output_block.reshape(-1, 1)}
+        # --- MODIFIED: Reshape tensor for output (1, samples) ---
+        return {"audio_out": final_output_block.unsqueeze(0)}
 
     def start(self):
         with self._lock:
-            # --- FIX: The initial padding must now account for the pre-buffer and other context ---
             crossfade_samples = int(self._crossfade_ms / 1000 * DEFAULT_SAMPLERATE)
             sola_search_samples = int(self._sola_search_ms / 1000 * DEFAULT_SAMPLERATE)
             extra_samples = int(self._extra_conversion_ms / 1000 * DEFAULT_SAMPLERATE)
             initial_pad_len = extra_samples + crossfade_samples + sola_search_samples
 
-            self._input_buffer = np.zeros(initial_pad_len, dtype=DEFAULT_DTYPE)
-            self._output_buffer = np.array([], dtype=DEFAULT_DTYPE)
+            # --- MODIFIED: Use torch to initialize buffers ---
+            self._input_buffer = torch.zeros(initial_pad_len, dtype=DEFAULT_DTYPE)
+            self._output_buffer = torch.tensor([], dtype=DEFAULT_DTYPE)
             self._sola_buffer = None
-            self._last_valid_output = np.zeros(DEFAULT_BLOCKSIZE, dtype=DEFAULT_DTYPE)
+            self._last_valid_output = torch.zeros(DEFAULT_BLOCKSIZE, dtype=DEFAULT_DTYPE)
             self._is_processing = True
             self._is_strained = False
+
         self._stop_event.clear()
         self._worker_thread = threading.Thread(target=self._pipeline_worker_loop, daemon=True)
         self._worker_thread.start()

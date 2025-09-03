@@ -1,4 +1,5 @@
 import numpy as np
+import torch
 import time
 import logging
 import threading
@@ -48,7 +49,7 @@ class DataDisplayNodeItem(NodeItem):
             return "Type: None"
 
         lines = []
-        # --- NEW: Handle SpectralFrame ---
+        # --- Handle SpectralFrame ---
         if stats.get("is_spectral_frame"):
             lines.append("Type: SpectralFrame")
             if "error" in stats:
@@ -59,7 +60,7 @@ class DataDisplayNodeItem(NodeItem):
                 lines.append(
                     f"FFT/Hop/Win: {stats.get('fft_size', 'N/A')} / {stats.get('hop_size', 'N/A')} / {stats.get('window_size', 'N/A')}"
                 )
-                # New stats for the complex data
+                # Stats for the complex data magnitude
                 lines.append(f"Mag. Min: {stats.get('mag_min', 'N/A'):.3f}")
                 lines.append(f"Mag. Max: {stats.get('mag_max', 'N/A'):.3f}")
                 lines.append(f"Mag. Mean: {stats.get('mag_mean', 'N/A'):.3f}")
@@ -67,7 +68,7 @@ class DataDisplayNodeItem(NodeItem):
         elif "value" in stats and "dtype" in stats:
             lines.append(f"Type: {stats['dtype']}")
             lines.append(f"Value: {stats['value']:.3f}")
-        # Check for array stats
+        # Check for array/tensor stats
         elif "shape" in stats and "dtype" in stats:
             lines.append(f"Shape: {stats['shape']}")
             lines.append(f"Type: {stats['dtype']}")
@@ -103,7 +104,7 @@ class DataDisplayNodeItem(NodeItem):
 class DataDisplayNode(Node):
     NODE_TYPE = "Data Display"
     CATEGORY = "Visualization"
-    DESCRIPTION = "Displays statistics for numpy arrays, floats, or spectral frames."
+    DESCRIPTION = "Displays statistics for Tensors, floats, or spectral frames."
     UI_CLASS = DataDisplayNodeItem
 
     class WrappedSignal(QObject):
@@ -150,26 +151,44 @@ class DataDisplayNode(Node):
 
             if signal is None:
                 new_stats = {"None": 0}
-            # --- NEW: Handle SpectralFrame ---
+            # Handle SpectralFrame
             elif isinstance(signal, SpectralFrame):
                 try:
-                    mag = np.abs(signal.data)  # Get magnitude
+                    mag = torch.abs(signal.data)  # Get magnitude
                     new_stats = {
                         "is_spectral_frame": True,
                         "data_shape": str(signal.data.shape),
-                        "data_dtype": str(signal.data.dtype),
+                        "data_dtype": str(signal.data.dtype).replace("torch.", ""),
                         "fft_size": signal.fft_size,
                         "hop_size": signal.hop_size,
                         "window_size": signal.window_size,
-                        # New: add stats about the magnitude
-                        "mag_min": np.min(mag),
-                        "mag_max": np.max(mag),
-                        "mag_mean": np.mean(mag),
+                        "mag_min": torch.min(mag).item(),
+                        "mag_max": torch.max(mag).item(),
+                        "mag_mean": torch.mean(mag).item(),
                     }
                 except Exception as e:
                     logger.error(f"DataDisplayNode [{self.name}]: Error analyzing SpectralFrame: {e}", exc_info=False)
                     new_stats = {"is_spectral_frame": True, "error": str(e)}
-            # Handle NumPy arrays
+            # Handle torch.Tensors
+            elif isinstance(signal, torch.Tensor) and signal.numel() > 0:
+                try:
+                    # If complex, analyze magnitude. Otherwise, analyze the real values.
+                    tensor_to_analyze = torch.abs(signal) if signal.is_complex() else signal
+                    new_stats = {
+                        "shape": str(signal.shape),
+                        "dtype": str(signal.dtype).replace("torch.", ""),
+                        "mean": torch.mean(tensor_to_analyze.float()).item(),
+                        "std": torch.std(tensor_to_analyze.float()).item(),
+                        "min": torch.min(tensor_to_analyze).item(),
+                        "max": torch.max(tensor_to_analyze).item(),
+                    }
+                except Exception as e:
+                    new_stats = {
+                        "shape": str(signal.shape),
+                        "dtype": str(signal.dtype).replace("torch.", ""),
+                        "error": str(e),
+                    }
+            # Handle NumPy arrays (for compatibility)
             elif isinstance(signal, np.ndarray) and signal.size > 0:
                 try:
                     new_stats = {
@@ -182,8 +201,8 @@ class DataDisplayNode(Node):
                     }
                 except Exception as e:
                     new_stats = {"shape": str(signal.shape), "dtype": str(signal.dtype), "error": str(e)}
-            # Handle Floats, Integers
-            elif isinstance(signal, (float, int, np.number)):
+            # Handle standard Python Floats and Integers
+            elif isinstance(signal, (float, int)):
                 try:
                     new_stats = {"value": float(signal), "dtype": type(signal).__name__}
                 except Exception as e:

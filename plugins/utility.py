@@ -1,5 +1,4 @@
-# === File: plugins/utility.py ===
-
+import torch
 import numpy as np
 import threading
 import logging
@@ -162,7 +161,7 @@ class RouteNode(Node):
     def __init__(self, name, node_id=None):
         super().__init__(name, node_id)
         # Use None for data_type to allow any type (more flexible routing)
-        # Or keep np.ndarray if only audio routing is intended
+        # Or keep torch.Tensor if only audio routing is intended
         self.add_input("in", data_type=None)
         self.add_output("out", data_type=None)
         logger.debug(f"RouteNode [{self.name}] initialized.")
@@ -192,7 +191,7 @@ class SignalAnalyzer(Node):
         super().__init__(name, node_id)
 
         # --- Sockets ---
-        self.add_input("in", data_type=np.ndarray)
+        self.add_input("in", data_type=torch.Tensor)
         self.add_output("rms", data_type=float)
         self.add_output("peak", data_type=float)
         self.add_output("crest_factor", data_type=float)
@@ -212,41 +211,41 @@ class SignalAnalyzer(Node):
         }
 
         # --- Handle Invalid Input ---
-        if signal is None or not isinstance(signal, np.ndarray) or signal.size == 0:
+        if signal is None or not isinstance(signal, torch.Tensor) or signal.numel() == 0:
             return stats
 
         # --- Signal Analysis ---
         try:
             # Ensure float dtype for calculations and get a mono signal
-            signal = signal.astype(DEFAULT_DTYPE)
+            signal = signal.to(DEFAULT_DTYPE)
             if signal.ndim > 1:
-                # Average across channels (axis=0) to get a mono representation
-                mono_signal = np.mean(signal, axis=0)
+                # Average across channels (dim=0) to get a mono representation
+                mono_signal = torch.mean(signal, dim=0)
             else:
                 mono_signal = signal
 
             # RMS (Root Mean Square) - A measure of loudness
-            rms = np.sqrt(np.mean(np.square(mono_signal)))
+            rms = torch.sqrt(torch.mean(torch.square(mono_signal)))
 
             # Peak - The maximum absolute amplitude
-            peak = np.max(np.abs(mono_signal))
+            peak = torch.max(torch.abs(mono_signal))
 
             # Crest Factor - Ratio of peak to RMS. Indicates dynamic range.
             crest = peak / (rms + EPSILON)  # Add epsilon to prevent division by zero
 
             # DC Offset - The average of all samples (should be near zero)
-            dc_offset = np.mean(mono_signal)
+            dc_offset = torch.mean(mono_signal)
 
             # Zero-Crossing Rate (ZCR) - A simple measure of spectral brightness
             # Normalized to be between 0 and 1
-            zcr = np.mean(np.abs(np.diff(np.sign(mono_signal)))) / 2.0
+            zcr = torch.mean(torch.abs(torch.diff(torch.sign(mono_signal)))) / 2.0
 
             stats = {
-                "rms": float(rms),
-                "peak": float(peak),
-                "crest_factor": float(crest),
-                "dc_offset": float(dc_offset),
-                "zero_crossing_rate": float(zcr),
+                "rms": rms.item(),
+                "peak": peak.item(),
+                "crest_factor": crest.item(),
+                "dc_offset": dc_offset.item(),
+                "zero_crossing_rate": zcr.item(),
             }
         except Exception as e:
             logger.error(f"[{self.name}] Error during calculation: {e}", exc_info=True)

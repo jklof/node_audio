@@ -4,12 +4,13 @@ import logging
 import weakref
 from typing import Dict, Optional
 
-import numpy as np
+import torch
+import numpy as np  # Kept for UI slider mapping
 import soundfile as sf
-import resampy
+import torchaudio.transforms as T
 
 from node_system import Node
-from constants import DEFAULT_SAMPLERATE, DEFAULT_BLOCKSIZE, DEFAULT_DTYPE
+from constants import DEFAULT_SAMPLERATE, DEFAULT_BLOCKSIZE, DEFAULT_DTYPE, DEFAULT_CHANNELS
 from ui_elements import NodeItem, NODE_CONTENT_PADDING
 
 from PySide6.QtCore import Qt, Signal, Slot, QObject, QRunnable, QThreadPool
@@ -35,12 +36,18 @@ class SampleLoadRunnable(QRunnable):
 
     def run(self):
         try:
-            audio_data, source_sr = sf.read(self.file_path, dtype="float32", always_2d=True)
+            # Load as numpy array (samples, channels)
+            audio_data_np, source_sr = sf.read(self.file_path, dtype="float32", always_2d=True)
+            # Convert to torch tensor and transpose to (channels, samples)
+            audio_data = torch.from_numpy(audio_data_np.T)
+
+            # Use torchaudio for resampling
             if source_sr != self.target_sr:
-                audio_data = resampy.resample(audio_data, source_sr, self.target_sr, filter="kaiser_fast")
+                resampler = T.Resample(orig_freq=source_sr, new_freq=self.target_sr, dtype=audio_data.dtype)
+                audio_data = resampler(audio_data)  # Input is (channels, time)
 
             # Normalize
-            max_val = np.max(np.abs(audio_data))
+            max_val = torch.max(torch.abs(audio_data))
             if max_val > 0:
                 audio_data /= max_val
 
@@ -132,7 +139,7 @@ class SampleNode(Node):
 
         self.add_input("trigger", data_type=bool)
         self.add_input("pitch", data_type=float)
-        self.add_output("out", data_type=np.ndarray)
+        self.add_output("out", data_type=torch.Tensor)
         self.add_output("on_end", data_type=bool)
 
         self._lock = threading.Lock()
@@ -140,7 +147,7 @@ class SampleNode(Node):
         self._status: str = "No Sample"
         self._is_loading: bool = False
 
-        self._audio_data: Optional[np.ndarray] = None
+        self._audio_data: Optional[torch.Tensor] = None
         self._play_pos: float = 0.0
         self._is_playing: bool = False
         self._prev_trigger: bool = False
@@ -156,9 +163,8 @@ class SampleNode(Node):
             self._is_loading = True
             self._filepath = file_path
             self._status = "Loading..."
-            state_to_emit = self.get_current_state_snapshot(locked=True)
+            state_to_emit = self._get_current_state_snapshot_locked()
 
-        # Emit signal after lock is released
         if state_to_emit:
             self.emitter.stateUpdated.emit(state_to_emit)
 
@@ -181,17 +187,17 @@ class SampleNode(Node):
             else:
                 self._audio_data = None
                 self._status = f"Error: {data}"
-            state_to_emit = self.get_current_state_snapshot(locked=True)
+            state_to_emit = self._get_current_state_snapshot_locked()
 
-        # Emit signal after lock is released
         if state_to_emit:
             self.emitter.stateUpdated.emit(state_to_emit)
 
-    def get_current_state_snapshot(self, locked: bool = False) -> Dict:
-        if locked:
-            return {"status": self._status, "filepath": self._filepath}
+    def _get_current_state_snapshot_locked(self) -> Dict:
+        return {"status": self._status, "filepath": self._filepath}
+
+    def get_current_state_snapshot(self) -> Dict:
         with self._lock:
-            return {"status": self._status, "filepath": self._filepath}
+            return self._get_current_state_snapshot_locked()
 
     def process(self, input_data: dict) -> dict:
         trigger_in = input_data.get("trigger")
@@ -201,10 +207,11 @@ class SampleNode(Node):
         pitch = float(pitch_in) if pitch_in is not None else 1.0
 
         on_end_signal = False
-        output_block = np.zeros((DEFAULT_BLOCKSIZE, 2), dtype=DEFAULT_DTYPE)
+        # Output block is (channels, samples)
+        output_block = torch.zeros((DEFAULT_CHANNELS, DEFAULT_BLOCKSIZE), dtype=DEFAULT_DTYPE)
 
         with self._lock:
-            if self._audio_data is None or self._audio_data.shape[0] < 2:
+            if self._audio_data is None or self._audio_data.shape[1] < 2:  # Check for samples
                 return {"out": output_block, "on_end": False}
 
             # Rising edge trigger
@@ -214,40 +221,36 @@ class SampleNode(Node):
             self._prev_trigger = trigger
 
             if self._is_playing:
-                num_frames_total = self._audio_data.shape[0]
-                num_channels_sample = self._audio_data.shape[1]
+                num_channels_sample, num_frames_total = self._audio_data.shape
 
                 # 1. Generate floating-point sample indices for this block
-                indices = self._play_pos + np.arange(DEFAULT_BLOCKSIZE) * pitch
+                indices = self._play_pos + torch.arange(DEFAULT_BLOCKSIZE, dtype=torch.float32) * pitch
 
-                # 2. Find which indices are valid for interpolation.
-                # The upper bound is num_frames_total - 1 because we need to access index + 1.
+                # 2. Find which indices are valid for interpolation
                 valid_mask = indices < (num_frames_total - 1)
                 valid_float_indices = indices[valid_mask]
 
                 num_valid = len(valid_float_indices)
                 if num_valid > 0:
-                    # 3. Calculate floor indices and fractional parts for interpolation
-                    indices_floor = valid_float_indices.astype(int)
+                    # 3. Calculate floor indices and fractional parts
+                    indices_floor = valid_float_indices.long()
                     indices_ceil = indices_floor + 1
-                    fraction = (valid_float_indices - indices_floor)[:, np.newaxis]  # Reshape for broadcasting
+                    fraction = (valid_float_indices - indices_floor).unsqueeze(0)  # Shape (1, num_valid)
 
                     # 4. Get sample data for floor and ceil indices
-                    sample_floor = self._audio_data[indices_floor, :]
-                    sample_ceil = self._audio_data[indices_ceil, :]
+                    sample_floor = self._audio_data[:, indices_floor]
+                    sample_ceil = self._audio_data[:, indices_ceil]
 
                     # 5. Perform linear interpolation
                     interpolated_samples = sample_floor * (1.0 - fraction) + sample_ceil * fraction
 
                     # 6. Channel matching for the output block
+                    num_output_channels = output_block.shape[0]
                     if num_channels_sample == 1:
-                        # Mono sample -> Stereo output
-                        output_block[:num_valid, 0] = interpolated_samples[:, 0]
-                        output_block[:num_valid, 1] = interpolated_samples[:, 0]
+                        output_block[:, :num_valid] = interpolated_samples.expand(num_output_channels, -1)
                     else:
-                        # Stereo or more -> Stereo output (take first two channels)
-                        output_block[:num_valid, 0] = interpolated_samples[:, 0]
-                        output_block[:num_valid, 1] = interpolated_samples[:, 1]
+                        ch_to_copy = min(num_output_channels, num_channels_sample)
+                        output_block[:ch_to_copy, :num_valid] = interpolated_samples[:ch_to_copy, :]
 
                 # Update play position
                 self._play_pos += DEFAULT_BLOCKSIZE * pitch

@@ -17,7 +17,6 @@ try:
 except ImportError:
     RVC_HUBERT_DEPS_AVAILABLE = False
 
-    # Define a dummy class if dependencies are missing
     class RVCContentEncoder:
         pass
 
@@ -25,7 +24,9 @@ except ImportError:
 # --- Node System Imports ---
 from node_system import Node
 from ui_elements import NodeItem, NODE_CONTENT_PADDING
-from constants import DEFAULT_SAMPLERATE
+
+# --- MODIFIED: Import torch.Tensor ---
+from constants import DEFAULT_SAMPLERATE, torch
 
 # --- Qt Imports ---
 from PySide6.QtCore import Qt, QTimer, Slot, QSignalBlocker
@@ -36,18 +37,14 @@ logger = logging.getLogger(__name__)
 
 # --- Node-Specific Constants ---
 REQUIRED_SR = 16000
-# --- REVISED: Increased chunk size for better efficiency on slower hardware ---
 WORKER_CHUNK_SAMPLES = 16384
-# WORKER_CHUNK_SAMPLES = 8192
 UI_UPDATE_INTERVAL_MS = 100
-# If the buffer grows beyond this many chunks, the worker will discard old audio.
 MAX_BUFFER_CHUNKS = 5
 
 
 if RVC_HUBERT_DEPS_AVAILABLE:
 
     class RVCContentEncoder:
-
         def __init__(self, gpu: int = 0):
             if gpu < 0 or not torch.cuda.is_available():
                 self.device = torch.device("cpu")
@@ -61,54 +58,30 @@ if RVC_HUBERT_DEPS_AVAILABLE:
                     )
                 except Exception:
                     self.is_half = False
-
-            logger.info("Loading HuBERT model from torchaudio bundle...")
-            logger.info(f"Using device: {self.device}, Half precision: {self.is_half}")
-
-            # Load the pre-trained HuBERT model from the torchaudio pipeline
+            logger.info(f"Loading HuBERT model from torchaudio bundle on device: {self.device}, Half: {self.is_half}")
             bundle = HUBERT_BASE
             model = bundle.get_model().to(self.device)
             model.eval()
-
             if self.is_half:
                 model = model.half()
-
             self.model = model
 
         @torch.no_grad()
-        def encode(self, audio_16khz: np.ndarray, emb_output_layer=9, use_final_proj=True) -> np.ndarray:
-            """
-            Encodes audio features using the torchaudio model.
-            The torchaudio model can output features from all transformer layers.
-            """
+        def encode(self, audio_16khz: np.ndarray, emb_output_layer=9) -> np.ndarray:
             feats = torch.from_numpy(audio_16khz).float().view(1, -1).to(self.device)
             if self.is_half:
                 feats = feats.half()
-
-            # The torchaudio HuBERT feature extractor returns a list of hidden states from all layers.
             hidden_states, _ = self.model.extract_features(feats)
-
-            # Layer 0 is the input embeddings, layers 1-12 are the transformer blocks.
-            # emb_output_layer=9 corresponds to index 9 in this list for v1.
-            # emb_output_layer=12 corresponds to index 12 for v2.
-            if emb_output_layer < len(hidden_states):
-                feats_out = hidden_states[emb_output_layer]
-            else:
-                # Fallback to the last layer if the index is out of bounds
-                logger.warning(
-                    f"Requested layer {emb_output_layer} is out of bounds. Using last layer {len(hidden_states)-1}."
-                )
-                feats_out = hidden_states[-1]
-
-            # The `use_final_proj` parameter is not applicable here as we are using the direct
-            # output of a transformer layer, which is the standard for RVC content features.
-
-            return feats_out.squeeze(0).cpu().numpy()
+            layer_idx = min(emb_output_layer, len(hidden_states) - 1)
+            if emb_output_layer >= len(hidden_states):
+                logger.warning(f"Requested layer {emb_output_layer} out of bounds. Using last layer {layer_idx}.")
+            return hidden_states[layer_idx].squeeze(0).cpu().numpy()
 
 
 class RVCContentEncoderNodeItem(NodeItem):
     NODE_SPECIFIC_WIDTH = 250
 
+    # ... (UI code remains unchanged) ...
     def __init__(self, node_logic: "RVCContentEncoderNode"):
         super().__init__(node_logic, width=self.NODE_SPECIFIC_WIDTH)
         self.container_widget = QWidget()
@@ -202,8 +175,8 @@ class RVCContentEncoderNodeItem(NodeItem):
 
         if state.get("is_processing"):
             proc_time = state.get("last_proc_time_ms", 0)
-            deque_size = state.get("deque_size", 0)
-            self.status_label.setText(f"Buffer: {deque_size} | Proc: {proc_time:.1f} ms")
+            buffer_size_ms = state.get("buffer_size_ms", 0)
+            self.status_label.setText(f"Buffer: {buffer_size_ms:.0f} ms | Proc: {proc_time:.1f} ms")
 
             is_strained = state.get("is_strained", False)
             if is_strained:
@@ -213,8 +186,7 @@ class RVCContentEncoderNodeItem(NodeItem):
         else:
             self.status_label.setText("Status: Idle")
             self.status_label.setStyleSheet("color: white;")
-
-        super().updateFromLogic()
+        super.updateFromLogic()
 
 
 class RVCContentEncoderNode(Node):
@@ -225,10 +197,10 @@ class RVCContentEncoderNode(Node):
 
     def __init__(self, name: str, node_id: Optional[str] = None):
         super().__init__(name, node_id)
-        self.add_input("in", data_type=np.ndarray)
-        self.add_output("features", data_type=np.ndarray)
+        # --- MODIFIED: Use torch.Tensor ---
+        self.add_input("in", data_type=torch.Tensor)
+        self.add_output("features", data_type=torch.Tensor)
         self._lock = threading.Lock()
-
         self._device: int = -1
         self._rvc_version: str = "v1"
         self._encoder_instance: Optional[RVCContentEncoder] = None
@@ -236,7 +208,8 @@ class RVCContentEncoderNode(Node):
         self._last_proc_time_ms: float = 0.0
         self._is_strained: bool = False
 
-        self._audio_deque = collections.deque()
+        # --- MODIFIED: More efficient tensor-based buffer ---
+        self._audio_buffer = torch.tensor([], dtype=torch.float32)
         self._results_deque = collections.deque(maxlen=10)
         self._stop_event = threading.Event()
         self._worker_thread: Optional[threading.Thread] = None
@@ -244,54 +217,39 @@ class RVCContentEncoderNode(Node):
     def _process_audio_chunk(
         self, audio_chunk: np.ndarray, encoder: RVCContentEncoder, version: str = "v1"
     ) -> np.ndarray:
-        """Process a single audio chunk through resampling and encoding."""
         resampled = resampy.resample(audio_chunk, sr_orig=DEFAULT_SAMPLERATE, sr_new=REQUIRED_SR, filter="kaiser_fast")
-        # For RVC, v1 uses layer 9 and v2 uses layer 12 (the final transformer block).
         emb_layer = 9 if version == "v1" else 12
-        features = encoder.encode(resampled.astype(np.float32), emb_layer)
-        return features
+        return encoder.encode(resampled.astype(np.float32), emb_layer)
 
     def _encoder_loop(self):
         logger.info(f"[{self.name}] Encoder worker thread started.")
-
         while not self._stop_event.is_set():
             with self._lock:
                 encoder = self._encoder_instance
-                current_deque_size = len(self._audio_deque)
-
-            has_enough_data = current_deque_size >= WORKER_CHUNK_SAMPLES
+                current_buffer_size = len(self._audio_buffer)
+            has_enough_data = current_buffer_size >= WORKER_CHUNK_SAMPLES
 
             if has_enough_data and encoder:
-                is_strained_now = False
-                if current_deque_size > WORKER_CHUNK_SAMPLES * MAX_BUFFER_CHUNKS:
-                    is_strained_now = True
-                    with self._lock:
-                        samples_to_discard = current_deque_size - (WORKER_CHUNK_SAMPLES * (MAX_BUFFER_CHUNKS - 1))
-                        for _ in range(samples_to_discard):
-                            self._audio_deque.popleft()
-                        logger.warning(f"[{self.name}] Buffer overflow. Discarding {samples_to_discard} old samples.")
-
                 with self._lock:
-                    self._is_strained = is_strained_now
+                    self._is_strained = current_buffer_size > WORKER_CHUNK_SAMPLES * MAX_BUFFER_CHUNKS
+                    if self._is_strained:
+                        samples_to_discard = current_buffer_size - (WORKER_CHUNK_SAMPLES * (MAX_BUFFER_CHUNKS - 1))
+                        self._audio_buffer = self._audio_buffer[samples_to_discard:]
+                        logger.warning(f"[{self.name}] Buffer overflow. Discarding old audio.")
+                    audio_chunk_tensor = self._audio_buffer[:WORKER_CHUNK_SAMPLES]
+                    self._audio_buffer = self._audio_buffer[WORKER_CHUNK_SAMPLES:]
+                    version = self._rvc_version
 
                 try:
-                    with self._lock:
-                        audio_chunk_non_contiguous = np.array(
-                            [self._audio_deque.popleft() for _ in range(WORKER_CHUNK_SAMPLES)]
-                        )
-                    audio_chunk = np.ascontiguousarray(audio_chunk_non_contiguous, dtype=np.float32)
-
+                    # Convert to numpy only when needed
+                    audio_chunk_np = audio_chunk_tensor.numpy()
                     start_time = time.monotonic()
-                    with self._lock:
-                        version = self._rvc_version
-                    features = self._process_audio_chunk(audio_chunk, encoder, version)
+                    features = self._process_audio_chunk(audio_chunk_np, encoder, version)
                     proc_duration_ms = (time.monotonic() - start_time) * 1000
-                    logger.info(f"[{self.name}] Chunk processed in {proc_duration_ms:.2f} ms.")
-
+                    # Convert back to tensor to store result
                     with self._lock:
-                        self._results_deque.append(features)
+                        self._results_deque.append(torch.from_numpy(features))
                         self._last_proc_time_ms = proc_duration_ms
-
                 except Exception as e:
                     logger.error(f"[{self.name}] Error in worker thread: {e}", exc_info=True)
                     time.sleep(0.1)
@@ -302,30 +260,20 @@ class RVCContentEncoderNode(Node):
     def _load_model(self):
         with self._lock:
             if self._is_processing:
-                logger.warning(f"[{self.name}] Denied model load while processing is active.")
                 return
             device_id, version = self._device, self._rvc_version
-
         encoder = None
         try:
             if RVC_HUBERT_DEPS_AVAILABLE:
                 encoder = RVCContentEncoder(device_id)
-
-                logger.info(f"[{self.name}] Warming up the model on device {encoder.device}...")
+                dummy_input = np.random.randn(WORKER_CHUNK_SAMPLES).astype(np.float32)
                 for _ in range(3):
-                    dummy_input_chunk = np.random.randn(WORKER_CHUNK_SAMPLES).astype(np.float32)
-                    _ = self._process_audio_chunk(dummy_input_chunk, encoder, version)
-
+                    _ = self._process_audio_chunk(dummy_input, encoder, version)
                 if "cuda" in str(encoder.device):
-                    logger.info(f"[{self.name}] Synchronizing CUDA stream to finalize model setup...")
                     torch.cuda.synchronize()
-                    logger.info(f"[{self.name}] CUDA stream synchronized.")
-
                 logger.info(f"[{self.name}] Model is warmed up and ready.")
-
         except Exception as e:
             logger.error(f"[{self.name}] Failed to load or warm up HuBERT model: {e}", exc_info=True)
-
         with self._lock:
             self._encoder_instance = encoder
 
@@ -335,7 +283,6 @@ class RVCContentEncoderNode(Node):
             if self._is_processing or self._device == device_id:
                 return
             self._device = device_id
-        # A device change requires a full model reload
         self._load_model()
 
     @Slot(str)
@@ -343,29 +290,25 @@ class RVCContentEncoderNode(Node):
         with self._lock:
             if self._rvc_version != version:
                 self._rvc_version = version
-                # Version change might affect model parameters in the future, so good to be explicit
-                logger.info(f"[{self.name}] RVC version set to {version}. No reload needed for current model.")
 
     def get_current_state_snapshot(self) -> Dict:
         with self._lock:
             return {
-                # MODIFIED: Removed model_path
                 "device": self._device,
                 "version": self._rvc_version,
                 "is_processing": self._is_processing,
-                "deque_size": len(self._audio_deque),
+                "buffer_size_ms": (len(self._audio_buffer) / DEFAULT_SAMPLERATE) * 1000,
                 "last_proc_time_ms": self._last_proc_time_ms,
                 "is_strained": self._is_strained,
             }
 
     def process(self, input_data: dict) -> dict:
         audio_in = input_data.get("in")
-        if audio_in is not None:
-            mono_signal = np.mean(audio_in, axis=1) if audio_in.ndim > 1 else audio_in
+        if isinstance(audio_in, torch.Tensor):
+            mono_signal = torch.mean(audio_in, dim=0) if audio_in.ndim > 1 else audio_in
             with self._lock:
                 if self._encoder_instance:
-                    self._audio_deque.extend(mono_signal.astype(np.float32).tolist())
-
+                    self._audio_buffer = torch.cat((self._audio_buffer, mono_signal.to(torch.float32)))
         latest_features = None
         with self._lock:
             if self._results_deque:
@@ -373,23 +316,16 @@ class RVCContentEncoderNode(Node):
         return {"features": latest_features}
 
     def start(self):
-        # Ensure the model is loaded when processing starts if it hasn't been already.
         if self._encoder_instance is None:
-            logger.info(f"[{self.name}] First start, loading model...")
             self._load_model()
-
         super().start()
         with self._lock:
-            self._audio_deque.clear()
+            self._audio_buffer = torch.tensor([], dtype=torch.float32)
             self._results_deque.clear()
-            self._is_processing = True
-            self._last_proc_time_ms = 0.0
-            self._is_strained = False
-
+            self._is_processing, self._last_proc_time_ms, self._is_strained = True, 0.0, False
         self._stop_event.clear()
         self._worker_thread = threading.Thread(target=self._encoder_loop, daemon=True)
         self._worker_thread.start()
-        logger.info(f"[{self.name}] Started processing.")
 
     def stop(self):
         super().stop()
@@ -398,10 +334,8 @@ class RVCContentEncoderNode(Node):
             self._worker_thread.join(timeout=0.5)
             self._worker_thread = None
         with self._lock:
-            self._is_processing = False
-            self._audio_deque.clear()
+            self._is_processing, self._audio_buffer = False, torch.tensor([], dtype=torch.float32)
             self._results_deque.clear()
-        logger.info(f"[{self.name}] Stopped processing.")
 
     def remove(self):
         self.stop()
@@ -412,6 +346,5 @@ class RVCContentEncoderNode(Node):
             return {"device": self._device, "version": self._rvc_version}
 
     def deserialize_extra(self, data: dict):
-        self._device = data.get("device", -1)
-        self._rvc_version = data.get("version", "v1")
+        self._device, self._rvc_version = data.get("device", -1), data.get("version", "v1")
         self._load_model()
