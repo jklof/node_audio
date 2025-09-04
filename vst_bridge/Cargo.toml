@@ -1,0 +1,10 @@
+
+[workspace]
+members = [
+    "node_audio_vst_fx",
+    "node_audio_vst_instrument",
+    "xtask",
+]
+resolver = "2"
+
+

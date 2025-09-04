@@ -1,0 +1,16 @@
+[package]
+name = "node_audio_vst_instrument"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+anyhow = "1"
+nih_plug = { git = "https://github.com/robbert-vdh/nih-plug", features = ["vst3"] }
+parking_lot = "0.12"
+thiserror = "1"
+bytemuck = { version = "1.14", features = ["extern_crate_alloc"] }
+
+

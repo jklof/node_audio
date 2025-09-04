@@ -83,6 +83,18 @@ Notes:
 - On macOS, the first run may prompt for microphone permissions. Grant access so audio I/O works.
 - If you installed only `requirements.txt`, you get the core UI and audio graph engine. Features in `additional_plugins/` (e.g., RVC, YouTube, certain spectral effects) require the optional installs.
 
+## VST Bridge (optional)
+
+This project includes an experimental Rust-based VST3 bridge that lets you use the app as a DAW effect or instrument.
+
+- Python side: add nodes under category "Input / Output" → "Network Bridge Output" (clock) and optional "Network Bridge Input".
+  - Start processing (F5). The bridge server listens on `localhost:61000` and exchanges float32 interleaved audio blocks.
+  - Default graph timing is tied to the DAW via the bridge's tick requests.
+
+- Rust side: see `vst_bridge/README.md` for building `node_audio_vst_fx` and `node_audio_vst_instrument`.
+
+Block size mismatches will add latency; prefer `DEFAULT_BLOCKSIZE=512` in DAW if adjustable.
+
 ## Automated setup and checks (macOS)
 
 Use `start.sh` to automatically verify and set up the environment, and then start the app.
@@ -148,4 +160,3 @@ Expected outcome:
 pip freeze > /tmp/old.txt && xargs -a /tmp/old.txt -r pip uninstall -y
 pip install -r requirements.txt
 ```
-he you ennallyt s
