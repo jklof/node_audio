@@ -4,3 +4,4 @@ na/
 # Python cache directories
 __pycache__/
 *.pyc
+.venv/
