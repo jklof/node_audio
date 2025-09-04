@@ -9,6 +9,7 @@ crate-type = ["cdylib"]
 [dependencies]
 anyhow = "1"
 nih_plug = { git = "https://github.com/robbert-vdh/nih-plug", features = ["vst3"] }
+nih_plug_egui = { git = "https://github.com/robbert-vdh/nih-plug" }
 parking_lot = "0.12"
 thiserror = "1"
 bytemuck = { version = "1.14", features = ["extern_crate_alloc"] }

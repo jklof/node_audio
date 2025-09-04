@@ -1,10 +1,11 @@
-use anyhow::Context;
 use nih_plug::prelude::*;
 use parking_lot::Mutex;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::sync::Arc;
 use std::num::NonZeroU32;
+use std::time::{Duration, Instant};
+use nih_plug_egui::{egui, create_egui_editor, EguiState};
 
 const DEFAULT_HOST: &str = "127.0.0.1";
 const DEFAULT_PORT: u16 = 61000;
@@ -23,6 +24,8 @@ struct BridgeClient {
     stream: Option<TcpStream>,
     seq: u32,
     last_config: (u32, u32, u16, u16),
+    next_retry_at: Option<Instant>,
+    retry_interval: Duration,
 }
 
 impl BridgeClient {
@@ -31,7 +34,17 @@ impl BridgeClient {
             stream: None,
             seq: 0,
             last_config: (0, 0, 0, 0),
+            next_retry_at: None,
+            retry_interval: Duration::from_millis(1000),
         }
+    }
+
+    fn is_connected(&self) -> bool { self.stream.is_some() }
+
+    fn force_reconnect(&mut self) {
+        self.stream = None;
+        self.seq = 0;
+        self.next_retry_at = Some(Instant::now());
     }
 
     fn ensure_connected(
@@ -42,25 +55,37 @@ impl BridgeClient {
         out_ch: usize,
     ) -> anyhow::Result<()> {
         let cfg = (sample_rate as u32, block_size as u32, in_ch as u16, out_ch as u16);
-        let reconnect = match self.stream {
-            None => true,
-            Some(_) => self.last_config != cfg,
-        };
+        let reconnect = match self.stream { None => true, Some(_) => self.last_config != cfg };
         if reconnect {
-            let mut stream = TcpStream::connect((DEFAULT_HOST, DEFAULT_PORT))
-                .with_context(|| "connect to node_audio bridge server")?;
-            // handshake: NABR + sr + bs + in + out
-            let mut hdr = Vec::with_capacity(4 + 4 + 4 + 2 + 2);
-            hdr.extend_from_slice(b"NABR");
-            hdr.extend_from_slice(&(cfg.0).to_le_bytes());
-            hdr.extend_from_slice(&(cfg.1).to_le_bytes());
-            hdr.extend_from_slice(&(cfg.2).to_le_bytes());
-            hdr.extend_from_slice(&(cfg.3).to_le_bytes());
-            write_all(&mut stream, &hdr)?;
-            stream.set_nodelay(true).ok();
-            self.stream = Some(stream);
-            self.last_config = cfg;
-            self.seq = 0;
+            // Respect retry cooldown when not connected
+            if self.stream.is_none() {
+                if let Some(when) = self.next_retry_at {
+                    if Instant::now() < when { return Ok(()); }
+                }
+            }
+
+            match TcpStream::connect((DEFAULT_HOST, DEFAULT_PORT)) {
+                Ok(mut stream) => {
+                    let mut hdr = Vec::with_capacity(4 + 4 + 4 + 2 + 2);
+                    hdr.extend_from_slice(b"NABR");
+                    hdr.extend_from_slice(&(cfg.0).to_le_bytes());
+                    hdr.extend_from_slice(&(cfg.1).to_le_bytes());
+                    hdr.extend_from_slice(&(cfg.2).to_le_bytes());
+                    hdr.extend_from_slice(&(cfg.3).to_le_bytes());
+                    write_all(&mut stream, &hdr)?;
+                    stream.set_nodelay(true).ok();
+                    self.stream = Some(stream);
+                    self.last_config = cfg;
+                    self.seq = 0;
+                    self.next_retry_at = None;
+                }
+                Err(_e) => {
+                    // Schedule next retry and remain disconnected
+                    self.stream = None;
+                    self.next_retry_at = Some(Instant::now() + self.retry_interval);
+                    return Ok(());
+                }
+            }
         }
         Ok(())
     }
@@ -103,12 +128,16 @@ impl BridgeClient {
 
 struct NodeAudioFx {
     client: Arc<Mutex<BridgeClient>>,
+    params: Arc<EmptyParams>,
+    editor_state: Arc<EguiState>,
 }
 
 impl Default for NodeAudioFx {
     fn default() -> Self {
         Self {
             client: Arc::new(Mutex::new(BridgeClient::new())),
+            params: Arc::new(EmptyParams {}),
+            editor_state: EguiState::from_size(280, 120),
         }
     }
 }
@@ -132,7 +161,7 @@ impl Plugin for NodeAudioFx {
 
     type BackgroundTask = ();
 
-    fn params(&self) -> Arc<dyn Params> { Arc::new(EmptyParams {}) }
+    fn params(&self) -> Arc<dyn Params> { self.params.clone() }
 
     fn initialize(&mut self, _audio_io_layout: &AudioIOLayout, buffer_config: &BufferConfig, _context: &mut impl InitContext<Self>) -> bool {
         let mut client = self.client.lock();
@@ -163,10 +192,19 @@ impl Plugin for NodeAudioFx {
         }
 
         let mut output_interleaved = vec![0.0f32; frames * out_ch.max(1)];
-        {
+        let result = {
             let mut client = self.client.lock();
             client.ensure_connected(context.transport().sample_rate, frames, in_ch, out_ch).ok();
-            client.process_block(&input_interleaved, &mut output_interleaved).ok();
+            client.process_block(&input_interleaved, &mut output_interleaved)
+        };
+        if result.is_err() || output_interleaved.iter().all(|s| s.abs() < f32::EPSILON) {
+            // If disconnected or failed, pass input through to output for overlapping channels
+            let copy_ch = in_ch.min(out_ch);
+            for f in 0..frames {
+                for c in 0..copy_ch {
+                    output_interleaved[f * out_ch + c] = input_interleaved[f * in_ch + c];
+                }
+            }
         }
 
         // De-interleave into outputs
@@ -177,6 +215,33 @@ impl Plugin for NodeAudioFx {
         }
 
         ProcessStatus::Normal
+    }
+
+    fn editor(&mut self, _executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
+        let client = self.client.clone();
+        let editor = create_egui_editor(
+            self.editor_state.clone(),
+            self.params.clone(),
+            move |_ctx, _| {
+                // No-op build step
+            },
+            move |ctx, _setter, _| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let connected = { client.lock().is_connected() };
+                    let status_text = if connected { "Connected" } else { "Disconnected" };
+                    let color = if connected { egui::Color32::from_rgb(0, 200, 0) } else { egui::Color32::from_rgb(200, 0, 0) };
+                    ui.horizontal(|ui| {
+                        ui.colored_label(color, status_text);
+                        if !connected {
+                            if ui.button("Retry now").clicked() {
+                                client.lock().force_reconnect();
+                            }
+                        }
+                    });
+                });
+            },
+        );
+        editor
     }
 }
 

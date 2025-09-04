@@ -1,0 +1,90 @@
+{
+    "nodes": [
+        {
+            "id": "5471cb8e-7947-48f9-aa20-9237a14e675b",
+            "name": "STFT",
+            "type": "STFT",
+            "pos": [
+                -683.8614437499997,
+                -1192.7348121874993
+            ]
+        },
+        {
+            "id": "4d04b138-32ca-49bc-acfa-eac0549b7300",
+            "name": "Spectrogram Visualizer",
+            "type": "Spectrogram Visualizer",
+            "pos": [
+                -362.1168786025037,
+                -1190.926991776391
+            ]
+        },
+        {
+            "id": "f369dd7e-9810-4967-91be-3e0768a7e000",
+            "name": "Network Bridge Input",
+            "type": "Network Bridge Input",
+            "pos": [
+                -949.9639996562494,
+                -1170.0064759687489
+            ]
+        },
+        {
+            "id": "ec83509b-ea23-496d-8f4c-b90c3b4bab00",
+            "name": "Network Bridge Output",
+            "type": "Network Bridge Output",
+            "pos": [
+                -958.7288513437495,
+                -1038.272724546874
+            ]
+        },
+        {
+            "id": "ef737bea-23b0-4e87-a045-979f8300b66b",
+            "name": "Sine Source",
+            "type": "Sine Source",
+            "pos": [
+                -1258.5061922187492,
+                -1042.5869981406245
+            ]
+        },
+        {
+            "id": "2c2a320a-4e26-4257-8d13-466d2bf8dfcd",
+            "name": "Dial (Hz)",
+            "type": "Dial (Hz)",
+            "pos": [
+                -1366.9565217391307,
+                -905.217391304348
+            ],
+            "frequency": 1896.836926601796
+        }
+    ],
+    "connections": [
+        {
+            "start_node_id": "5471cb8e-7947-48f9-aa20-9237a14e675b",
+            "start_socket_name": "spectral_frame_out",
+            "end_node_id": "4d04b138-32ca-49bc-acfa-eac0549b7300",
+            "end_socket_name": "spectral_frame_in",
+            "id": "9c83192c-a493-4f1e-b2b2-d7b68760c9fb"
+        },
+        {
+            "start_node_id": "f369dd7e-9810-4967-91be-3e0768a7e000",
+            "start_socket_name": "out",
+            "end_node_id": "5471cb8e-7947-48f9-aa20-9237a14e675b",
+            "end_socket_name": "audio_in",
+            "id": "603b3bbd-9b7e-4f97-88c2-4ba815d79861"
+        },
+        {
+            "start_node_id": "2c2a320a-4e26-4257-8d13-466d2bf8dfcd",
+            "start_socket_name": "freq_out",
+            "end_node_id": "ef737bea-23b0-4e87-a045-979f8300b66b",
+            "end_socket_name": "freq",
+            "id": "2c0f1736-9eec-4055-b212-be45ebd0fb9e"
+        },
+        {
+            "start_node_id": "ef737bea-23b0-4e87-a045-979f8300b66b",
+            "start_socket_name": "out",
+            "end_node_id": "ec83509b-ea23-496d-8f4c-b90c3b4bab00",
+            "end_socket_name": "in",
+            "id": "21350525-d0c6-41ca-b703-f110ded0632b"
+        }
+    ],
+    "clock_source_id": "ec83509b-ea23-496d-8f4c-b90c3b4bab00"
+}

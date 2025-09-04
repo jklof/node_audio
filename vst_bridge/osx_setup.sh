@@ -59,7 +59,7 @@ cd "$SCRIPT_DIR"
 echo "Building and bundling VST3 plugins in workspace at: $SCRIPT_DIR"
 
 if [[ "$DRY_RUN" -eq 0 ]]; then
-c  cargo run --package xtask --release -- bundle -p node_audio_vst_fx --release
+  cargo run --package xtask --release -- bundle -p node_audio_vst_fx --release
   cargo run --package xtask --release -- bundle -p node_audio_vst_instrument --release
 else
   echo "[dry-run] cargo run --package xtask --release -- bundle -p node_audio_vst_fx --release" >&2
