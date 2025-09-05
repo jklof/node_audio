@@ -26,11 +26,21 @@ struct BridgeClient {
     last_config: (u32, u32, u16, u16),
     next_retry_at: Option<Instant>,
     retry_interval: Duration,
+    connection_attempts: u32,
+    last_error: Option<String>,
 }
 
 impl BridgeClient {
     fn new() -> Self {
-        Self { stream: None, seq: 0, last_config: (0, 0, 0, 0), next_retry_at: None, retry_interval: Duration::from_millis(1000) }
+        Self { 
+            stream: None, 
+            seq: 0, 
+            last_config: (0, 0, 0, 0), 
+            next_retry_at: None, 
+            retry_interval: Duration::from_millis(1000),
+            connection_attempts: 0,
+            last_error: None,
+        }
     }
 
     fn is_connected(&self) -> bool { self.stream.is_some() }
@@ -39,6 +49,11 @@ impl BridgeClient {
         self.stream = None;
         self.seq = 0;
         self.next_retry_at = Some(Instant::now());
+        self.last_error = None;
+    }
+
+    fn get_status_info(&self) -> (bool, u32, Option<String>) {
+        (self.is_connected(), self.connection_attempts, self.last_error.clone())
     }
 
     fn ensure_connected(&mut self, sample_rate: f32, block_size: usize, out_ch: usize) -> anyhow::Result<()> {
@@ -57,14 +72,28 @@ impl BridgeClient {
                     hdr.extend_from_slice(&(cfg.1).to_le_bytes());
                     hdr.extend_from_slice(&(cfg.2).to_le_bytes());
                     hdr.extend_from_slice(&(cfg.3).to_le_bytes());
-                    write_all(&mut stream, &hdr)?;
-                    stream.set_nodelay(true).ok();
-                    self.stream = Some(stream);
-                    self.last_config = cfg;
-                    self.seq = 0;
-                    self.next_retry_at = None;
+                    match write_all(&mut stream, &hdr) {
+                        Ok(_) => {
+                            stream.set_nodelay(true).ok();
+                            self.stream = Some(stream);
+                            self.last_config = cfg;
+                            self.seq = 0;
+                            self.next_retry_at = None;
+                            self.connection_attempts = 0;
+                            self.last_error = None;
+                        }
+                        Err(e) => {
+                            self.connection_attempts += 1;
+                            self.last_error = Some(format!("Handshake failed: {}", e));
+                            self.stream = None;
+                            self.next_retry_at = Some(Instant::now() + self.retry_interval);
+                            return Ok(());
+                        }
+                    }
                 }
-                Err(_e) => {
+                Err(e) => {
+                    self.connection_attempts += 1;
+                    self.last_error = Some(format!("Connection failed: {}", e));
                     self.stream = None;
                     self.next_retry_at = Some(Instant::now() + self.retry_interval);
                     return Ok(());
@@ -77,20 +106,51 @@ impl BridgeClient {
     fn process_block(&mut self, output: &mut [f32]) -> anyhow::Result<()> {
         let (_sr, bs, _in_ch, out_ch) = self.last_config;
         let mut stream = match self.stream.as_ref() { Some(s) => s.try_clone()?, None => anyhow::bail!("not connected") };
+        
+        // Set a timeout to prevent hanging if server becomes unresponsive
+        stream.set_read_timeout(Some(Duration::from_millis(500)))?;
+        stream.set_write_timeout(Some(Duration::from_millis(500)))?;
+        
         // send request with opcode=1 and zero input payload
         let mut header = [0u8; 1 + 4];
         header[0] = 1;
         header[1..5].copy_from_slice(&self.seq.to_le_bytes());
-        write_all(&mut stream, &header)?;
+        write_all(&mut stream, &header).map_err(|e| {
+            // Force disconnect on write error
+            self.stream = None;
+            self.connection_attempts += 1;
+            self.last_error = Some(format!("Write error: {}", e));
+            self.next_retry_at = Some(Instant::now() + self.retry_interval);
+            e
+        })?;
 
         // recv response
         let mut resp_header = [0u8; 1 + 4];
-        read_exact(&mut stream, &mut resp_header)?;
-        if resp_header[0] != 2 { anyhow::bail!("invalid opcode from server"); }
+        read_exact(&mut stream, &mut resp_header).map_err(|e| {
+            // Force disconnect on read error
+            self.stream = None;
+            self.connection_attempts += 1;
+            self.last_error = Some(format!("Read header error: {}", e));
+            self.next_retry_at = Some(Instant::now() + self.retry_interval);
+            e
+        })?;
+        if resp_header[0] != 2 { 
+            self.stream = None;
+            self.connection_attempts += 1;
+            self.last_error = Some("Invalid opcode from server".to_string());
+            self.next_retry_at = Some(Instant::now() + self.retry_interval);
+            anyhow::bail!("invalid opcode from server"); 
+        }
         let _rsp_seq = u32::from_le_bytes(resp_header[1..5].try_into().unwrap());
         let expected = (bs as usize) * (out_ch as usize);
         let mut bytes = vec![0u8; expected * 4];
-        read_exact(&mut stream, &mut bytes)?;
+        read_exact(&mut stream, &mut bytes).map_err(|e| {
+            self.stream = None;
+            self.connection_attempts += 1;
+            self.last_error = Some(format!("Read payload error: {}", e));
+            self.next_retry_at = Some(Instant::now() + self.retry_interval);
+            e
+        })?;
         let samples: &[f32] = bytemuck::cast_slice(&bytes);
         output.copy_from_slice(samples);
         self.seq = self.seq.wrapping_add(1);
@@ -106,7 +166,7 @@ struct NodeAudioInstrument {
 
 impl Default for NodeAudioInstrument {
     fn default() -> Self {
-        Self { client: Arc::new(Mutex::new(BridgeClient::new())), params: Arc::new(EmptyParams {}), editor_state: EguiState::from_size(280, 120) }
+        Self { client: Arc::new(Mutex::new(BridgeClient::new())), params: Arc::new(EmptyParams {}), editor_state: EguiState::from_size(300, 150) }
     }
 }
 
@@ -170,16 +230,40 @@ impl Plugin for NodeAudioInstrument {
             },
             move |ctx, _setter, _| {
                 egui::CentralPanel::default().show(ctx, |ui| {
-                    let connected = { client.lock().is_connected() };
-                    let status_text = if connected { "Connected" } else { "Disconnected" };
-                    let color = if connected { egui::Color32::from_rgb(0, 200, 0) } else { egui::Color32::from_rgb(200, 0, 0) };
-                    ui.horizontal(|ui| {
-                        ui.colored_label(color, status_text);
-                        if !connected {
-                            if ui.button("Retry now").clicked() {
+                    let (connected, attempts, last_error) = { 
+                        let client_lock = client.lock();
+                        client_lock.get_status_info()
+                    };
+                    
+                    // Status display
+                    ui.vertical(|ui| {
+                        ui.horizontal(|ui| {
+                            let status_text = if connected { "Connected" } else { "Disconnected" };
+                            let color = if connected { 
+                                egui::Color32::from_rgb(0, 200, 0) 
+                            } else { 
+                                egui::Color32::from_rgb(200, 0, 0) 
+                            };
+                            ui.colored_label(color, status_text);
+                            
+                            // Always show reconnect button
+                            if ui.button("Reconnect").clicked() {
                                 client.lock().force_reconnect();
                             }
+                        });
+                        
+                        // Show connection attempts if there have been any
+                        if attempts > 0 {
+                            ui.label(format!("Connection attempts: {}", attempts));
                         }
+                        
+                        // Show last error if any
+                        if let Some(error) = last_error {
+                            ui.colored_label(egui::Color32::from_rgb(255, 200, 0), 
+                                           format!("Last error: {}", error));
+                        }
+                        
+                        ui.label(format!("Server: {}:{}", DEFAULT_HOST, DEFAULT_PORT));
                     });
                 });
             },

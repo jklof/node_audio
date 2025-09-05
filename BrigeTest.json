@@ -14,8 +14,8 @@
             "name": "Spectrogram Visualizer",
             "type": "Spectrogram Visualizer",
             "pos": [
-                -362.1168786025037,
-                -1190.926991776391
+                -587.1168786025037,
+                -995.9269917763913
             ]
         },
         {
@@ -32,17 +32,8 @@
             "name": "Network Bridge Output",
             "type": "Network Bridge Output",
             "pos": [
-                -958.7288513437495,
-                -1038.272724546874
-            ]
-        },
-        {
-            "id": "ef737bea-23b0-4e87-a045-979f8300b66b",
-            "name": "Sine Source",
-            "type": "Sine Source",
-            "pos": [
-                -1258.5061922187492,
-                -1042.5869981406245
+                276.69128699308084,
+                -947.6434479893462
             ]
         },
         {
@@ -50,10 +41,49 @@
             "name": "Dial (Hz)",
             "type": "Dial (Hz)",
             "pos": [
-                -1366.9565217391307,
-                -905.217391304348
+                -1246.956521739131,
+                -927.217391304348
             ],
-            "frequency": 1896.836926601796
+            "frequency": 1807.298947444603
+        },
+        {
+            "id": "b6adfdb4-cdef-45cd-a8ed-f28bbb263f30",
+            "name": "Spectrum Visualizer",
+            "type": "Spectrum Visualizer",
+            "pos": [
+                -168.85343589062495,
+                -1294.967069635155
+            ]
+        },
+        {
+            "id": "3f3fd239-27bb-4219-b395-33e6a8d6dd4a",
+            "name": "Waveform Visualizer",
+            "type": "Waveform Visualizer",
+            "pos": [
+                69.93484179148425,
+                -1101.1711336205422
+            ]
+        },
+        {
+            "id": "0fefefca-883a-47b8-af0a-651d22eb5b68",
+            "name": "WaveShaper",
+            "type": "WaveShaper",
+            "pos": [
+                -238.96745093625987,
+                -1036.4457342617927
+            ],
+            "shaper_type": "SOFT_CLIP",
+            "drive": 47.035000000000004,
+            "mix": 1.0
+        },
+        {
+            "id": "291f9e8c-923d-4aab-b7a6-7df3324409e1",
+            "name": "Waveform Visualizer",
+            "type": "Waveform Visualizer",
+            "pos": [
+                37.09122733374653,
+                -951.0143961048084
+            ]
         }
     ],
     "connections": [
@@ -62,28 +92,49 @@
             "start_socket_name": "spectral_frame_out",
             "end_node_id": "4d04b138-32ca-49bc-acfa-eac0549b7300",
             "end_socket_name": "spectral_frame_in",
-            "id": "9c83192c-a493-4f1e-b2b2-d7b68760c9fb"
+            "id": "ca1bec54-9d19-4260-82fd-b93413f77439"
         },
         {
             "start_node_id": "f369dd7e-9810-4967-91be-3e0768a7e000",
             "start_socket_name": "out",
             "end_node_id": "5471cb8e-7947-48f9-aa20-9237a14e675b",
             "end_socket_name": "audio_in",
-            "id": "603b3bbd-9b7e-4f97-88c2-4ba815d79861"
+            "id": "755e134e-7e97-4fcf-bad0-fc7a17028f5a"
         },
         {
-            "start_node_id": "2c2a320a-4e26-4257-8d13-466d2bf8dfcd",
-            "start_socket_name": "freq_out",
-            "end_node_id": "ef737bea-23b0-4e87-a045-979f8300b66b",
-            "end_socket_name": "freq",
-            "id": "2c0f1736-9eec-4055-b212-be45ebd0fb9e"
+            "start_node_id": "5471cb8e-7947-48f9-aa20-9237a14e675b",
+            "start_socket_name": "spectral_frame_out",
+            "end_node_id": "b6adfdb4-cdef-45cd-a8ed-f28bbb263f30",
+            "end_socket_name": "spectral_frame_in",
+            "id": "76af0e48-8f92-47dc-aac6-9fae9266d974"
         },
         {
-            "start_node_id": "ef737bea-23b0-4e87-a045-979f8300b66b",
+            "start_node_id": "f369dd7e-9810-4967-91be-3e0768a7e000",
+            "start_socket_name": "out",
+            "end_node_id": "0fefefca-883a-47b8-af0a-651d22eb5b68",
+            "end_socket_name": "in",
+            "id": "2f769e53-72c4-4e19-9492-5a7754c0b511"
+        },
+        {
+            "start_node_id": "f369dd7e-9810-4967-91be-3e0768a7e000",
+            "start_socket_name": "out",
+            "end_node_id": "3f3fd239-27bb-4219-b395-33e6a8d6dd4a",
+            "end_socket_name": "in",
+            "id": "527514c2-2967-4ba1-be68-54202591602a"
+        },
+        {
+            "start_node_id": "0fefefca-883a-47b8-af0a-651d22eb5b68",
+            "start_socket_name": "out",
+            "end_node_id": "291f9e8c-923d-4aab-b7a6-7df3324409e1",
+            "end_socket_name": "in",
+            "id": "405ea0d3-d8c8-4988-9bc6-401533809d1d"
+        },
+        {
+            "start_node_id": "291f9e8c-923d-4aab-b7a6-7df3324409e1",
             "start_socket_name": "out",
             "end_node_id": "ec83509b-ea23-496d-8f4c-b90c3b4bab00",
             "end_socket_name": "in",
-            "id": "21350525-d0c6-41ca-b703-f110ded0632b"
+            "id": "2e7c993b-a7ca-4d5e-9cf7-3d8151105ec1"
         }
     ],
     "clock_source_id": "ec83509b-ea23-496d-8f4c-b90c3b4bab00"
