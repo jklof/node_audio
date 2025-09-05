@@ -43,6 +43,15 @@ class MIDIDeviceManager:
             logger.error(f"MIDIDeviceManager: Error getting input devices: {e}")
             return []
 
+    @staticmethod
+    def get_output_devices() -> List[str]:
+        """Returns a list of available MIDI output device names."""
+        try:
+            return mido.get_output_names()
+        except Exception as e:
+            logger.error(f"MIDIDeviceManager: Error getting output devices: {e}")
+            return []
+
 
 # ==============================================================================
 # 2. MIDI Input Node (Listens for all MIDI messages)
@@ -452,3 +461,325 @@ class MIDIPitchWheelNode(Node):
 
     def deserialize_extra(self, data: Dict):
         pass
+
+
+# ==============================================================================
+# 6. MIDI Output Node
+# ==============================================================================
+class MIDIOutputNodeItem(NodeItem):
+    NODE_WIDTH = 250
+
+    def __init__(self, node_logic: "MIDIOutputNode"):
+        super().__init__(node_logic)
+        self.container_widget = QWidget()
+        layout = QVBoxLayout(self.container_widget)
+        layout.setContentsMargins(
+            NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING
+        )
+        device_row = QHBoxLayout()
+        self.device_combo = QComboBox()
+        self.device_combo.setMinimumWidth(self.NODE_WIDTH - 40)
+        device_row.addWidget(self.device_combo)
+        self.refresh_button = QPushButton("🔄")
+        self.refresh_button.setFixedSize(24, 24)
+        device_row.addWidget(self.refresh_button)
+        layout.addLayout(device_row)
+        self.status_label = QLabel("Status: Initializing...")
+        layout.addWidget(self.status_label)
+        self.setContentWidget(self.container_widget)
+
+        self.device_combo.currentIndexChanged.connect(self._on_device_selection_changed)
+        self.refresh_button.clicked.connect(self._populate_device_combobox)
+        self.node_logic.emitter.statusChanged.connect(self._on_status_changed)
+        self._populate_device_combobox()
+
+    @Slot(str)
+    def _on_status_changed(self, status: str):
+        self.status_label.setText(status)
+        if "Error" in status:
+            self.status_label.setStyleSheet("color: red;")
+        elif "Active" in status:
+            self.status_label.setStyleSheet("color: lightgreen;")
+        else:
+            self.status_label.setStyleSheet("color: lightgray;")
+
+    @Slot()
+    def _populate_device_combobox(self):
+        with QSignalBlocker(self.device_combo):
+            current_selection = self.node_logic._port_name
+            self.device_combo.clear()
+            self.device_combo.addItem("No Device", userData=None)
+            devices = MIDIDeviceManager.get_output_devices()
+            for name in devices:
+                self.device_combo.addItem(name, userData=name)
+            index = self.device_combo.findData(current_selection)
+            if index != -1:
+                self.device_combo.setCurrentIndex(index)
+            elif self.node_logic._port_name is not None:
+                self.node_logic.set_device(None)
+
+    @Slot(int)
+    def _on_device_selection_changed(self, index: int):
+        port_name = self.device_combo.itemData(index)
+        self.node_logic.set_device(port_name)
+
+
+class MIDIOutputNode(Node):
+    NODE_TYPE = "MIDI Device Output"
+    CATEGORY = "MIDI"
+    DESCRIPTION = "Sends MIDI messages to an external device or application."
+    UI_CLASS = MIDIOutputNodeItem
+
+    class Emitter(QObject):
+        statusChanged = Signal(str)
+
+    def __init__(self, name: str, node_id: Optional[str] = None):
+        super().__init__(name, node_id)
+        self.emitter = self.Emitter()
+        self.add_input("msg_in", data_type=object)
+
+        self._lock = threading.Lock()
+        self._port_name: Optional[str] = None
+        self._port: Optional[mido.ports.BaseOutput] = None
+        self._status = "No Device"
+
+    @Slot(str)
+    def set_device(self, port_name: Optional[str]):
+        self.stop()
+        with self._lock:
+            self._port_name = port_name
+        self.start()
+
+    def process(self, input_data: Dict) -> Dict:
+        msg = input_data.get("msg_in")
+        with self._lock:
+            port = self._port
+        if isinstance(msg, mido.Message) and port and not port.closed:
+            try:
+                port.send(msg)
+            except Exception as e:
+                logger.error(f"[{self.name}] Failed to send MIDI message: {e}")
+                self.emitter.statusChanged.emit(f"Error: {e}")
+        return {}
+
+    def start(self):
+        with self._lock:
+            if not self._port_name:
+                self.emitter.statusChanged.emit("No Device Selected")
+                return
+            if self._port and not self._port.closed:
+                return
+
+            try:
+                self._port = mido.open_output(self._port_name)
+                self._status = f"Active: {self._port_name.split(':')[0]}"
+                logger.info(f"[{self.name}] Opened MIDI output port: '{self._port_name}'")
+            except Exception as e:
+                self._status = f"Error: {e}"
+                logger.error(f"[{self.name}] Failed to open MIDI output port: {e}", exc_info=True)
+        self.emitter.statusChanged.emit(self._status)
+
+    def stop(self):
+        port_to_close = None
+        with self._lock:
+            if self._port and not self._port.closed:
+                port_to_close = self._port
+                self._port = None
+
+        if port_to_close:
+            try:
+                port_to_close.close()
+                logger.info(f"[{self.name}] Closed MIDI output port: '{self._port_name}'")
+            except Exception as e:
+                logger.warning(f"[{self.name}] Error closing MIDI port: {e}")
+
+        self._status = "Inactive"
+        self.emitter.statusChanged.emit(self._status)
+
+    def remove(self):
+        self.stop()
+        super().remove()
+
+    def serialize_extra(self) -> Dict:
+        with self._lock:
+            return {"port_name": self._port_name}
+
+    def deserialize_extra(self, data: Dict):
+        port_name = data.get("port_name")
+        QTimer.singleShot(0, lambda: self.set_device(port_name))
+
+
+# ==============================================================================
+# 7. --- NEW: MIDI Pitch Wheel Output Node ---
+# ==============================================================================
+class MIDIPitchWheelOutNodeItem(NodeItem):
+    NODE_WIDTH = 150
+
+    def __init__(self, node_logic: "MIDIPitchWheelOutNode"):
+        super().__init__(node_logic, width=self.NODE_WIDTH)
+        self.container_widget = QWidget()
+        layout = QVBoxLayout(self.container_widget)
+        layout.setContentsMargins(
+            NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING
+        )
+        layout.setSpacing(4)
+        self.value_label = QLabel("Value: 0.00")
+        layout.addWidget(self.value_label)
+        self.setContentWidget(self.container_widget)
+
+        self.node_logic.emitter.stateUpdated.connect(self._on_state_updated)
+        self.updateFromLogic()
+
+    @Slot(dict)
+    def _on_state_updated(self, state: Dict):
+        self.value_label.setText(f'Value: {state.get("value", 0.0):.2f}')
+
+    @Slot()
+    def updateFromLogic(self):
+        state = self.node_logic.get_current_state()
+        self._on_state_updated(state)
+        super().updateFromLogic()
+
+
+class MIDIPitchWheelOutNode(Node):
+    NODE_TYPE = "MIDI Pitch Wheel Out"
+    CATEGORY = "MIDI"
+    DESCRIPTION = "Converts a float value (-1.0 to 1.0) to a MIDI Pitch Wheel message."
+    UI_CLASS = MIDIPitchWheelOutNodeItem
+
+    class Emitter(QObject):
+        stateUpdated = Signal(dict)
+
+    def __init__(self, name: str, node_id: Optional[str] = None):
+        super().__init__(name, node_id)
+        self.emitter = self.Emitter()
+        self.add_input("value_in", data_type=float)
+        self.add_output("msg_out", data_type=object)
+        self._lock = threading.Lock()
+        self._last_sent_value = 0.0
+
+    def get_current_state(self) -> Dict:
+        with self._lock:
+            return {"value": self._last_sent_value}
+
+    def process(self, input_data: Dict) -> Dict:
+        value_in = input_data.get("value_in")
+        if value_in is None:
+            return {"msg_out": None}
+
+        try:
+            # Clamp value to the expected range
+            clamped_value = max(-1.0, min(1.0, float(value_in)))
+            # Convert float (-1 to 1) to MIDI pitch value (-8192 to 8191)
+            pitch_value = int(round(clamped_value * 8191))
+            msg = mido.Message("pitchwheel", pitch=pitch_value)
+
+            with self._lock:
+                if abs(self._last_sent_value - clamped_value) > 1e-4:
+                    self._last_sent_value = clamped_value
+                    self.emitter.stateUpdated.emit({"value": clamped_value})
+
+            return {"msg_out": msg}
+        except (TypeError, ValueError) as e:
+            logger.warning(f"[{self.name}] Invalid input for pitch wheel: {value_in}. Error: {e}")
+            return {"msg_out": None}
+
+
+# ==============================================================================
+# 8. --- NEW: MIDI Control Change (CC) Output Node ---
+# ==============================================================================
+class MIDIControlChangeOutNodeItem(NodeItem):
+    NODE_WIDTH = 150
+
+    def __init__(self, node_logic: "MIDIControlChangeOutNode"):
+        super().__init__(node_logic, width=self.NODE_WIDTH)
+        self.container_widget = QWidget()
+        layout = QVBoxLayout(self.container_widget)
+        layout.setContentsMargins(
+            NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING
+        )
+        layout.setSpacing(4)
+        layout.addWidget(QLabel("CC Number:"))
+        self.cc_spinbox = QSpinBox()
+        self.cc_spinbox.setRange(0, 127)
+        layout.addWidget(self.cc_spinbox)
+        self.value_label = QLabel("Value: 0.00")
+        layout.addWidget(self.value_label)
+        self.setContentWidget(self.container_widget)
+
+        self.cc_spinbox.valueChanged.connect(self.node_logic.set_cc_number)
+        self.node_logic.emitter.stateUpdated.connect(self._on_state_updated)
+        self.updateFromLogic()
+
+    @Slot(dict)
+    def _on_state_updated(self, state: Dict):
+        with QSignalBlocker(self.cc_spinbox):
+            self.cc_spinbox.setValue(state.get("cc_number", 1))
+        self.value_label.setText(f'Value: {state.get("value", 0.0):.2f}')
+
+    @Slot()
+    def updateFromLogic(self):
+        state = self.node_logic.get_current_state()
+        self._on_state_updated(state)
+        super().updateFromLogic()
+
+
+class MIDIControlChangeOutNode(Node):
+    NODE_TYPE = "MIDI Control Change Out"
+    CATEGORY = "MIDI"
+    DESCRIPTION = "Converts a float value (0.0 to 1.0) to a MIDI CC message."
+    UI_CLASS = MIDIControlChangeOutNodeItem
+
+    class Emitter(QObject):
+        stateUpdated = Signal(dict)
+
+    def __init__(self, name: str, node_id: Optional[str] = None):
+        super().__init__(name, node_id)
+        self.emitter = self.Emitter()
+        self.add_input("value_in", data_type=float)
+        self.add_output("msg_out", data_type=object)
+
+        self._lock = threading.Lock()
+        self._cc_number = 1
+        self._last_sent_value = 0.0
+
+    @Slot(int)
+    def set_cc_number(self, cc_number: int):
+        with self._lock:
+            self._cc_number = cc_number
+        self.emitter.stateUpdated.emit({"cc_number": self._cc_number, "value": self._last_sent_value})
+
+    def get_current_state(self) -> Dict:
+        with self._lock:
+            return {"cc_number": self._cc_number, "value": self._last_sent_value}
+
+    def process(self, input_data: Dict) -> Dict:
+        value_in = input_data.get("value_in")
+        if value_in is None:
+            return {"msg_out": None}
+
+        try:
+            # Clamp value to the expected range
+            clamped_value = max(0.0, min(1.0, float(value_in)))
+            # Convert float (0-1) to MIDI CC value (0-127)
+            cc_value = int(round(clamped_value * 127))
+
+            with self._lock:
+                cc_num = self._cc_number
+                if abs(self._last_sent_value - clamped_value) > 1e-4:
+                    self._last_sent_value = clamped_value
+                    self.emitter.stateUpdated.emit({"cc_number": cc_num, "value": clamped_value})
+
+            msg = mido.Message("control_change", control=cc_num, value=cc_value)
+            return {"msg_out": msg}
+
+        except (TypeError, ValueError) as e:
+            logger.warning(f"[{self.name}] Invalid input for CC value: {value_in}. Error: {e}")
+            return {"msg_out": None}
+
+    def serialize_extra(self) -> Dict:
+        with self._lock:
+            return {"cc_number": self._cc_number}
+
+    def deserialize_extra(self, data: Dict):
+        self.set_cc_number(data.get("cc_number", 1))
