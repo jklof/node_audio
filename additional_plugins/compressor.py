@@ -1,56 +1,45 @@
 import torch
-import numpy as np  # Keep for UI mapping
+import torch.nn.functional as F
+import numpy as np
 import threading
 import logging
-import time
-from typing import Dict
+from typing import Dict, Optional, Tuple
 
 # --- Node System Imports ---
 from node_system import Node
-
-# --- MODIFIED: Import torch.Tensor ---
-from constants import DEFAULT_DTYPE, DEFAULT_SAMPLERATE
+from constants import DEFAULT_DTYPE, DEFAULT_SAMPLERATE, DEFAULT_BLOCKSIZE
 
 # --- UI and Qt Imports ---
-from ui_elements import NodeItem, NODE_CONTENT_PADDING
-from PySide6.QtWidgets import QWidget, QSlider, QLabel, QVBoxLayout, QGridLayout
+from ui_elements import NodeItem, NodeStateEmitter, NODE_CONTENT_PADDING
+from PySide6.QtWidgets import QWidget, QSlider, QLabel, QVBoxLayout
 from PySide6.QtCore import Qt, Signal, Slot, QObject, QSignalBlocker
 
-# Configure logging
+# --- Configure logging ---
 logger = logging.getLogger(__name__)
 
-# --- Constants for Compressor ---
-MIN_THRESHOLD_DB = -80.0
+# --- Node-Specific Constants ---
+MIN_THRESHOLD_DB = -60.0
 MAX_THRESHOLD_DB = 0.0
 MIN_RATIO = 1.0
 MAX_RATIO = 20.0
 MIN_ATTACK_MS = 0.1
-MAX_ATTACK_MS = 500.0
-MIN_RELEASE_MS = 10.0
-MAX_RELEASE_MS = 3000.0
+MAX_ATTACK_MS = 100.0
+MIN_RELEASE_MS = 1.0
+MAX_RELEASE_MS = 2000.0
 MIN_KNEE_DB = 0.0
-MAX_KNEE_DB = 12.0
-MIN_MAKEUP_GAIN_DB = 0.0
-MAX_MAKEUP_GAIN_DB = 24.0
-UI_UPDATE_THROTTLE_S = 0.05
-EPSILON = 1e-12
-
+MAX_KNEE_DB = 24.0
+EPSILON = 1e-9
+# --- NEW: Sidechain downsampling factor. 4x is a good balance of performance and accuracy ---
+SIDECHAIN_DOWNSAMPLE_FACTOR = 4
 
 # ==============================================================================
-# 1. State Emitter for UI Communication (No changes needed)
+# 1. UI Class for the Compressor Node (Unchanged)
 # ==============================================================================
-class CompressorEmitter(QObject):
-    stateUpdated = Signal(dict)
-    gainReductionUpdated = Signal(float)
-
-
-# ==============================================================================
-# 2. Custom UI Class (No changes needed)
-# ==============================================================================
-class DynamicRangeCompressorNodeItem(NodeItem):
+class CompressorNodeItem(NodeItem):
+    """Custom UI for the CompressorNode with explicit slider controls."""
     NODE_SPECIFIC_WIDTH = 220
 
-    def __init__(self, node_logic: "DynamicRangeCompressorNode"):
+    def __init__(self, node_logic: "CompressorNode"):
         super().__init__(node_logic, width=self.NODE_SPECIFIC_WIDTH)
 
         self.container_widget = QWidget()
@@ -59,278 +48,314 @@ class DynamicRangeCompressorNodeItem(NodeItem):
             NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING
         )
         main_layout.setSpacing(5)
-
-        controls_layout = QGridLayout()
-        controls_layout.setSpacing(8)
         self.controls = {}
 
-        param_configs = [
-            ("threshold_db", "Threshold", "{:.1f} dB", MIN_THRESHOLD_DB, MAX_THRESHOLD_DB),
-            ("ratio", "Ratio", "{:.1f}:1", MIN_RATIO, MAX_RATIO),
-            ("attack_ms", "Attack", "{:.1f} ms", MIN_ATTACK_MS, MAX_ATTACK_MS),
-            ("release_ms", "Release", "{:.1f} ms", MIN_RELEASE_MS, MAX_RELEASE_MS),
-            ("knee_db", "Knee", "{:.1f} dB", MIN_KNEE_DB, MAX_KNEE_DB),
-            ("makeup_gain_db", "Makeup", "{:.1f} dB", MIN_MAKEUP_GAIN_DB, MAX_MAKEUP_GAIN_DB),
-        ]
+        # --- Create Controls Explicitly ---
+        self.threshold_label, self.threshold_slider = self._create_control(main_layout, "threshold_db", "Threshold", "{:.1f} dB", MIN_THRESHOLD_DB, MAX_THRESHOLD_DB, False)
+        self.ratio_label, self.ratio_slider = self._create_control(main_layout, "ratio", "Ratio", "{:.1f}:1", MIN_RATIO, MAX_RATIO, False)
+        self.attack_label, self.attack_slider = self._create_control(main_layout, "attack_ms", "Attack", "{:.1f} ms", MIN_ATTACK_MS, MAX_ATTACK_MS, True)
+        self.release_label, self.release_slider = self._create_control(main_layout, "release_ms", "Release", "{:.0f} ms", MIN_RELEASE_MS, MAX_RELEASE_MS, True)
+        self.knee_label, self.knee_slider = self._create_control(main_layout, "knee_db", "Knee", "{:.1f} dB", MIN_KNEE_DB, MAX_KNEE_DB, False)
 
-        for i, (key, name, fmt, p_min, p_max) in enumerate(param_configs):
-            param_label = QLabel(name + ":")
-            slider = QSlider(Qt.Orientation.Horizontal)
-            slider.setRange(0, 1000)
-            value_label = QLabel(fmt.format(0.0))
-            value_label.setMinimumWidth(65)
-            value_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-
-            controls_layout.addWidget(param_label, i, 0)
-            controls_layout.addWidget(slider, i, 1)
-            controls_layout.addWidget(value_label, i, 2)
-
-            self.controls[key] = {
-                "slider": slider,
-                "value_label": value_label,
-                "format": fmt,
-                "min_val": p_min,
-                "max_val": p_max,
-            }
-            slider.valueChanged.connect(lambda val, k=key: self._handle_slider_change(k, val))
-
-        main_layout.addLayout(controls_layout)
-
-        self.gr_label = QLabel("GR: 0.0 dB")
-        self.gr_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.gr_label.setStyleSheet("font-weight: bold; color: orange;")
-        main_layout.addWidget(self.gr_label)
+        # --- Connect Signals Explicitly ---
+        self.threshold_slider.valueChanged.connect(self._handle_threshold_change)
+        self.ratio_slider.valueChanged.connect(self._handle_ratio_change)
+        self.attack_slider.valueChanged.connect(self._handle_attack_change)
+        self.release_slider.valueChanged.connect(self._handle_release_change)
+        self.knee_slider.valueChanged.connect(self._handle_knee_change)
 
         self.setContentWidget(self.container_widget)
 
+        # Connect the logic node's state updates back to the UI
         self.node_logic.emitter.stateUpdated.connect(self._on_state_updated)
-        self.node_logic.emitter.gainReductionUpdated.connect(self._update_gr_display)
         self.updateFromLogic()
+
+    def _create_control(self, layout, key, name, fmt, p_min, p_max, is_log):
+        """Helper to reduce boilerplate for creating a label and slider."""
+        label = QLabel(f"{name}: ...")
+        slider = QSlider(Qt.Orientation.Horizontal)
+        slider.setRange(0, 1000)
+        layout.addWidget(label)
+        layout.addWidget(slider)
+
+        self.controls[key] = {
+            "slider": slider, "label": label, "format": fmt,
+            "min_val": p_min, "max_val": p_max, "is_log": is_log, "name": name,
+        }
+        return label, slider
 
     def _map_slider_to_logical(self, key: str, value: int) -> float:
         info = self.controls[key]
         norm = value / 1000.0
-        return info["min_val"] + norm * (info["max_val"] - info["min_val"])
+        if info["is_log"]:
+            log_min = np.log10(info["min_val"])
+            log_max = np.log10(info["max_val"])
+            return 10 ** (log_min + norm * (log_max - log_min))
+        else:
+            return info["min_val"] + norm * (info["max_val"] - info["min_val"])
 
     def _map_logical_to_slider(self, key: str, value: float) -> int:
         info = self.controls[key]
-        range_val = info["max_val"] - info["min_val"]
-        if abs(range_val) < EPSILON:
-            return 0
-        norm = (np.clip(value, info["min_val"], info["max_val"]) - info["min_val"]) / range_val
-        return int(round(norm * 1000.0))
+        if info["is_log"]:
+            log_min = np.log10(info["min_val"])
+            log_max = np.log10(info["max_val"])
+            range_val = log_max - log_min
+            if abs(range_val) < EPSILON: return 0
+            safe_val = np.clip(value, info["min_val"], info["max_val"])
+            norm = (np.log10(safe_val) - log_min) / range_val
+            return int(round(norm * 1000.0))
+        else:
+            range_val = info["max_val"] - info["min_val"]
+            if abs(range_val) < EPSILON: return 0
+            norm = (np.clip(value, info["min_val"], info["max_val"]) - info["min_val"]) / range_val
+            return int(round(norm * 1000.0))
 
-    @Slot(str, int)
-    def _handle_slider_change(self, key: str, value: int):
-        logical_val = self._map_slider_to_logical(key, value)
-        setter = getattr(self.node_logic, f"set_{key}", None)
-        if setter:
-            setter(logical_val)
+    # --- Explicit Signal Handlers ---
+    @Slot(int)
+    def _handle_threshold_change(self, value: int):
+        self.node_logic.set_threshold_db(self._map_slider_to_logical("threshold_db", value))
+
+    @Slot(int)
+    def _handle_ratio_change(self, value: int):
+        self.node_logic.set_ratio(self._map_slider_to_logical("ratio", value))
+
+    @Slot(int)
+    def _handle_attack_change(self, value: int):
+        self.node_logic.set_attack_ms(self._map_slider_to_logical("attack_ms", value))
+
+    @Slot(int)
+    def _handle_release_change(self, value: int):
+        self.node_logic.set_release_ms(self._map_slider_to_logical("release_ms", value))
+
+    @Slot(int)
+    def _handle_knee_change(self, value: int):
+        self.node_logic.set_knee_db(self._map_slider_to_logical("knee_db", value))
 
     @Slot(dict)
     def _on_state_updated(self, state: dict):
         for key, control_info in self.controls.items():
             value = state.get(key, control_info["min_val"])
-
             is_connected = key in self.node_logic.inputs and self.node_logic.inputs[key].connections
             control_info["slider"].setEnabled(not is_connected)
 
             with QSignalBlocker(control_info["slider"]):
                 control_info["slider"].setValue(self._map_logical_to_slider(key, value))
 
-            label_text = control_info["format"].format(value)
+            label_text = f"{control_info['name']}: {control_info['format'].format(value)}"
             if is_connected:
                 label_text += " (ext)"
-            control_info["value_label"].setText(label_text)
-
-    @Slot(float)
-    def _update_gr_display(self, gr_db: float):
-        self.gr_label.setText(f"GR: {gr_db:.1f} dB")
+            control_info["label"].setText(label_text)
 
     @Slot()
     def updateFromLogic(self):
         state = self.node_logic.get_current_state_snapshot()
         self._on_state_updated(state)
-        last_gr = self.node_logic.get_current_gain_reduction_db()
-        self._update_gr_display(float(last_gr))
         super().updateFromLogic()
 
-
 # ==============================================================================
-# 3. Logic Class for Dynamic Range Compressor (CONVERTED TO TORCH)
+# 2. Logic Class for the Compressor Node (MODIFIED)
 # ==============================================================================
-class DynamicRangeCompressorNode(Node):
-    NODE_TYPE = "Dynamic Range Compressor"
-    UI_CLASS = DynamicRangeCompressorNodeItem
+class CompressorNode(Node):
+    NODE_TYPE = "Compressor"
+    UI_CLASS = CompressorNodeItem
     CATEGORY = "Effects"
-    DESCRIPTION = "Reduces audio dynamic range by attenuating loud sounds."
+    DESCRIPTION = "Reduces the dynamic range of a signal."
 
-    def __init__(self, name, node_id=None):
+    def __init__(self, name: str, node_id: Optional[str] = None):
         super().__init__(name, node_id)
-        self.emitter = CompressorEmitter()
-
-        # --- MODIFIED: Define Sockets with torch.Tensor ---
+        self.emitter = NodeStateEmitter()
         self.add_input("in", data_type=torch.Tensor)
         self.add_input("threshold_db", data_type=float)
         self.add_input("ratio", data_type=float)
         self.add_input("attack_ms", data_type=float)
         self.add_input("release_ms", data_type=float)
         self.add_input("knee_db", data_type=float)
-        self.add_input("makeup_gain_db", data_type=float)
         self.add_output("out", data_type=torch.Tensor)
-        self.add_output("gain_reduction_db", data_type=float)
 
-        # --- Internal State ---
         self._lock = threading.Lock()
         self._threshold_db = -20.0
-        self._ratio = 2.0
-        self._attack_ms = 20.0
+        self._ratio = 4.0
+        self._attack_ms = 5.0
         self._release_ms = 100.0
-        self._knee_db = 0.0
-        self._makeup_gain_db = 0.0
+        self._knee_db = 6.0
+        self._samplerate = DEFAULT_SAMPLERATE
+        self._envelope = 0.0
 
-        # --- DSP State ---
-        self._samplerate = float(DEFAULT_SAMPLERATE)
-        self._detector_envelope = 0.0
-        self._compressor_gain_db = 0.0
-        self._last_ui_update_time = 0
-        self._update_coefficients()
+    # --- Parameter Setters (Unchanged) ---
+    def set_threshold_db(self, value: float):
+        state_to_emit = None
+        with self._lock:
+            clipped_value = np.clip(float(value), MIN_THRESHOLD_DB, MAX_THRESHOLD_DB)
+            if self._threshold_db != clipped_value: self._threshold_db = clipped_value; state_to_emit = self.get_current_state_snapshot(locked=True)
+        if state_to_emit: self.emitter.stateUpdated.emit(state_to_emit)
 
-    def _calculate_coeff(self, time_ms: float) -> float:
-        if time_ms <= 0.0:
-            return 0.0
-        # --- MODIFIED: Use torch.exp ---
-        return torch.exp(torch.tensor(-1.0 / (time_ms * 0.001 * self._samplerate))).item()
+    def set_ratio(self, value: float):
+        state_to_emit = None
+        with self._lock:
+            clipped_value = np.clip(float(value), MIN_RATIO, MAX_RATIO)
+            if self._ratio != clipped_value: self._ratio = clipped_value; state_to_emit = self.get_current_state_snapshot(locked=True)
+        if state_to_emit: self.emitter.stateUpdated.emit(state_to_emit)
 
-    def _update_coefficients(self):
-        self._attack_coeff = self._calculate_coeff(self._attack_ms)
-        self._release_coeff = self._calculate_coeff(self._release_ms)
-        logger.debug(
-            f"[{self.name}] Coeffs updated: Attack={self._attack_coeff:.4f}, Release={self._release_coeff:.4f}"
-        )
+    def set_attack_ms(self, value: float):
+        state_to_emit = None
+        with self._lock:
+            clipped_value = np.clip(float(value), MIN_ATTACK_MS, MAX_ATTACK_MS)
+            if self._attack_ms != clipped_value: self._attack_ms = clipped_value; state_to_emit = self.get_current_state_snapshot(locked=True)
+        if state_to_emit: self.emitter.stateUpdated.emit(state_to_emit)
+
+    def set_release_ms(self, value: float):
+        state_to_emit = None
+        with self._lock:
+            clipped_value = np.clip(float(value), MIN_RELEASE_MS, MAX_RELEASE_MS)
+            if self._release_ms != clipped_value: self._release_ms = clipped_value; state_to_emit = self.get_current_state_snapshot(locked=True)
+        if state_to_emit: self.emitter.stateUpdated.emit(state_to_emit)
+
+    def set_knee_db(self, value: float):
+        state_to_emit = None
+        with self._lock:
+            clipped_value = np.clip(float(value), MIN_KNEE_DB, MAX_KNEE_DB)
+            if self._knee_db != clipped_value: self._knee_db = clipped_value; state_to_emit = self.get_current_state_snapshot(locked=True)
+        if state_to_emit: self.emitter.stateUpdated.emit(state_to_emit)
 
     def get_current_state_snapshot(self, locked: bool = False) -> Dict:
         state = {
-            "threshold_db": self._threshold_db,
-            "ratio": self._ratio,
-            "attack_ms": self._attack_ms,
-            "release_ms": self._release_ms,
-            "knee_db": self._knee_db,
-            "makeup_gain_db": self._makeup_gain_db,
+            "threshold_db": self._threshold_db, "ratio": self._ratio, "attack_ms": self._attack_ms,
+            "release_ms": self._release_ms, "knee_db": self._knee_db,
         }
-        if locked:
-            return state
-        with self._lock:
-            return state
-
-    def process(self, input_data: dict) -> dict:
-        signal_in = input_data.get("in")
-        if not isinstance(signal_in, torch.Tensor):
-            with self._lock:
-                self._compressor_gain_db = self._release_coeff * self._compressor_gain_db
-            return {"out": None, "gain_reduction_db": self._compressor_gain_db}
-
-        state_update_needed = False
-        with self._lock:
-            params = ["threshold_db", "ratio", "attack_ms", "release_ms", "knee_db", "makeup_gain_db"]
-            for p in params:
-                socket_val = input_data.get(p)
-                if socket_val is not None:
-                    if getattr(self, f"_{p}") != float(socket_val):
-                        setattr(self, f"_{p}", float(socket_val))
-                        state_update_needed = True
-            if state_update_needed and any(
-                p in ["attack_ms", "release_ms"] for p, v in input_data.items() if v is not None
-            ):
-                self._update_coefficients()
-
-            threshold, ratio, knee = self._threshold_db, self._ratio, self._knee_db
-            attack_c, release_c = self._attack_coeff, self._release_coeff
-            makeup_gain = self._makeup_gain_db
-            detector_env = self._detector_envelope
-            comp_gain = self._compressor_gain_db
-
-        if state_update_needed:
-            self.emitter.stateUpdated.emit(self.get_current_state_snapshot())
-
-        # --- MODIFIED: Vectorized PyTorch Processing ---
-        # 1. Create mono signal for detector path
-        mono_signal = torch.mean(torch.abs(signal_in), dim=0)
-        output_block = torch.zeros_like(signal_in)
-        num_samples = mono_signal.shape[0]
-
-        # Loop is still required for the recursive envelope follower, but all math is now torch.
-        for i in range(num_samples):
-            detector_env = max(mono_signal[i].item(), detector_env * release_c)
-            level_db = 20 * torch.log10(torch.tensor(detector_env + EPSILON))
-
-            over_db = level_db - threshold
-            gain_reduction_db = 0.0
-
-            if knee > 0 and over_db > -knee / 2:
-                if over_db < knee / 2:
-                    gain_reduction_db = (1 / ratio - 1) * (over_db + knee / 2) ** 2 / (2 * knee)
-                else:
-                    gain_reduction_db = (1 / ratio - 1) * over_db
-            elif over_db > 0:
-                gain_reduction_db = (1 / ratio - 1) * over_db
-
-            target_gain = gain_reduction_db
-            if target_gain < comp_gain:
-                comp_gain = attack_c * comp_gain + (1 - attack_c) * target_gain
-            else:
-                comp_gain = release_c * comp_gain + (1 - release_c) * target_gain
-
-            linear_gain = 10 ** ((comp_gain + makeup_gain) / 20.0)
-            output_block[:, i] = signal_in[:, i] * linear_gain
-
-        with self._lock:
-            self._detector_envelope = detector_env
-            self._compressor_gain_db = comp_gain
-
-        current_time = time.monotonic()
-        if current_time >= self._last_ui_update_time + UI_UPDATE_THROTTLE_S:
-            self.emitter.gainReductionUpdated.emit(comp_gain)
-            self._last_ui_update_time = current_time
-
-        return {"out": output_block.to(DEFAULT_DTYPE), "gain_reduction_db": comp_gain}
-
-    @staticmethod
-    def _create_setter(param_name: str, min_val: float, max_val: float):
-        def setter(self, value: float):
-            needs_coeff_update = False
-            state_to_emit = None
-            with self._lock:
-                # --- MODIFIED: Use torch.clip ---
-                clipped_value = torch.clip(torch.tensor(value), min_val, max_val).item()
-                if getattr(self, f"_{param_name}") != clipped_value:
-                    setattr(self, f"_{param_name}", clipped_value)
-                    if param_name in ["attack_ms", "release_ms"]:
-                        needs_coeff_update = True
-                    state_to_emit = self.get_current_state_snapshot(locked=True)
-            if needs_coeff_update:
-                self._update_coefficients()
-            if state_to_emit:
-                self.emitter.stateUpdated.emit(state_to_emit)
-
-        return setter
-
-    set_threshold_db = _create_setter("threshold_db", MIN_THRESHOLD_DB, MAX_THRESHOLD_DB)
-    set_ratio = _create_setter("ratio", MIN_RATIO, MAX_RATIO)
-    set_attack_ms = _create_setter("attack_ms", MIN_ATTACK_MS, MAX_ATTACK_MS)
-    set_release_ms = _create_setter("release_ms", MIN_RELEASE_MS, MAX_RELEASE_MS)
-    set_knee_db = _create_setter("knee_db", MIN_KNEE_DB, MAX_KNEE_DB)
-    set_makeup_gain_db = _create_setter("makeup_gain_db", MIN_MAKEUP_GAIN_DB, MAX_MAKEUP_GAIN_DB)
-
-    def get_current_gain_reduction_db(self) -> float:
-        with self._lock:
-            return self._compressor_gain_db
+        if locked: return state
+        with self._lock: return state
 
     def start(self):
         with self._lock:
-            self._detector_envelope = 0.0
-            self._compressor_gain_db = 0.0
-        logger.debug(f"[{self.name}] State reset on start.")
+            self._envelope = 0.0
+
+    # --- NEW: JIT-Compiled, full DSP processing function with DOWNSAMPLED sidechain ---
+    @staticmethod
+    @torch.jit.script
+    def _jit_process_dsp(
+        signal: torch.Tensor,
+        initial_envelope: float,
+        threshold_db: float,
+        ratio: float,
+        knee_db: float,
+        attack_coeff: float,
+        release_coeff: float,
+        epsilon: float,
+        downsample_factor: int
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        
+        # 1. Level Detection
+        level_db = 20 * torch.log10(torch.abs(signal) + epsilon)
+
+        # 2. Branchless Gain Computation
+        slope = 1.0 / ratio - 1.0
+        knee_start = threshold_db - knee_db / 2.0
+        knee_end = threshold_db + knee_db / 2.0
+        
+        is_below = level_db < knee_start
+        is_inside = (level_db >= knee_start) & (level_db <= knee_end)
+        
+        gain_below = torch.zeros_like(level_db)
+        gain_inside = slope * (((level_db - knee_start) ** 2) / (2.0 * max(epsilon, knee_db)))
+        gain_above = slope * (level_db - threshold_db)
+        
+        gain_reduction_db = torch.where(
+            is_below, gain_below, torch.where(is_inside, gain_inside, gain_above)
+        )
+        
+        # --- 3. DOWNSAMPLED Envelope Follower ---
+        sidechain_target, _ = torch.max(torch.abs(gain_reduction_db), dim=0)
+        
+        # Downsample by averaging windows
+        downsampled_sidechain = F.avg_pool1d(sidechain_target.unsqueeze(0), kernel_size=downsample_factor, stride=downsample_factor).squeeze(0)
+        
+        num_samples_down = downsampled_sidechain.shape[0]
+        envelope_out_down = torch.zeros_like(downsampled_sidechain)
+        env = torch.tensor(initial_envelope, dtype=downsampled_sidechain.dtype, device=downsampled_sidechain.device)
+
+        # This loop now runs N times faster
+        for i in range(num_samples_down):
+            target = downsampled_sidechain[i]
+            coeff = attack_coeff if target > env else release_coeff
+            env = target + coeff * (env - target)
+            envelope_out_down[i] = env
+            
+        # Upsample the envelope back to full size using linear interpolation
+        envelope_out_mono = F.interpolate(envelope_out_down.unsqueeze(0).unsqueeze(0), 
+                                          size=signal.shape[1], 
+                                          mode='linear', 
+                                          align_corners=False).squeeze(0).squeeze(0)
+
+        # 4. Apply Gain
+        gain_reduction_linear = 10 ** (-envelope_out_mono / 20.0)
+        output_signal = signal * gain_reduction_linear
+
+        return output_signal, env
+
+    def process(self, input_data: dict) -> dict:
+        signal = input_data.get("in")
+        if not isinstance(signal, torch.Tensor):
+            return {"out": None}
+
+        # --- State update logic (Unchanged) ---
+        state_to_emit = None
+        ui_update_needed = False
+        with self._lock:
+            # This section remains the same...
+            threshold_socket_val = input_data.get("threshold_db")
+            if threshold_socket_val is not None:
+                clipped_val = np.clip(float(threshold_socket_val), MIN_THRESHOLD_DB, MAX_THRESHOLD_DB)
+                if self._threshold_db != clipped_val: self._threshold_db = clipped_val; ui_update_needed = True
+            ratio_socket_val = input_data.get("ratio")
+            if ratio_socket_val is not None:
+                clipped_val = np.clip(float(ratio_socket_val), MIN_RATIO, MAX_RATIO)
+                if self._ratio != clipped_val: self._ratio = clipped_val; ui_update_needed = True
+            attack_socket_val = input_data.get("attack_ms")
+            if attack_socket_val is not None:
+                clipped_val = np.clip(float(attack_socket_val), MIN_ATTACK_MS, MAX_ATTACK_MS)
+                if self._attack_ms != clipped_val: self._attack_ms = clipped_val; ui_update_needed = True
+            release_socket_val = input_data.get("release_ms")
+            if release_socket_val is not None:
+                clipped_val = np.clip(float(release_socket_val), MIN_RELEASE_MS, MAX_RELEASE_MS)
+                if self._release_ms != clipped_val: self._release_ms = clipped_val; ui_update_needed = True
+            knee_socket_val = input_data.get("knee_db")
+            if knee_socket_val is not None:
+                clipped_val = np.clip(float(knee_socket_val), MIN_KNEE_DB, MAX_KNEE_DB)
+                if self._knee_db != clipped_val: self._knee_db = clipped_val; ui_update_needed = True
+
+            threshold_db, ratio, attack_ms, release_ms, knee_db, initial_envelope = (
+                self._threshold_db, self._ratio, self._attack_ms, self._release_ms, self._knee_db, self._envelope
+            )
+            
+            if ui_update_needed:
+                state_to_emit = self.get_current_state_snapshot(locked=True)
+
+        if state_to_emit:
+            self.emitter.stateUpdated.emit(state_to_emit)
+
+        # --- DSP Processing (MODIFIED) ---
+        # The sample rate for the envelope follower is now lower
+        downsampled_samplerate = self._samplerate / SIDECHAIN_DOWNSAMPLE_FACTOR
+        attack_coeff = np.exp(-1.0 / (downsampled_samplerate * (attack_ms / 1000.0))).item()
+        release_coeff = np.exp(-1.0 / (downsampled_samplerate * (release_ms / 1000.0))).item()
+        
+        # --- REPLACEMENT ---
+        # Call the final, all-encompassing JIT function with the downsampling factor
+        output_signal, final_env_tensor = self._jit_process_dsp(
+            signal,
+            initial_envelope,
+            threshold_db,
+            ratio,
+            knee_db,
+            attack_coeff,
+            release_coeff,
+            EPSILON,
+            SIDECHAIN_DOWNSAMPLE_FACTOR
+        )
+        self._envelope = final_env_tensor.item()
+        # --- END REPLACEMENT ---
+        
+        return {"out": output_signal}
 
     def serialize_extra(self) -> dict:
         return self.get_current_state_snapshot()
@@ -338,9 +363,7 @@ class DynamicRangeCompressorNode(Node):
     def deserialize_extra(self, data: dict):
         with self._lock:
             self._threshold_db = data.get("threshold_db", -20.0)
-            self._ratio = data.get("ratio", 2.0)
-            self._attack_ms = data.get("attack_ms", 20.0)
+            self._ratio = data.get("ratio", 4.0)
+            self._attack_ms = data.get("attack_ms", 5.0)
             self._release_ms = data.get("release_ms", 100.0)
-            self._knee_db = data.get("knee_db", 0.0)
-            self._makeup_gain_db = data.get("makeup_gain_db", 0.0)
-        self._update_coefficients()
+            self._knee_db = data.get("knee_db", 6.0)

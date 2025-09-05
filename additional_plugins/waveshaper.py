@@ -10,7 +10,7 @@ from node_system import Node
 from constants import DEFAULT_DTYPE
 
 # --- UI and Qt Imports ---
-from ui_elements import NodeItem, NODE_CONTENT_PADDING
+from ui_elements import NodeItem, NodeStateEmitter
 from PySide6.QtWidgets import (
     QWidget,
     QLabel,
@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QHBoxLayout,
 )
-from PySide6.QtCore import Qt, Slot, QSignalBlocker, Signal, QObject
+from PySide6.QtCore import Qt, Slot, QSignalBlocker
 from PySide6.QtGui import QFontMetrics
 
 # Configure logging
@@ -27,20 +27,13 @@ logger = logging.getLogger(__name__)
 
 
 # ==============================================================================
-# Enum for Shaper Types and Emitter for UI Communication
+# Enum for Shaper Types
 # ==============================================================================
 class ShaperType(Enum):
     SOFT_CLIP = "Soft Clip (Tanh)"
     HARD_CLIP = "Hard Clip"
     FOLD = "Foldback"
     SINE = "Sine Distortion"
-
-
-class WaveShaperEmitter(QObject):
-    """A dedicated QObject to safely emit signals from the logic to the UI thread."""
-
-    stateUpdated = Signal(dict)
-
 
 # ==============================================================================
 # UI Class for the WaveShaper Node
@@ -133,58 +126,45 @@ class WaveShaperNodeItem(NodeItem):
 
     @Slot(int)
     def _handle_drive_change(self, dial_value: int):
-        # Map dial's 0-1000 range to a logical 1.0-100.0 range
         logical_drive = 1.0 + (dial_value / 1000.0) * 99.0
         self.node_logic.set_drive(logical_drive)
 
     @Slot(int)
     def _handle_mix_change(self, dial_value: int):
-        # Map dial's 0-1000 range to a logical 0.0-1.0 range
         logical_mix = dial_value / 1000.0
         self.node_logic.set_mix(logical_mix)
 
     @Slot(dict)
     def _on_state_updated(self, state: dict):
-        """Central slot to update all UI controls from a state dictionary."""
         shaper_type = state.get("shaper_type")
         drive = state.get("drive", 1.0)
         mix = state.get("mix", 1.0)
 
-        # Update Shaper Type
         with QSignalBlocker(self.type_combo):
             index = self.type_combo.findData(shaper_type)
             if index != -1:
                 self.type_combo.setCurrentIndex(index)
 
-        # Update Drive
         with QSignalBlocker(self.drive_dial):
             dial_value = int(((drive - 1.0) / 99.0) * 1000.0)
             self.drive_dial.setValue(dial_value)
 
         is_drive_socket_connected = "drive" in self.node_logic.inputs and self.node_logic.inputs["drive"].connections
         self.drive_dial.setEnabled(not is_drive_socket_connected)
-
-        label_text = f"{drive:.1f}"
-        if is_drive_socket_connected:
-            label_text += " (ext)"
+        label_text = f"{drive:.1f}{' (ext)' if is_drive_socket_connected else ''}"
         self.drive_value_label.setText(label_text)
 
-        # Update Mix
         with QSignalBlocker(self.mix_dial):
             dial_value = int(mix * 1000.0)
             self.mix_dial.setValue(dial_value)
 
         is_mix_socket_connected = "mix" in self.node_logic.inputs and self.node_logic.inputs["mix"].connections
         self.mix_dial.setEnabled(not is_mix_socket_connected)
-
-        label_text = f"{mix:.2f}"
-        if is_mix_socket_connected:
-            label_text += " (ext)"
+        label_text = f"{mix:.2f}{' (ext)' if is_mix_socket_connected else ''}"
         self.mix_value_label.setText(label_text)
 
     @Slot()
     def updateFromLogic(self):
-        """Requests a full state snapshot from the logic and updates the UI."""
         state = self.node_logic.get_current_state_snapshot()
         self._on_state_updated(state)
         super().updateFromLogic()
@@ -201,8 +181,7 @@ class WaveShaperNode(Node):
 
     def __init__(self, name, node_id=None):
         super().__init__(name, node_id)
-        self.emitter = WaveShaperEmitter()
-        # --- MODIFIED: Sockets now use torch.Tensor ---
+        self.emitter = NodeStateEmitter()
         self.add_input("in", data_type=torch.Tensor)
         self.add_input("drive", data_type=float)
         self.add_input("mix", data_type=float)
@@ -213,13 +192,13 @@ class WaveShaperNode(Node):
         self._drive: float = 1.0
         self._mix: float = 1.0
 
-    def _get_current_state_snapshot_locked(self) -> Dict:
-        """Returns a copy of the current parameters for UI synchronization. Assumes caller holds the lock."""
-        return {"shaper_type": self._shaper_type, "drive": self._drive, "mix": self._mix}
-
-    def get_current_state_snapshot(self) -> Dict:
+    def get_current_state_snapshot(self, locked: bool = False) -> Dict:
+        """Returns a copy of the current parameters for UI or serialization."""
+        state = {"shaper_type": self._shaper_type, "drive": self._drive, "mix": self._mix}
+        if locked:
+            return state
         with self._lock:
-            return self._get_current_state_snapshot_locked()
+            return state
 
     @Slot(ShaperType)
     def set_shaper_type(self, shaper_type: ShaperType):
@@ -227,7 +206,7 @@ class WaveShaperNode(Node):
         with self._lock:
             if self._shaper_type != shaper_type:
                 self._shaper_type = shaper_type
-                state_to_emit = self._get_current_state_snapshot_locked()
+                state_to_emit = self.get_current_state_snapshot(locked=True)
         if state_to_emit:
             self.emitter.stateUpdated.emit(state_to_emit)
 
@@ -235,10 +214,10 @@ class WaveShaperNode(Node):
     def set_drive(self, drive: float):
         state_to_emit = None
         with self._lock:
-            new_drive = np.clip(float(drive), 1.0, 100.0)
+            new_drive = np.clip(float(drive), 1.0, 100.0).item()
             if self._drive != new_drive:
                 self._drive = new_drive
-                state_to_emit = self._get_current_state_snapshot_locked()
+                state_to_emit = self.get_current_state_snapshot(locked=True)
         if state_to_emit:
             self.emitter.stateUpdated.emit(state_to_emit)
 
@@ -246,45 +225,52 @@ class WaveShaperNode(Node):
     def set_mix(self, mix: float):
         state_to_emit = None
         with self._lock:
-            new_mix = np.clip(float(mix), 0.0, 1.0)
+            new_mix = np.clip(float(mix), 0.0, 1.0).item()
             if self._mix != new_mix:
                 self._mix = new_mix
-                state_to_emit = self._get_current_state_snapshot_locked()
+                state_to_emit = self.get_current_state_snapshot(locked=True)
         if state_to_emit:
             self.emitter.stateUpdated.emit(state_to_emit)
 
     def process(self, input_data: dict) -> dict:
         signal = input_data.get("in")
-        # --- MODIFIED: Check for torch.Tensor ---
         if not isinstance(signal, torch.Tensor):
             return {"out": None}
 
-        state_snapshot_to_emit = None
+        # --- CORRECTED: State update logic to prevent calling setters from audio thread ---
+        state_to_emit = None
+        ui_update_needed = False
         with self._lock:
-            # Prioritize socket input for drive
-            drive_socket = input_data.get("drive")
-            if drive_socket is not None:
-                new_drive = np.clip(float(drive_socket), 1.0, 100.0)
-                if abs(self._drive - new_drive) > 1e-6:
-                    self._drive = new_drive
-                    state_snapshot_to_emit = self._get_current_state_snapshot_locked()
+            # Check for changes from input sockets and update values directly
+            drive_socket_val = input_data.get("drive")
+            if drive_socket_val is not None:
+                clipped_val = np.clip(float(drive_socket_val), 1.0, 100.0).item()
+                if self._drive != clipped_val:
+                    self._drive = clipped_val
+                    ui_update_needed = True
 
-            # Prioritize socket input for mix
-            mix_socket = input_data.get("mix")
-            if mix_socket is not None:
-                new_mix = np.clip(float(mix_socket), 0.0, 1.0)
-                if abs(self._mix - new_mix) > 1e-6:
-                    self._mix = new_mix
-                    state_snapshot_to_emit = self._get_current_state_snapshot_locked()
+            mix_socket_val = input_data.get("mix")
+            if mix_socket_val is not None:
+                clipped_val = np.clip(float(mix_socket_val), 0.0, 1.0).item()
+                if self._mix != clipped_val:
+                    self._mix = clipped_val
+                    ui_update_needed = True
 
+            # Copy current state to local variables for processing
             drive = self._drive
             mix = self._mix
             shaper_type = self._shaper_type
+            
+            # If a value changed, get a state snapshot to emit after releasing the lock
+            if ui_update_needed:
+                state_to_emit = self.get_current_state_snapshot(locked=True)
 
-        if state_snapshot_to_emit:
-            self.emitter.stateUpdated.emit(state_snapshot_to_emit)
+        # Emit signal to UI AFTER the lock is released
+        if state_to_emit:
+            self.emitter.stateUpdated.emit(state_to_emit)
+        # --- END CORRECTION ---
 
-        # --- MODIFIED: All processing is now done with PyTorch ---
+        # All processing is now done with PyTorch
         driven_signal = signal * drive
         output_signal = None
 
@@ -293,16 +279,17 @@ class WaveShaperNode(Node):
         elif shaper_type == ShaperType.HARD_CLIP:
             output_signal = torch.clamp(driven_signal, -1.0, 1.0)
         elif shaper_type == ShaperType.FOLD:
+            # This foldback logic is a simple, effective approximation
             output_signal = torch.abs(torch.fmod(driven_signal + 1, 4) - 2) - 1
         elif shaper_type == ShaperType.SINE:
+            # Clip the input to +/- 1 to keep the sine function within a single cycle
             clipped_driven_signal = torch.clamp(driven_signal, -1.0, 1.0)
             output_signal = torch.sin(0.5 * torch.pi * clipped_driven_signal)
 
         # Apply dry-wet mix
-        final_mix = mix
-        output_signal = signal * (1 - final_mix) + output_signal * final_mix
+        final_signal = signal * (1 - mix) + output_signal * mix
 
-        return {"out": output_signal.to(DEFAULT_DTYPE)}
+        return {"out": final_signal.to(DEFAULT_DTYPE)}
 
     def serialize_extra(self) -> dict:
         with self._lock:
@@ -313,11 +300,15 @@ class WaveShaperNode(Node):
             }
 
     def deserialize_extra(self, data: dict):
-        with self._lock:
-            shaper_type_name = data.get("shaper_type", ShaperType.SOFT_CLIP.name)
-            try:
-                self._shaper_type = ShaperType[shaper_type_name]
-            except KeyError:
-                self._shaper_type = ShaperType.SOFT_CLIP
-            self._drive = np.clip(float(data.get("drive", 1.0)), 1.0, 100.0)
-            self._mix = np.clip(float(data.get("mix", 1.0)), 0.0, 1.0)
+        shaper_type_name = data.get("shaper_type", ShaperType.SOFT_CLIP.name)
+        try:
+            shaper_type_enum = ShaperType[shaper_type_name]
+        except KeyError:
+            shaper_type_enum = ShaperType.SOFT_CLIP
+        
+        # Use the public setters during deserialization. This happens on the main
+        # thread when the graph is loading, so it is perfectly safe and ensures
+        # the UI is correctly initialized with the loaded state.
+        self.set_shaper_type(shaper_type_enum)
+        self.set_drive(data.get("drive", 1.0))
+        self.set_mix(data.get("mix", 1.0))

@@ -2,11 +2,11 @@ import mido
 import threading
 import logging
 from collections import deque
-from typing import Dict, Optional
+from typing import Dict, Optional, List
 
 # --- Node System Imports ---
 from node_system import Node
-from ui_elements import NodeItem, NODE_CONTENT_PADDING
+from ui_elements import NodeItem, NodeStateEmitter, NODE_CONTENT_PADDING
 
 # --- Qt Imports ---
 from PySide6.QtWidgets import QWidget, QSizePolicy
@@ -24,7 +24,7 @@ class PianoWidget(QWidget):
     """A custom widget that draws and handles interactions for a piano keyboard."""
 
     noteOn = Signal(int, int)  # note, velocity
-    noteOff = Signal(int)  # note
+    noteOff = Signal(int)      # note
 
     def __init__(self, start_note=48, num_octaves=2, parent=None):
         super().__init__(parent)
@@ -33,7 +33,7 @@ class PianoWidget(QWidget):
         self.num_keys = num_octaves * 12
 
         self._key_rects = {}
-        self._pressed_keys = set()
+        self._active_notes = set()  # This is the source of truth for DRAWING ONLY.
         self._last_mouse_note = -1
 
         self.white_key_brush = QBrush(QColor("white"))
@@ -46,6 +46,14 @@ class PianoWidget(QWidget):
     def sizeHint(self) -> QSize:
         """Provides a reasonable default size for the widget."""
         return QSize(300, 80)
+
+    @Slot(list)
+    def set_active_notes(self, notes: List[int]):
+        """Receives the authoritative list of active notes from the logic node."""
+        new_notes = set(notes)
+        if self._active_notes != new_notes:
+            self._active_notes = new_notes
+            self.update()  # Schedule a repaint to reflect the new state
 
     def _calculate_key_rects(self):
         """Calculates the QRectF for each key based on widget size."""
@@ -89,14 +97,14 @@ class PianoWidget(QWidget):
         # Draw white keys first
         for note, rect in self._key_rects.items():
             if (note - self.start_note) % 12 not in [1, 3, 6, 8, 10]:
-                painter.setBrush(self.pressed_key_brush if note in self._pressed_keys else self.white_key_brush)
+                painter.setBrush(self.pressed_key_brush if note in self._active_notes else self.white_key_brush)
                 painter.setPen(QPen(QColor("black"), 1))
                 painter.drawRect(rect)
 
         # Draw black keys on top
         for note, rect in self._key_rects.items():
             if (note - self.start_note) % 12 in [1, 3, 6, 8, 10]:
-                painter.setBrush(self.pressed_key_brush if note in self._pressed_keys else self.black_key_brush)
+                painter.setBrush(self.pressed_key_brush if note in self._active_notes else self.black_key_brush)
                 painter.setPen(Qt.PenStyle.NoPen)
                 painter.drawRect(rect)
 
@@ -115,31 +123,22 @@ class PianoWidget(QWidget):
         if event.button() == Qt.MouseButton.LeftButton:
             note = self._get_note_at_pos(event.position())
             if note != -1:
-                self._pressed_keys.add(note)
                 self._last_mouse_note = note
-                self.noteOn.emit(note, 100)  # Fixed velocity for now
-                self.update()
+                self.noteOn.emit(note, 100)  # Emit signal to logic node
 
     def mouseMoveEvent(self, event):
         if event.buttons() & Qt.MouseButton.LeftButton:
             note = self._get_note_at_pos(event.position())
             if note != -1 and note != self._last_mouse_note:
-                # Release old note if it's valid
                 if self._last_mouse_note != -1:
                     self.noteOff.emit(self._last_mouse_note)
-                    self._pressed_keys.discard(self._last_mouse_note)
-                # Press new note
-                self._pressed_keys.add(note)
                 self._last_mouse_note = note
                 self.noteOn.emit(note, 100)
-                self.update()
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton and self._last_mouse_note != -1:
             self.noteOff.emit(self._last_mouse_note)
-            self._pressed_keys.clear()
             self._last_mouse_note = -1
-            self.update()
 
 
 # ==============================================================================
@@ -154,12 +153,22 @@ class MIDIKeyboardNodeItem(NodeItem):
         self.piano_widget = PianoWidget()
         self.setContentWidget(self.piano_widget)
 
+        # Connect UI actions (View -> Logic)
         self.piano_widget.noteOn.connect(self.node_logic.play_note)
         self.piano_widget.noteOff.connect(self.node_logic.stop_note)
 
+        # Connect state updates (Logic -> View)
+        self.node_logic.emitter.stateUpdated.connect(self._on_state_updated)
+
+    @Slot(dict)
+    def _on_state_updated(self, state: dict):
+        """Receives state from the logic and tells the UI widget what to draw."""
+        active_notes = state.get("active_notes", [])
+        self.piano_widget.set_active_notes(active_notes)
+
 
 # ==============================================================================
-# 3. Node Logic Class
+# 3. Node Logic Class (Refactored)
 # ==============================================================================
 class MIDIKeyboardNode(Node):
     NODE_TYPE = "MIDI Keyboard"
@@ -169,33 +178,75 @@ class MIDIKeyboardNode(Node):
 
     def __init__(self, name: str, node_id: Optional[str] = None):
         super().__init__(name, node_id)
+        self.emitter = NodeStateEmitter()
         self.add_output("msg_out", data_type=object)
 
         self._lock = threading.Lock()
         self._message_queue = deque(maxlen=100)
+        self._active_notes = set()  # This is the single source of truth for the note state.
+
+    def get_current_state_snapshot(self) -> Dict:
+        """Thread-safely gets a copy of the current state for UI updates or serialization."""
+        with self._lock:
+            return {"active_notes": list(self._active_notes)}
 
     @Slot(int, int)
     def play_note(self, note: int, velocity: int):
+        """Slot to handle note-on events from the UI thread."""
+        state_to_emit = None
         with self._lock:
+            # 1. Update the internal state (queue a message and update active notes).
             msg = mido.Message("note_on", note=note, velocity=velocity)
             self._message_queue.append(msg)
+            
+            # 2. Check if a state change occurred that requires a UI update.
+            if note not in self._active_notes:
+                self._active_notes.add(note)
+                # 3. If so, capture the new state for later emission.
+                state_to_emit = {"active_notes": list(self._active_notes)}
+        
+        # 4. After releasing the lock, emit the signal to the UI thread.
+        if state_to_emit:
+            self.emitter.stateUpdated.emit(state_to_emit)
 
     @Slot(int)
     def stop_note(self, note: int):
+        """Slot to handle note-off events from the UI thread."""
+        state_to_emit = None
         with self._lock:
+            # 1. Update the internal state.
             msg = mido.Message("note_off", note=note)
             self._message_queue.append(msg)
 
+            # 2. Check for a state change.
+            if note in self._active_notes:
+                self._active_notes.discard(note)
+                # 3. Capture the new state.
+                state_to_emit = {"active_notes": list(self._active_notes)}
+
+        # 4. After releasing the lock, emit the signal.
+        if state_to_emit:
+            self.emitter.stateUpdated.emit(state_to_emit)
+
     def process(self, input_data: Dict) -> Dict:
+        """Called by the processing thread to get the next MIDI message."""
         with self._lock:
             if self._message_queue:
                 return {"msg_out": self._message_queue.popleft()}
         return {"msg_out": None}
 
-    def start(self):
+    def _reset_and_notify(self):
+        """Helper to clear all state and notify the UI."""
         with self._lock:
             self._message_queue.clear()
+            self._active_notes.clear()
+            state_to_emit = {"active_notes": []}
+        self.emitter.stateUpdated.emit(state_to_emit)
+
+    def start(self):
+        """Called when graph processing starts. Resets the node's state."""
+        self._reset_and_notify()
 
     def stop(self):
-        with self._lock:
-            self._message_queue.clear()
+        """Called when graph processing stops. Resets state."""
+        self._reset_and_notify()
