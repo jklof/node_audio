@@ -80,12 +80,13 @@ class MIDIInputNodeItem(NodeItem):
 
         self.device_combo.currentIndexChanged.connect(self._on_device_selection_changed)
         self.refresh_button.clicked.connect(self._populate_device_combobox)
-        self.node_logic.emitter.statusChanged.connect(self._on_status_changed)
+        self.node_logic.emitter.stateUpdated.connect(self._on_state_updated)
         self._populate_device_combobox()
 
-    @Slot(str)
-    def _on_status_changed(self, status: str):
-        """Updates the status label and its color based on the message."""
+    @Slot(dict)
+    def _on_state_updated(self, state: dict):
+        """Updates the status label and its color based on the state dictionary."""
+        status = state.get("status", "")
         self.status_label.setText(status)
         if "Error" in status:
             self.status_label.setStyleSheet("color: red;")
@@ -124,7 +125,7 @@ class MIDIInputNode(Node):
 
     class Emitter(QObject):
         deviceListChanged = Signal()
-        statusChanged = Signal(str)
+        stateUpdated = Signal(dict)
 
     def __init__(self, name: str, node_id: Optional[str] = None):
         super().__init__(name, node_id)
@@ -155,10 +156,10 @@ class MIDIInputNode(Node):
                 error_str = str(e)
                 logger.error(f"[{self.name}] Failed to open MIDI port '{port_name}': {error_str}", exc_info=True)
                 user_message = "Error: Port is busy or unavailable."
-                self.emitter.statusChanged.emit(user_message)
+                self.emitter.stateUpdated.emit({"status": user_message})
                 return
 
-            self.emitter.statusChanged.emit(f"Active: {port_name.split(':')[0]}")
+            self.emitter.stateUpdated.emit({"status": f"Active: {port_name.split(':')[0]}"})
             # The blocking iterator will raise an exception when the port is closed from another thread
             for msg in port:
                 if self._stop_event.is_set():
@@ -170,7 +171,7 @@ class MIDIInputNode(Node):
             # This is expected when the port is closed externally by our stop() method
             if not self._stop_event.is_set():
                 logger.error(f"[{self.name}] Unhandled error in MIDI input thread: {e}", exc_info=True)
-                self.emitter.statusChanged.emit(f"Error: {e}")
+                self.emitter.stateUpdated.emit({"status": f"Error: {e}"})
         finally:
             if port_to_close:
                 port_to_close.close()
@@ -193,7 +194,7 @@ class MIDIInputNode(Node):
     def start(self):
         with self._lock:
             if not self._port_name:
-                self.emitter.statusChanged.emit("No Device Selected")
+                self.emitter.stateUpdated.emit({"status": "No Device Selected"})
                 return
             if self._worker_thread is not None:
                 return
@@ -203,7 +204,7 @@ class MIDIInputNode(Node):
             self._worker_thread = threading.Thread(target=self._midi_input_loop, daemon=True)
             self._worker_thread.start()
             self._status = "Connecting..."
-        self.emitter.statusChanged.emit(self._status)
+        self.emitter.stateUpdated.emit({"status": self._status})
 
     def stop(self):
         """--- FIX: Robustly stops the MIDI thread ---"""
@@ -235,7 +236,7 @@ class MIDIInputNode(Node):
                 logger.warning(f"[{self.name}] MIDI worker thread did not terminate cleanly.")
 
         self._status = "Stopped"
-        self.emitter.statusChanged.emit(self._status)
+        self.emitter.stateUpdated.emit({"status": self._status})
 
     def remove(self):
         self.stop()
@@ -315,19 +316,13 @@ class MIDIControlChangeNodeItem(NodeItem):
 
         self.cc_spinbox.valueChanged.connect(self.node_logic.set_cc_number)
         self.node_logic.emitter.stateUpdated.connect(self._on_state_updated)
-        self.updateFromLogic()
+        # Removed updateFromLogic - using unidirectional data flow
 
     @Slot(dict)
     def _on_state_updated(self, state: Dict):
         with QSignalBlocker(self.cc_spinbox):
             self.cc_spinbox.setValue(state.get("cc_number", 1))
         self.value_label.setText(f'Value: {state.get("value", 0.0):.2f}')
-
-    @Slot()
-    def updateFromLogic(self):
-        state = self.node_logic.get_current_state()
-        self._on_state_updated(state)
-        super().updateFromLogic()
 
 
 class MIDIControlChangeNode(Node):
@@ -405,17 +400,11 @@ class MIDIPitchWheelNodeItem(NodeItem):
         self.setContentWidget(self.container_widget)
 
         self.node_logic.emitter.stateUpdated.connect(self._on_state_updated)
-        self.updateFromLogic()
+        # Removed updateFromLogic - using unidirectional data flow
 
     @Slot(dict)
     def _on_state_updated(self, state: Dict):
         self.value_label.setText(f'Value: {state.get("value", 0.0):.2f}')
-
-    @Slot()
-    def updateFromLogic(self):
-        state = self.node_logic.get_current_state()
-        self._on_state_updated(state)
-        super().updateFromLogic()
 
 
 class MIDIPitchWheelNode(Node):
@@ -490,11 +479,12 @@ class MIDIOutputNodeItem(NodeItem):
 
         self.device_combo.currentIndexChanged.connect(self._on_device_selection_changed)
         self.refresh_button.clicked.connect(self._populate_device_combobox)
-        self.node_logic.emitter.statusChanged.connect(self._on_status_changed)
+        self.node_logic.emitter.stateUpdated.connect(self._on_state_updated)
         self._populate_device_combobox()
 
-    @Slot(str)
-    def _on_status_changed(self, status: str):
+    @Slot(dict)
+    def _on_state_updated(self, state: dict):
+        status = state.get("status", "")
         self.status_label.setText(status)
         if "Error" in status:
             self.status_label.setStyleSheet("color: red;")
@@ -531,7 +521,7 @@ class MIDIOutputNode(Node):
     UI_CLASS = MIDIOutputNodeItem
 
     class Emitter(QObject):
-        statusChanged = Signal(str)
+        stateUpdated = Signal(dict)
 
     def __init__(self, name: str, node_id: Optional[str] = None):
         super().__init__(name, node_id)
@@ -559,13 +549,13 @@ class MIDIOutputNode(Node):
                 port.send(msg)
             except Exception as e:
                 logger.error(f"[{self.name}] Failed to send MIDI message: {e}")
-                self.emitter.statusChanged.emit(f"Error: {e}")
+                self.emitter.stateUpdated.emit({"status": f"Error: {e}"})
         return {}
 
     def start(self):
         with self._lock:
             if not self._port_name:
-                self.emitter.statusChanged.emit("No Device Selected")
+                self.emitter.stateUpdated.emit({"status": "No Device Selected"})
                 return
             if self._port and not self._port.closed:
                 return
@@ -577,7 +567,7 @@ class MIDIOutputNode(Node):
             except Exception as e:
                 self._status = f"Error: {e}"
                 logger.error(f"[{self.name}] Failed to open MIDI output port: {e}", exc_info=True)
-        self.emitter.statusChanged.emit(self._status)
+        self.emitter.stateUpdated.emit({"status": self._status})
 
     def stop(self):
         port_to_close = None
@@ -594,7 +584,7 @@ class MIDIOutputNode(Node):
                 logger.warning(f"[{self.name}] Error closing MIDI port: {e}")
 
         self._status = "Inactive"
-        self.emitter.statusChanged.emit(self._status)
+        self.emitter.stateUpdated.emit({"status": self._status})
 
     def remove(self):
         self.stop()
@@ -628,17 +618,11 @@ class MIDIPitchWheelOutNodeItem(NodeItem):
         self.setContentWidget(self.container_widget)
 
         self.node_logic.emitter.stateUpdated.connect(self._on_state_updated)
-        self.updateFromLogic()
+        # Removed updateFromLogic - using unidirectional data flow
 
     @Slot(dict)
     def _on_state_updated(self, state: Dict):
         self.value_label.setText(f'Value: {state.get("value", 0.0):.2f}')
-
-    @Slot()
-    def updateFromLogic(self):
-        state = self.node_logic.get_current_state()
-        self._on_state_updated(state)
-        super().updateFromLogic()
 
 
 class MIDIPitchWheelOutNode(Node):
@@ -709,19 +693,13 @@ class MIDIControlChangeOutNodeItem(NodeItem):
 
         self.cc_spinbox.valueChanged.connect(self.node_logic.set_cc_number)
         self.node_logic.emitter.stateUpdated.connect(self._on_state_updated)
-        self.updateFromLogic()
+        # Removed updateFromLogic - using unidirectional data flow
 
     @Slot(dict)
     def _on_state_updated(self, state: Dict):
         with QSignalBlocker(self.cc_spinbox):
             self.cc_spinbox.setValue(state.get("cc_number", 1))
         self.value_label.setText(f'Value: {state.get("value", 0.0):.2f}')
-
-    @Slot()
-    def updateFromLogic(self):
-        state = self.node_logic.get_current_state()
-        self._on_state_updated(state)
-        super().updateFromLogic()
 
 
 class MIDIControlChangeOutNode(Node):

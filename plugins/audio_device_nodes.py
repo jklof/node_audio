@@ -8,7 +8,7 @@ import logging
 from typing import List, Tuple, Dict, Any, Optional, Callable
 
 from node_system import Node, IClockProvider
-from ui_elements import NodeItem, NODE_CONTENT_PADDING
+from ui_elements import NodeItem, NodeStateEmitter, NODE_CONTENT_PADDING
 
 from PySide6.QtWidgets import QWidget, QComboBox, QLabel, QVBoxLayout, QSizePolicy, QPushButton, QHBoxLayout
 from PySide6.QtCore import Qt, Slot, QObject, Signal, QSignalBlocker, QTimer
@@ -258,11 +258,8 @@ class AudioDeviceNodeItem(NodeItem):
         self.setContentWidget(self.container_widget)
         self.device_combobox.currentIndexChanged.connect(self._on_ui_device_selection_changed)
 
-        emitter = self.node_logic.signal_emitter
-        emitter.connect_device_config_changed(self._on_logic_device_config_changed)
-        emitter.connect_stream_status_update(self._on_logic_stream_status_update)
-        emitter.connect_channels_changed(self._on_logic_channels_changed)
-        emitter.connect_device_list_changed(self._on_logic_device_list_changed)
+        # Connect to the single stateUpdated signal following established pattern
+        self.node_logic.emitter.stateUpdated.connect(self._on_state_updated)
 
         self._populate_device_combobox()
         self._update_stream_channels_label()
@@ -315,39 +312,39 @@ class AudioDeviceNodeItem(NodeItem):
         logger.info(f"[{self.node_logic.name}] UI: User selected device id: {selected_device_identifier}")
         self.node_logic.set_user_selected_device(selected_device_identifier)
 
-    @Slot()
-    def _on_logic_device_config_changed(self):
+    @Slot(dict)
+    def _on_state_updated(self, state: dict):
+        """Single point of UI updates from comprehensive state dictionary."""
         if not self.node_logic:
             return
-        logger.debug(f"[{self.node_logic.name}] UI: Received device_config_changed from logic.")
-        user_selected_id = self.node_logic.get_user_selected_device_identifier()
-        with QSignalBlocker(self.device_combobox):
-            self._set_combobox_to_device(user_selected_id)
-        self._update_stream_channels_label()
+
+        # Update device combobox if device selection changed
+        user_selected_id = state.get("user_selected_device_identifier")
+        if user_selected_id is not None:
+            with QSignalBlocker(self.device_combobox):
+                self._set_combobox_to_device(user_selected_id)
+
+        # Update status label from state
+        status_message = state.get("status")
+        if status_message:
+            self._update_status_label(status_message)
+
+        # Update channels label from state
+        channels = state.get("channels")
+        if channels is not None:
+            self._update_stream_channels_label()
+
+        # Handle device list refresh
+        device_list_was_refreshed = state.get("device_list_refreshed", False)
+        if device_list_was_refreshed:
+            logger.info(f"[{self.node_logic.name}] UI: Refreshing device list due to state update.")
+            current_selection = state.get("user_selected_device_identifier")
+            self._populate_device_combobox()
+            with QSignalBlocker(self.device_combobox):
+                if current_selection is not None:
+                    self._set_combobox_to_device(current_selection)
+
         self.update()
-
-    @Slot(str)
-    def _on_logic_stream_status_update(self, status_message: str):
-        if not self.node_logic:
-            return
-        self._update_status_label(status_message)
-
-    @Slot(int)
-    def _on_logic_channels_changed(self, num_channels: int):
-        if not self.node_logic:
-            return
-        logger.debug(f"[{self.node_logic.name}] UI: Received channels_changed: {num_channels}")
-        self._update_stream_channels_label()
-
-    @Slot()
-    def _on_logic_device_list_changed(self):
-        if not self.node_logic:
-            return
-        logger.info(f"[{self.node_logic.name}] UI: Received device_list_changed signal. Refreshing device list.")
-        current_selection = self.node_logic.get_user_selected_device_identifier()
-        self._populate_device_combobox()
-        with QSignalBlocker(self.device_combobox):
-            self._set_combobox_to_device(current_selection)
 
     @Slot()
     def _on_refresh_devices_clicked(self):
@@ -371,16 +368,7 @@ class AudioDeviceNodeItem(NodeItem):
         ch_text = f"Stream Ch: {self.node_logic.channels}"
         self.stream_channels_label.setText(ch_text)
 
-    @Slot()
-    def updateFromLogic(self):
-        if not self.node_logic:
-            return
-        user_selected_id = self.node_logic.get_user_selected_device_identifier()
-        with QSignalBlocker(self.device_combobox):
-            self._set_combobox_to_device(user_selected_id)
-        self._update_status_label(self.node_logic.get_current_status_message())
-        self._update_stream_channels_label()
-        super().updateFromLogic()
+
 
 
 class AudioSourceNodeItem(AudioDeviceNodeItem):
@@ -402,7 +390,7 @@ class BaseAudioNode(Node):
 
     def __init__(self, name, node_id=None):
         super().__init__(name, node_id)
-        self.signal_emitter = AudioNodeSignalEmitter(parent_node_name=self.name)
+        self.emitter = NodeStateEmitter()
 
         self.samplerate = AudioDeviceManager.TARGET_SAMPLERATE
         self.blocksize = DEFAULT_BLOCKSIZE
@@ -471,6 +459,26 @@ class BaseAudioNode(Node):
         with self._lock:
             return self._current_status_message
 
+    def _get_current_state_snapshot_locked(self) -> Dict:
+        """Get current state for emission (called with lock held)."""
+        return {
+            "status": self._current_status_message,
+            "user_selected_device_identifier": self._user_selected_device_identifier,
+            "channels": self.channels,
+        }
+
+    def _get_current_state_snapshot_with_device_refresh(self) -> Dict:
+        """Get current state with device refresh flag."""
+        state = self._get_current_state_snapshot_locked()
+        state["device_list_refreshed"] = True
+        return state
+
+    def get_current_state_snapshot(self) -> Dict:
+        """Get current state snapshot for UI updates."""
+        with self._lock:
+            return self._get_current_state_snapshot_locked()
+
+
     def refresh_device_list(self):
         """Refreshes the available device list, handling state safely."""
         logger.info(f"[{self.name}] Logic: Refreshing device list.")
@@ -511,8 +519,9 @@ class BaseAudioNode(Node):
             else:
                 logger.debug(f"[{self.name}] Current device ID {current_id} still available.")
 
-        if self.signal_emitter:
-            self.signal_emitter.emit_device_list_changed()
+        # Emit comprehensive state update for device list refresh
+        state = self._get_current_state_snapshot_with_device_refresh()
+        self.emitter.stateUpdated.emit(state)
 
         if stream_was_active:
             logger.info(f"[{self.name}] Attempting to restart stream after refresh.")
@@ -551,8 +560,9 @@ class BaseAudioNode(Node):
             self.stop()
             self.start()
         else:
-            if self.signal_emitter:
-                self.signal_emitter.emit_device_config_changed()
+            # Emit comprehensive state update for device selection change
+            state = self._get_current_state_snapshot_locked()
+            self.emitter.stateUpdated.emit(state)
 
     def start(self):
         logger.info(f"[{self.name}] Logic: Start called.")
@@ -623,13 +633,12 @@ class BaseAudioNode(Node):
                         self._active_device_info = None
                         channels_to_emit = self._reset_channels_on_failure()
 
-        if self.signal_emitter:
-            if status_to_emit:
-                self._update_status_message(status_to_emit)
-                self.signal_emitter.emit_stream_status_update(status_to_emit)
-            if channels_to_emit is not None:
-                self.signal_emitter.emit_channels_changed(channels_to_emit)
-            self.signal_emitter.emit_device_config_changed()
+        if status_to_emit:
+            self._update_status_message(status_to_emit)
+
+        # Emit comprehensive state update
+        state = self._get_current_state_snapshot_locked()
+        self.emitter.stateUpdated.emit(state)
 
     def stop(self):
         logger.info(f"[{self.name}] Logic: Stop called.")
@@ -653,9 +662,9 @@ class BaseAudioNode(Node):
             self._update_status_message("Inactive")
             self._post_stream_stop_actions()
 
-        if self.signal_emitter:
-            self.signal_emitter.emit_stream_status_update("Inactive")
-            self.signal_emitter.emit_device_config_changed()
+        # Emit comprehensive state update after stopping
+        state = self._get_current_state_snapshot_locked()
+        self.emitter.stateUpdated.emit(state)
 
     def remove(self):
         logger.debug(f"[{self.name}] Logic: Remove called.")
@@ -717,10 +726,9 @@ class BaseAudioNode(Node):
             self._buffer.clear()
             self._update_status_message("Deserialized - Inactive")
 
-        if self.signal_emitter:
-            self.signal_emitter.emit_channels_changed(self.channels)
-            self.signal_emitter.emit_device_config_changed()
-            self.signal_emitter.emit_stream_status_update(self._current_status_message)
+        # Emit comprehensive state update after deserialization
+        state = self._get_current_state_snapshot_locked()
+        self.emitter.stateUpdated.emit(state)
         logger.info(f"[{self.name}] Deserialized. User selected ID: {self._user_selected_device_identifier}")
 
 
@@ -738,8 +746,6 @@ class AudioSourceNode(BaseAudioNode):
         self._overflow_count = 0
         self._last_overflow_time = 0
         self.add_output("out", data_type=torch.Tensor)
-        if self.signal_emitter:
-            self.signal_emitter.emit_channels_changed(self.channels)
 
     def _get_is_input_node(self) -> bool:
         return True
@@ -818,8 +824,6 @@ class AudioSinkNode(BaseAudioNode, IClockProvider):
         self._tick_callback: Optional[Callable] = None
         self._active_stream_channels = self.channels
         self.add_input("in", data_type=torch.Tensor)
-        if self.signal_emitter:
-            self.signal_emitter.emit_channels_changed(self.channels)
 
     def _get_is_input_node(self) -> bool:
         return False

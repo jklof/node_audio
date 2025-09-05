@@ -40,19 +40,18 @@ class ValueNodeItem(NodeItem):
         self.container_widget.setLayout(layout)
         self.setContentWidget(self.container_widget)
 
-        # 3. Connect signals and perform initial sync
+        # 3. Connect signals for unidirectional flow
         self.spin_box.valueChanged.connect(self.node_logic.set_value)
-        self.updateFromLogic()
+        self.node_logic.emitter.stateUpdated.connect(self._on_state_updated)
 
-    @Slot()
-    def updateFromLogic(self):
-        """Syncs the UI widget's state from the logic node."""
-        current_logic_value = self.node_logic.get_value()
-        if abs(self.spin_box.value() - current_logic_value) > 1e-9:
-            self.spin_box.blockSignals(True)
-            self.spin_box.setValue(current_logic_value)
-            self.spin_box.blockSignals(False)
-        super().updateFromLogic()
+        # Initial state emission will be triggered by graph_scene.py
+
+    @Slot(dict)
+    def _on_state_updated(self, state: dict):
+        """Updates the UI from a state dictionary."""
+        value = state.get("value", 0.0)
+        with QSignalBlocker(self.spin_box):
+            self.spin_box.setValue(value)
 
 
 # ============================================================
@@ -73,21 +72,21 @@ class DialNodeItem(NodeItem):
         self.setContentWidget(self.dial)
 
         self.dial.valueChanged.connect(self._on_dial_change)
-        self.updateFromLogic()
+        self.node_logic.emitter.stateUpdated.connect(self._on_state_updated)
+
+        # Initial state emission will be triggered by graph_scene.py
 
     def _on_dial_change(self, dial_int_value: int):
         logical_value = max(0.0, min(1.0, dial_int_value / self.DIAL_MAX))
         self.node_logic.set_value(logical_value)
 
-    @Slot()
-    def updateFromLogic(self):
-        logical_value = self.node_logic.get_value()
-        dial_int_value = int(round(logical_value * self.DIAL_MAX))
-        if self.dial.value() != dial_int_value:
-            self.dial.blockSignals(True)
+    @Slot(dict)
+    def _on_state_updated(self, state: dict):
+        """Updates the UI from a state dictionary."""
+        value = state.get("value", 0.0)
+        dial_int_value = int(round(value * self.DIAL_MAX))
+        with QSignalBlocker(self.dial):
             self.dial.setValue(dial_int_value)
-            self.dial.blockSignals(False)
-        super().updateFromLogic()
 
 
 # ============================================================
@@ -101,6 +100,7 @@ class ValueNode(Node):
 
     def __init__(self, name: str, node_id: str | None = None):
         super().__init__(name, node_id)
+        self.emitter = NodeStateEmitter()
         self.add_output("out", data_type=float)
         self._lock = threading.Lock()
         self._value = 0.0
@@ -113,13 +113,17 @@ class ValueNode(Node):
     @Slot(float)
     def set_value(self, value: float):
         """Thread-safe slot for the UI to set the value."""
+        state_to_emit = None
         try:
             new_value = float(value)
             with self._lock:
                 if self._value != new_value:
                     self._value = new_value
+                    state_to_emit = {"value": self._value}
         except (ValueError, TypeError):
             logger.warning(f"ValueNode [{self.name}]: Invalid value received: {value}")
+        if state_to_emit:
+            self.emitter.stateUpdated.emit(state_to_emit)
 
     def process(self, input_data: dict) -> dict:
         with self._lock:
@@ -131,6 +135,8 @@ class ValueNode(Node):
 
     def deserialize_extra(self, data: dict):
         self.set_value(data.get("value", 0.0))
+
+
 
 
 # ============================================================
@@ -311,7 +317,7 @@ class DialHzNodeItem(NodeItem):
         self.freq_dial.valueChanged.connect(self._handle_freq_change)
         self.node_logic.emitter.stateUpdated.connect(self._on_state_updated)
 
-        self.updateFromLogic()
+
 
     @Slot(int)
     def _handle_freq_change(self, dial_value: int):
@@ -338,12 +344,7 @@ class DialHzNodeItem(NodeItem):
         self.value_label.setText(f"{freq:.1f} Hz{' (ext)' if is_freq_ext else ''}")
         self.freq_dial.setEnabled(not is_freq_ext)
 
-    @Slot()
-    def updateFromLogic(self):
-        """Requests a full state snapshot from the logic and updates the UI."""
-        state = self.node_logic.get_current_state_snapshot()
-        self._on_state_updated(state)
-        super().updateFromLogic()
+
 
 
 # ==============================================================================

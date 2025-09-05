@@ -609,10 +609,10 @@ class SpectralReverbNodeItem(NodeItem):
         self.pre_delay_slider, self.pre_delay_label = self._create_slider_control("Pre-delay", 0.0, 250.0, "{:.0f} ms")
         self.decay_slider, self.decay_label = self._create_slider_control("Decay Time", 0.1, 15.0, "{:.1f} s")
         self.damp_slider, self.damp_label = self._create_slider_control(
-            "HF Damp", 500.0, 20000.0, "{:.0f} Hz", is_log=True
+            "HF Damp", 500.0, 20000.0, "{:.1f} Hz", is_log=True
         )
         self.lf_damp_slider, self.lf_damp_label = self._create_slider_control(
-            "LF Damp", 20.0, 2000.0, "{:.0f} Hz", is_log=True
+            "LF Damp", 20.0, 2000.0, "{:.1f} Hz", is_log=True
         )
         self.diffusion_slider, self.diffusion_label = self._create_slider_control("Diffusion", 0.0, 1.0, "{:.0%}")
         self.width_slider, self.width_label = self._create_slider_control("Stereo Width", 0.0, 1.0, "{:.0%}")

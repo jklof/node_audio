@@ -93,7 +93,6 @@ class OscillatorNodeItem(NodeItem):
         self.pw_dial.valueChanged.connect(self._handle_pw_change)
         self.node_logic.emitter.stateUpdated.connect(self._on_state_updated)
 
-        self.updateFromLogic()
 
     def _create_dial_with_labels(self, title: str, initial_value: str) -> tuple[QDial, QVBoxLayout]:
         """Helper factory to create a dial and its associated labels."""
@@ -175,12 +174,7 @@ class OscillatorNodeItem(NodeItem):
         self.pw_widget.setVisible(waveform == Waveform.SQUARE)
         self.update_geometry()  # Request geometry update when visibility changes
 
-    @Slot()
-    def updateFromLogic(self):
-        """Requests a full state snapshot from the logic and updates the UI."""
-        state = self.node_logic.get_current_state_snapshot()
-        self._on_state_updated(state)
-        super().updateFromLogic()
+
 
 
 # ==============================================================================

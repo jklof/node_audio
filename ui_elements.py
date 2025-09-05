@@ -50,7 +50,6 @@ class SocketItem(QGraphicsObject):
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemSendsScenePositionChanges)
         self.setAcceptHoverEvents(True)
 
-        # --- MODIFIED: Use central color map ---
         socket_type = self.socket_logic.data_type
         # Normalize None to Any for the color lookup
         if socket_type is None:
@@ -63,7 +62,6 @@ class SocketItem(QGraphicsObject):
         self._hover_brush = QBrush(color.lighter(130))
         self._pen = QPen(Qt.GlobalColor.black, 1)
         self._is_hovered = False
-        # --- END MODIFICATION ---
 
     def boundingRect(self):
         return QRectF(-SOCKET_SIZE / 2, -SOCKET_SIZE / 2, SOCKET_SIZE, SOCKET_SIZE)

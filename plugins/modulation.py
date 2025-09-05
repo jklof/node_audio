@@ -69,8 +69,6 @@ class ADSRNodeItem(NodeItem):
         # Connect the logic node's state updates back to the UI
         self.node_logic.emitter.stateUpdated.connect(self._on_state_updated)
 
-        # Initial synchronization
-        self.updateFromLogic()
 
     def _create_slider_control(self, name: str, min_val: float, max_val: float, fmt: str) -> tuple[QSlider, QLabel]:
         """Helper function to create a labeled slider."""
@@ -105,25 +103,21 @@ class ADSRNodeItem(NodeItem):
     def _on_attack_changed(self):
         val = self._map_slider_to_logical(self.attack_slider)
         self.node_logic.set_attack(val)
-        self.attack_label.setText(f"Attack: {self.attack_slider.property('format').format(val)}")
 
     @Slot(int)
     def _on_decay_changed(self):
         val = self._map_slider_to_logical(self.decay_slider)
         self.node_logic.set_decay(val)
-        self.decay_label.setText(f"Decay: {self.decay_slider.property('format').format(val)}")
 
     @Slot(int)
     def _on_sustain_changed(self):
         val = self._map_slider_to_logical(self.sustain_slider)
         self.node_logic.set_sustain(val)
-        self.sustain_label.setText(f"Sustain: {self.sustain_slider.property('format').format(val)}")
 
     @Slot(int)
     def _on_release_changed(self):
         val = self._map_slider_to_logical(self.release_slider)
         self.node_logic.set_release(val)
-        self.release_label.setText(f"Release: {self.release_slider.property('format').format(val)}")
 
     @Slot(dict)
     def _on_state_updated(self, state: dict):
@@ -150,12 +144,7 @@ class ADSRNodeItem(NodeItem):
                 label_text += " (ext)"  # Indicate external control
             label.setText(label_text)
 
-    @Slot()
-    def updateFromLogic(self):
-        """Requests a full state snapshot from the logic and updates the UI."""
-        state = self.node_logic.get_current_state_snapshot()
-        self._on_state_updated(state)
-        super().updateFromLogic()
+        # Initial state emission will be triggered by graph_scene.py
 
 
 # ==============================================================================
@@ -196,23 +185,39 @@ class ADSRNode(Node):
     # --- Thread-safe setters for UI interaction ---
     @Slot(float)
     def set_attack(self, value: float):
+        state_to_emit = None
         with self._lock:
             self._attack_s = float(value)
+            state_to_emit = self._get_current_state_snapshot_locked()
+        if state_to_emit:
+            self.emitter.stateUpdated.emit(state_to_emit)
 
     @Slot(float)
     def set_decay(self, value: float):
+        state_to_emit = None
         with self._lock:
             self._decay_s = float(value)
+            state_to_emit = self._get_current_state_snapshot_locked()
+        if state_to_emit:
+            self.emitter.stateUpdated.emit(state_to_emit)
 
     @Slot(float)
     def set_sustain(self, value: float):
+        state_to_emit = None
         with self._lock:
             self._sustain_level = float(value)
+            state_to_emit = self._get_current_state_snapshot_locked()
+        if state_to_emit:
+            self.emitter.stateUpdated.emit(state_to_emit)
 
     @Slot(float)
     def set_release(self, value: float):
+        state_to_emit = None
         with self._lock:
             self._release_s = float(value)
+            state_to_emit = self._get_current_state_snapshot_locked()
+        if state_to_emit:
+            self.emitter.stateUpdated.emit(state_to_emit)
 
     def _get_current_state_snapshot_locked(self) -> Dict:
         return {
@@ -350,6 +355,8 @@ class ADSRNode(Node):
             self._release_s = data.get("release", 0.5)
 
 
+
+
 # ==============================================================================
 # 4. Gate Button Node UI Class
 # ==============================================================================
@@ -376,6 +383,15 @@ class GateButtonNodeItem(NodeItem):
         self.button.pressed.connect(self.node_logic.set_gate_true)
         self.button.released.connect(self.node_logic.set_gate_false)
 
+        # Connect the logic node's state updates back to the UI (for standardization)
+        self.node_logic.emitter.stateUpdated.connect(self._on_state_updated)
+
+    @Slot(dict)
+    def _on_state_updated(self, state: dict):
+        # The button's visual state doesn't need to be updated as user controls it
+        # This is primarily for consistency with the unidirectional data flow pattern
+        pass
+
     # No updateFromLogic is needed as the UI only sends state to the logic
 
 
@@ -390,22 +406,29 @@ class GateButtonNode(Node):
 
     def __init__(self, name: str, node_id: str = None):
         super().__init__(name, node_id)
+        self.emitter = NodeStateEmitter()
         self.add_output("out", data_type=bool)
 
         self._lock = threading.Lock()
         self._gate_state = False
+
+        # Initial state emission is handled by graph_scene
 
     @Slot()
     def set_gate_true(self):
         """Called by the UI when the button is pressed."""
         with self._lock:
             self._gate_state = True
+            state = {"gate_state": self._gate_state}
+        self.emitter.stateUpdated.emit(state)
 
     @Slot()
     def set_gate_false(self):
         """Called by the UI when the button is released."""
         with self._lock:
             self._gate_state = False
+            state = {"gate_state": self._gate_state}
+        self.emitter.stateUpdated.emit(state)
 
     def process(self, input_data: dict) -> dict:
         """Outputs the current state of the button."""
@@ -417,6 +440,8 @@ class GateButtonNode(Node):
         with self._lock:
             self._gate_state = False
         super().stop()
+
+
 
 
 # ==============================================================================
@@ -435,7 +460,7 @@ class LFONodeItem(NodeItem):
         )
         layout.setSpacing(4)
 
-        self.freq_label = QLabel(f"Frequency: {node_logic.get_frequency_hz():.2f} Hz")
+        self.freq_label = QLabel("Frequency: ...")
         self.freq_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.freq_label)
 
@@ -449,11 +474,11 @@ class LFONodeItem(NodeItem):
         self.container_widget.setLayout(layout)
         self.setContentWidget(self.container_widget)
 
-        # Connect slider
+        # Connect slider and signal
         self.freq_slider.valueChanged.connect(self._on_slider_change)
+        self.node_logic.emitter.stateUpdated.connect(self._on_state_updated)
 
-        # Initial sync
-        self.updateFromLogic()
+        # Initial state emission will be triggered by graph_scene.py
 
     def _map_slider_to_logical(self, slider_value: int) -> float:
         # Map integer slider to float freq
@@ -470,15 +495,14 @@ class LFONodeItem(NodeItem):
     def _on_slider_change(self, slider_value: int):
         freq = self._map_slider_to_logical(slider_value)
         self.node_logic.set_frequency_hz(freq)
-        self.freq_label.setText(f"Frequency: {freq:.2f} Hz")
 
-    @Slot()
-    def updateFromLogic(self):
-        current_freq = self.node_logic.get_frequency_hz()
+    @Slot(dict)
+    def _on_state_updated(self, state: dict):
+        """Updates the UI from a state dictionary."""
+        freq = state.get("frequency", 1.0)
+        self.freq_label.setText(f"Frequency: {freq:.2f} Hz")
         with QSignalBlocker(self.freq_slider):
-            self.freq_slider.setValue(self._map_logical_to_slider(current_freq))
-        self.freq_label.setText(f"Frequency: {current_freq:.2f} Hz")
-        super().updateFromLogic()
+            self.freq_slider.setValue(self._map_logical_to_slider(freq))
 
 
 # ==============================================================================
@@ -493,6 +517,7 @@ class LFONode(Node):
 
     def __init__(self, name, node_id=None):
         super().__init__(name, node_id)
+        self.emitter = NodeStateEmitter()
 
         self.add_input("sync_control", data_type=bool)
         self.add_output("sine_out", data_type=float)
@@ -513,12 +538,20 @@ class LFONode(Node):
     # -----------------
     @Slot(float)
     def set_frequency_hz(self, freq: float):
+        state_to_emit = None
         with self.lock:
-            self._frequency_hz = max(0.001, float(freq))  # Avoid 0 Hz
+            new_freq = max(0.001, float(freq))  # Avoid 0 Hz
+            if self._frequency_hz != new_freq:
+                self._frequency_hz = new_freq
+                state_to_emit = {"frequency": self._frequency_hz}
+        if state_to_emit:
+            self.emitter.stateUpdated.emit(state_to_emit)
 
     def get_frequency_hz(self) -> float:
         with self.lock:
             return self._frequency_hz
+
+
 
     # -----------------
     # Worker thread method

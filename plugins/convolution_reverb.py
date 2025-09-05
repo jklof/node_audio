@@ -151,8 +151,6 @@ class ConvolutionReverbNodeItem(NodeItem):
 
         self.node_logic.emitter.stateUpdated.connect(self._on_state_updated)
 
-        self.updateFromLogic()
-
     def _create_slider_control(self, name: str, min_val: float, max_val: float, fmt: str) -> tuple[QSlider, QLabel]:
         label = QLabel(f"{name}: ...")
         slider = QSlider(Qt.Orientation.Horizontal)
@@ -191,19 +189,16 @@ class ConvolutionReverbNodeItem(NodeItem):
     def _on_input_gain_changed(self, value: int):
         logical_val = self._map_slider_value_to_logical(self.input_gain_slider, value)
         self.node_logic.set_input_gain_db(logical_val)
-        self.input_gain_label.setText(f"Input: {self.input_gain_slider.property('format').format(logical_val)}")
 
     @Slot(int)
     def _on_mix_changed(self, value: int):
         logical_val = self._map_slider_value_to_logical(self.mix_slider, value)
         self.node_logic.set_mix(logical_val)
-        self.mix_label.setText(f"Mix: {self.mix_slider.property('format').format(logical_val)}")
 
     @Slot(int)
     def _on_output_gain_changed(self, value: int):
         logical_val = self._map_slider_value_to_logical(self.output_gain_slider, value)
         self.node_logic.set_output_gain_db(logical_val)
-        self.output_gain_label.setText(f"Output: {self.output_gain_slider.property('format').format(logical_val)}")
 
     @Slot(dict)
     def _on_state_updated(self, state: dict):
@@ -327,21 +322,29 @@ class ConvolutionReverbNode(Node):
     def set_input_gain_db(self, value: float):
         with self._lock:
             self._input_gain_db = value
+            state = self._get_current_state_snapshot_locked()
+        self.emitter.stateUpdated.emit(state)
 
     @Slot(float)
     def set_output_gain_db(self, value: float):
         with self._lock:
             self._output_gain_db = value
+            state = self._get_current_state_snapshot_locked()
+        self.emitter.stateUpdated.emit(state)
 
     @Slot(float)
     def set_mix(self, value: float):
         with self._lock:
             self._mix = np.clip(value, 0.0, 1.0).item()
+            state = self._get_current_state_snapshot_locked()
+        self.emitter.stateUpdated.emit(state)
 
     @Slot(bool)
     def set_bypass(self, value: bool):
         with self._lock:
             self._bypass = value
+            state = self._get_current_state_snapshot_locked()
+        self.emitter.stateUpdated.emit(state)
 
     def _get_current_state_snapshot_locked(self) -> Dict:
         return {
@@ -356,6 +359,8 @@ class ConvolutionReverbNode(Node):
     def get_current_state_snapshot(self) -> Dict:
         with self._lock:
             return self._get_current_state_snapshot_locked()
+
+
 
     def _reset_dsp_state_locked(self, num_channels: int):
         self._expected_channels = num_channels

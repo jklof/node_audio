@@ -140,6 +140,8 @@ class Node:
     def deserialize_extra(self, data: dict):
         pass
 
+
+
     def __repr__(self):
         return f"<Node {self.name} ({self.NODE_TYPE} - {self.id[:4]})>"
 

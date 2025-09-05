@@ -89,7 +89,8 @@ class SampleNodeItem(NodeItem):
 
         self.load_button.clicked.connect(self._on_load_clicked)
         self.node_logic.emitter.stateUpdated.connect(self._on_state_updated)
-        self.updateFromLogic()
+
+        # Initial state emission will be triggered by graph_scene.py
 
     @Slot()
     def _on_load_clicked(self):

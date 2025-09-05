@@ -52,26 +52,25 @@ class STFTNodeItem(NodeItem):
 
         self.setContentWidget(self.container_widget)
         self.window_size_combo.activated.connect(self._on_window_size_change)
-        self.updateFromLogic()
+        self.node_logic.emitter.stateUpdated.connect(self._on_state_updated)
 
     @Slot(int)
     def _on_window_size_change(self, index: int):
         new_size = self.window_sizes[index]
         self.node_logic.set_window_size(new_size)
 
-    @Slot()
-    def updateFromLogic(self):
-        with QSignalBlocker(self.window_size_combo):
-            win_size = self.node_logic.get_window_size()
-            try:
-                index = self.window_sizes.index(win_size)
+    @Slot(dict)
+    def _on_state_updated(self, state: dict):
+        window_size = state.get("window_size", DEFAULT_WINDOW_SIZE)
+        try:
+            index = self.window_sizes.index(window_size)
+            with QSignalBlocker(self.window_size_combo):
                 self.window_size_combo.setCurrentIndex(index)
-            except ValueError:
-                closest_size = min(self.window_sizes, key=lambda x: abs(x - win_size))
-                index = self.window_sizes.index(closest_size)
+        except ValueError:
+            closest_size = min(self.window_sizes, key=lambda x: abs(x - window_size))
+            index = self.window_sizes.index(closest_size)
+            with QSignalBlocker(self.window_size_combo):
                 self.window_size_combo.setCurrentIndex(index)
-
-        super().updateFromLogic()
 
 
 class STFTNode(Node):
@@ -82,6 +81,7 @@ class STFTNode(Node):
 
     def __init__(self, name, node_id=None):
         super().__init__(name, node_id)
+        self.emitter = NodeStateEmitter()
         self.add_input("audio_in", data_type=torch.Tensor)
         self.add_output("spectral_frame_out", data_type=SpectralFrame)
 
@@ -97,6 +97,8 @@ class STFTNode(Node):
 
         self._recalculate_params()
 
+
+
     def _recalculate_params(self):
         with self._lock:
             self._window_size = max(self._hop_size, int(self._window_size))
@@ -110,6 +112,8 @@ class STFTNode(Node):
     def set_window_size(self, value: int):
         with self._lock:
             self._window_size = value
+            state = {"window_size": self._window_size}
+        self.emitter.stateUpdated.emit(state)
         self._recalculate_params()
         self.start()
 
@@ -397,17 +401,23 @@ class SpectralFilterNode(Node):
 
     @Slot(float)
     def set_cutoff_freq_1(self, freq: float):
+        state_to_emit = None
         with self._lock:
             if self._cutoff_freq_1 != freq:
                 self._cutoff_freq_1 = freq
-                # No need to emit here, UI already updated.
-                # Process loop will handle external updates.
+                state_to_emit = self._get_state_locked()
+        if state_to_emit:
+            self.emitter.stateUpdated.emit(state_to_emit)
 
     @Slot(float)
     def set_cutoff_freq_2(self, freq: float):
+        state_to_emit = None
         with self._lock:
             if self._cutoff_freq_2 != freq:
                 self._cutoff_freq_2 = freq
+                state_to_emit = self._get_state_locked()
+        if state_to_emit:
+            self.emitter.stateUpdated.emit(state_to_emit)
 
     def process(self, input_data: dict) -> dict:
         frame = input_data.get("spectral_frame_in")

@@ -87,7 +87,9 @@ class NodeGraphScene(QGraphicsScene):
                 # Update position if it has changed
                 if node_item.pos() != QPointF(*node_logic.pos):
                     node_item.setPos(QPointF(*node_logic.pos))
-                # Trigger a refresh of its internal content (name, controls, etc.)
+                
+                # Directly tell the UI item to sync its state from its logic object.
+                # This ensures it re-evaluates everything, including socket connection status.
                 node_item.updateFromLogic()
 
         # --- RECONCILE CONNECTIONS ---
