@@ -3,7 +3,7 @@ import numpy as np
 import threading
 import logging
 from node_system import Node
-from ui_elements import NodeItem, NODE_CONTENT_PADDING  # <-- Added NODE_CONTENT_PADDING
+from ui_elements import NodeItem, NodeStateEmitter, NODE_CONTENT_PADDING
 from constants import DEFAULT_DTYPE
 
 from PySide6.QtWidgets import QDoubleSpinBox, QVBoxLayout, QWidget, QDial, QSizePolicy, QLabel  # <-- Added QLabel
@@ -349,10 +349,6 @@ class DialHzNodeItem(NodeItem):
 # ==============================================================================
 # --- NEW: Logic for the Dial (Hz) Node ---
 # ==============================================================================
-class DialHzNodeEmitter(QObject):
-    """A dedicated QObject to safely emit signals from the logic to the UI thread."""
-
-    stateUpdated = Signal(dict)
 
 
 class DialHzNode(Node):
@@ -363,7 +359,7 @@ class DialHzNode(Node):
 
     def __init__(self, name: str, node_id: str | None = None):
         super().__init__(name, node_id)
-        self.emitter = DialHzNodeEmitter()
+        self.emitter = NodeStateEmitter()
         self.add_input("freq_in", data_type=float)
         self.add_output("freq_out", data_type=float)
         self._lock = threading.Lock()

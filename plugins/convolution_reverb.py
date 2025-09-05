@@ -12,7 +12,7 @@ import torchaudio.transforms as T
 # --- Node System Imports ---
 from node_system import Node
 from constants import DEFAULT_SAMPLERATE, DEFAULT_BLOCKSIZE, DEFAULT_DTYPE, DEFAULT_COMPLEX_DTYPE
-from ui_elements import NodeItem, NODE_CONTENT_PADDING
+from ui_elements import NodeItem, NodeStateEmitter, NODE_CONTENT_PADDING
 
 # --- Qt Imports ---
 from PySide6.QtCore import Qt, Signal, Slot, QObject, QRunnable, QThreadPool, QSignalBlocker
@@ -94,11 +94,7 @@ class IRLoadRunnable(QRunnable):
             self.signaller.load_finished.emit(("failure", err_msg, self.file_path))
 
 
-# ==============================================================================
-# 2. Signal Emitter for UI Communication
-# ==============================================================================
-class ConvolutionReverbEmitter(QObject):
-    stateUpdated = Signal(dict)
+
 
 
 # ==============================================================================
@@ -268,7 +264,7 @@ class ConvolutionReverbNode(Node):
 
     def __init__(self, name: str, node_id: Optional[str] = None):
         super().__init__(name, node_id)
-        self.emitter = ConvolutionReverbEmitter()
+        self.emitter = NodeStateEmitter()
         self.add_input("in", data_type=torch.Tensor)
         self.add_input("input_gain_db", data_type=float)
         self.add_input("mix", data_type=float)

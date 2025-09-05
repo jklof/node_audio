@@ -12,7 +12,7 @@ import torchaudio.transforms as T
 
 from node_system import Node
 from constants import DEFAULT_SAMPLERATE, DEFAULT_BLOCKSIZE, DEFAULT_DTYPE
-from ui_elements import NodeItem, NODE_CONTENT_PADDING
+from ui_elements import NodeItem, NodeStateEmitter, NODE_CONTENT_PADDING
 
 from PySide6.QtWidgets import QWidget, QLabel, QSlider, QVBoxLayout, QHBoxLayout, QFileDialog, QPushButton
 from PySide6.QtCore import Qt, Slot, Signal, QObject
@@ -36,16 +36,7 @@ class PlaybackState:
     ERROR = "ERROR"
 
 
-class PlayerNodeSignalEmitter(QObject):
-    """A dedicated QObject to safely emit signals to the UI thread."""
 
-    playbackStateChanged = Signal(dict)
-
-    def emit_state_change(self, state_dict: Dict):
-        try:
-            self.playbackStateChanged.emit(state_dict.copy())
-        except RuntimeError as e:
-            logger.debug(f"Signal emitter caught RuntimeError: {e}")
 
 
 class AudioFilePlayerNodeItem(NodeItem):
@@ -93,7 +84,7 @@ class AudioFilePlayerNodeItem(NodeItem):
         self.load_button.clicked.connect(self._on_load_button_clicked)
         self.play_pause_button.clicked.connect(self._on_play_pause_clicked)
         self.seek_slider.sliderReleased.connect(self._on_seek)
-        self.node_logic.emitter.playbackStateChanged.connect(self._on_playback_state_changed)
+        self.node_logic.emitter.stateUpdated.connect(self._on_playback_state_changed)
 
         self.updateFromLogic()
 
@@ -177,7 +168,7 @@ class AudioFilePlayerNode(Node):
     def __init__(self, name, node_id=None):
         super().__init__(name, node_id)
         self.add_output("out", data_type=torch.Tensor)
-        self.emitter = PlayerNodeSignalEmitter()
+        self.emitter = NodeStateEmitter()
         self._lock = threading.Lock()
         self._worker_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
@@ -210,7 +201,7 @@ class AudioFilePlayerNode(Node):
             )
 
         if state_to_emit:
-            self.emitter.emit_state_change(state_to_emit)
+            self.emitter.stateUpdated.emit(state_to_emit)
 
         self._stop_event.clear()
         self._worker_thread = threading.Thread(target=self._file_reader_loop, daemon=True)
@@ -234,7 +225,7 @@ class AudioFilePlayerNode(Node):
             state_to_emit = self._update_state_snapshot_locked(state=self._playback_state)
 
         if state_to_emit:
-            self.emitter.emit_state_change(state_to_emit)
+            self.emitter.stateUpdated.emit(state_to_emit)
 
     def seek(self, proportion: float):
         with self._lock:

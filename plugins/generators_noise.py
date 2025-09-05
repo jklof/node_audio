@@ -11,7 +11,7 @@ from node_system import Node
 from constants import DEFAULT_DTYPE, DEFAULT_SAMPLERATE, DEFAULT_BLOCKSIZE, DEFAULT_CHANNELS
 
 # --- UI and Qt Imports ---
-from ui_elements import NodeItem, NODE_CONTENT_PADDING
+from ui_elements import NodeItem, NodeStateEmitter, NODE_CONTENT_PADDING
 from PySide6.QtWidgets import QWidget, QLabel, QComboBox, QDial, QVBoxLayout, QHBoxLayout, QSizePolicy
 from PySide6.QtCore import Qt, Slot, QSignalBlocker, Signal, QObject
 from PySide6.QtGui import QFontMetrics
@@ -31,13 +31,7 @@ class NoiseType(Enum):
     VIOLET = "Violet"  # Also known as Purple Noise
 
 
-# ==============================================================================
-# Emitter for UI Communication
-# ==============================================================================
-class NoiseGeneratorEmitter(QObject):
-    """A dedicated QObject to safely emit signals from the logic to the UI thread."""
 
-    stateUpdated = Signal(dict)
 
 
 # ==============================================================================
@@ -155,7 +149,7 @@ class NoiseGeneratorNode(Node):
 
     def __init__(self, name, node_id=None):
         super().__init__(name, node_id)
-        self.emitter = NoiseGeneratorEmitter()
+        self.emitter = NodeStateEmitter()
         self.add_input("level", data_type=float)
         self.add_output("out", data_type=torch.Tensor)
 

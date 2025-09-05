@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
 )
 from PySide6.QtGui import QPainter, QPen, QColor, QBrush, QPainterPath, QPainterPathStroker, QAction
-from PySide6.QtCore import Qt, QRectF, QPointF, Signal, Slot, QTimer
+from PySide6.QtCore import Qt, QRectF, QPointF, Signal, Slot, QTimer, QObject, Signal
 from typing import Any
 
 # Import the interface to check against
@@ -27,6 +27,16 @@ NODE_WIDTH = 120  # Default minimum width
 HEADER_HEIGHT = 20
 SOCKET_Y_SPACING = 25
 NODE_CONTENT_PADDING = 5
+
+class NodeStateEmitter(QObject):
+    """
+    A generic emitter for sending state updates from a logic Node to its UI NodeItem.
+    Centralized in ui_common.py to keep it separate from core system logic.
+    """
+    def __init__(self):
+        super().__init__()
+    stateUpdated = Signal(dict)
+
 
 
 class SocketItem(QGraphicsObject):

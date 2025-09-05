@@ -11,7 +11,7 @@ import torchaudio.transforms as T
 
 from node_system import Node
 from constants import DEFAULT_SAMPLERATE, DEFAULT_BLOCKSIZE, DEFAULT_DTYPE, DEFAULT_CHANNELS
-from ui_elements import NodeItem, NODE_CONTENT_PADDING
+from ui_elements import NodeItem, NodeStateEmitter, NODE_CONTENT_PADDING
 
 from PySide6.QtCore import Qt, Signal, Slot, QObject, QRunnable, QThreadPool
 from PySide6.QtWidgets import QWidget, QLabel, QPushButton, QVBoxLayout, QFileDialog
@@ -58,11 +58,7 @@ class SampleLoadRunnable(QRunnable):
             self.signaller.load_finished.emit(("failure", err_msg, self.file_path))
 
 
-# ==============================================================================
-# 2. State Emitter for UI Communication
-# ==============================================================================
-class SampleEmitter(QObject):
-    stateUpdated = Signal(dict)
+
 
 
 # ==============================================================================
@@ -135,7 +131,7 @@ class SampleNode(Node):
 
     def __init__(self, name: str, node_id: Optional[str] = None):
         super().__init__(name, node_id)
-        self.emitter = SampleEmitter()
+        self.emitter = NodeStateEmitter()
 
         self.add_input("trigger", data_type=bool)
         self.add_input("pitch", data_type=float)

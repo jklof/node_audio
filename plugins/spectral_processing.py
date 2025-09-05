@@ -6,7 +6,7 @@ from collections import deque
 
 # --- Node System Imports ---
 from node_system import Node
-from ui_elements import NodeItem, NODE_CONTENT_PADDING
+from ui_elements import NodeItem, NodeStateEmitter, NODE_CONTENT_PADDING
 from constants import (
     DEFAULT_SAMPLERATE,
     DEFAULT_BLOCKSIZE,
@@ -363,8 +363,6 @@ class SpectralFilterNode(Node):
     DESCRIPTION = "Applies a brick-wall filter to spectral frames."
     UI_CLASS = SpectralFilterNodeItem
 
-    class Emitter(QObject):
-        stateUpdated = Signal(dict)
 
     def __init__(self, name, node_id=None):
         super().__init__(name, node_id)
@@ -372,7 +370,7 @@ class SpectralFilterNode(Node):
         self.add_input("cutoff_freq_1", data_type=float)
         self.add_input("cutoff_freq_2", data_type=float)
         self.add_output("spectral_frame_out", data_type=SpectralFrame)
-        self.emitter = self.Emitter()
+        self.emitter = NodeStateEmitter()
         self._lock = threading.Lock()
 
         self._filter_type = "Low Pass"

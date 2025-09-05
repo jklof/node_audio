@@ -8,7 +8,7 @@ from collections import deque
 # --- Node System Imports ---
 from node_system import Node
 from constants import SpectralFrame, DEFAULT_DTYPE, DEFAULT_COMPLEX_DTYPE
-from ui_elements import NodeItem, NODE_CONTENT_PADDING
+from ui_elements import NodeItem, NodeStateEmitter, NODE_CONTENT_PADDING
 
 # --- Qt Imports ---
 from PySide6.QtCore import Qt, Signal, Slot, QObject, QSignalBlocker
@@ -26,11 +26,6 @@ EPSILON = 1e-9
 # ==============================================================================
 
 
-# ==============================================================================
-# 1. State Emitter for UI Communication
-# ==============================================================================
-class SpectralShimmerEmitter(QObject):
-    stateUpdated = Signal(dict)
 
 
 # ==============================================================================
@@ -146,7 +141,7 @@ class SpectralShimmerNode(Node):
 
     def __init__(self, name: str, node_id: Optional[str] = None):
         super().__init__(name, node_id)
-        self.emitter = SpectralShimmerEmitter()
+        self.emitter = NodeStateEmitter()
 
         # --- Setup Sockets ---
         self.add_input("spectral_frame_in", data_type=SpectralFrame)

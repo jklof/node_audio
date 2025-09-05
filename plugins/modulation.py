@@ -5,7 +5,7 @@ from typing import Dict, Optional
 
 # --- Node System Imports ---
 from node_system import Node
-from ui_elements import NodeItem, NODE_CONTENT_PADDING
+from ui_elements import NodeItem, NodeStateEmitter, NODE_CONTENT_PADDING
 from constants import DEFAULT_SAMPLERATE, DEFAULT_BLOCKSIZE, DEFAULT_DTYPE
 
 # --- Qt Imports ---
@@ -22,13 +22,7 @@ MIN_TIME = 0.001
 EPSILON = 1e-9
 
 
-# ==============================================================================
-# 1. State Emitter for UI Communication
-# ==============================================================================
-class ADSREmitter(QObject):
-    """A dedicated QObject to safely emit signals from the logic to the UI thread."""
 
-    stateUpdated = Signal(dict)
 
 
 # ==============================================================================
@@ -175,7 +169,7 @@ class ADSRNode(Node):
 
     def __init__(self, name: str, node_id: Optional[str] = None):
         super().__init__(name, node_id)
-        self.emitter = ADSREmitter()
+        self.emitter = NodeStateEmitter()
 
         # --- Define Sockets ---
         self.add_input("gate", data_type=bool)
