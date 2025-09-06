@@ -1,0 +1,48 @@
+{
+    "nodes": [
+        {
+            "id": "ea257391-084c-421f-a1f6-df9a34efcdf9",
+            "name": "Network Bridge Input",
+            "type": "Network Bridge Input",
+            "pos": [
+                -922.0,
+                -699.0
+            ]
+        },
+        {
+            "id": "ab27c4b2-cfec-4cbb-b3a5-81cc4fea42e4",
+            "name": "Network Bridge Output",
+            "type": "Network Bridge Output",
+            "pos": [
+                -361.0,
+                -702.0
+            ]
+        },
+        {
+            "id": "6c84a74f-c340-4aed-98a0-ccecd4d1dc0d",
+            "name": "Waveform Visualizer",
+            "type": "Waveform Visualizer",
+            "pos": [
+                -641.0,
+                -692.0
+            ]
+        }
+    ],
+    "connections": [
+        {
+            "start_node_id": "ea257391-084c-421f-a1f6-df9a34efcdf9",
+            "start_socket_name": "out",
+            "end_node_id": "6c84a74f-c340-4aed-98a0-ccecd4d1dc0d",
+            "end_socket_name": "in",
+            "id": "8840b836-b275-4fe2-aaf3-5ca2c6086cd4"
+        },
+        {
+            "start_node_id": "6c84a74f-c340-4aed-98a0-ccecd4d1dc0d",
+            "start_socket_name": "out",
+            "end_node_id": "ab27c4b2-cfec-4cbb-b3a5-81cc4fea42e4",
+            "end_socket_name": "in",
+            "id": "d58578d8-911a-4484-a7ef-5b30656eb8a1"
+        }
+    ],
+    "clock_source_id": "ab27c4b2-cfec-4cbb-b3a5-81cc4fea42e4"
+}
