@@ -361,7 +361,7 @@ class YouTubePlayerNode(Node):
     def _end_of_stream_actions(self, final_playback_time_s: float):
         state_to_emit = None
         with self._lock:
-            if final_playback_time_s >= self._duration_s and self._duration_s > 0:
+            if abs(final_playback_time_s - self._duration_s) <= 0.5 and self._duration_s > 0:
                 logger.info(f"[{self.name}] End of video reached, looping.")
                 self._seek_request_s, self._position_s = 0.0, 0.0
                 self._playback_state = PlaybackState.PLAYING
@@ -428,7 +428,7 @@ class YouTubePlayerNode(Node):
                 if 'audio_thread' in locals() and audio_thread.is_alive(): audio_thread.join(timeout=1.0)
                 if 'video_thread' in locals() and video_thread.is_alive(): video_thread.join(timeout=1.0)
                 with self._lock: self._ffmpeg_process = None
-                if self._stop_event.is_set() or self._seek_request_s != -1.0: break
+                if self._stop_event.is_set(): break
         
         logger.info(f"[{self.name}] Main worker loop finished.")
         with self._lock:

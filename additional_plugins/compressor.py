@@ -7,7 +7,7 @@ from typing import Dict, Optional, Tuple
 
 # --- Node System Imports ---
 from node_system import Node
-from constants import DEFAULT_DTYPE, DEFAULT_SAMPLERATE, DEFAULT_BLOCKSIZE
+from constants import DEFAULT_DTYPE, DEFAULT_SAMPLERATE, DEFAULT_BLOCKSIZE, DEFAULT_CHANNELS
 
 # --- UI and Qt Imports ---
 from ui_elements import NodeItem, NodeStateEmitter, NODE_CONTENT_PADDING
@@ -29,7 +29,6 @@ MAX_RELEASE_MS = 2000.0
 MIN_KNEE_DB = 0.0
 MAX_KNEE_DB = 24.0
 EPSILON = 1e-9
-# --- NEW: Sidechain downsampling factor. 4x is a good balance of performance and accuracy ---
 SIDECHAIN_DOWNSAMPLE_FACTOR = 4
 
 # ==============================================================================
@@ -180,6 +179,11 @@ class CompressorNode(Node):
         self._knee_db = 6.0
         self._samplerate = DEFAULT_SAMPLERATE
         self._envelope = 0.0
+        
+        # --- NEW: Delay buffer for latency compensation ---
+        self._delay_samples = SIDECHAIN_DOWNSAMPLE_FACTOR // 2
+        self._delay_buffer = torch.zeros((DEFAULT_CHANNELS, self._delay_samples), dtype=DEFAULT_DTYPE)
+
 
     # --- Parameter Setters (Unchanged) ---
     def set_threshold_db(self, value: float):
@@ -228,69 +232,28 @@ class CompressorNode(Node):
     def start(self):
         with self._lock:
             self._envelope = 0.0
+            self._delay_buffer.zero_()
 
-    # --- NEW: JIT-Compiled, full DSP processing function with DOWNSAMPLED sidechain ---
     @staticmethod
     @torch.jit.script
-    def _jit_process_dsp(
-        signal: torch.Tensor,
+    def _jit_envelope_loop(
+        sidechain: torch.Tensor,
         initial_envelope: float,
-        threshold_db: float,
-        ratio: float,
-        knee_db: float,
         attack_coeff: float,
-        release_coeff: float,
-        epsilon: float,
-        downsample_factor: int
+        release_coeff: float
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         
-        # 1. Level Detection
-        level_db = 20 * torch.log10(torch.abs(signal) + epsilon)
+        num_samples = sidechain.shape[0]
+        envelope_out = torch.zeros_like(sidechain)
+        env = torch.tensor(initial_envelope, dtype=sidechain.dtype, device=sidechain.device)
 
-        # 2. Branchless Gain Computation
-        slope = 1.0 / ratio - 1.0
-        knee_start = threshold_db - knee_db / 2.0
-        knee_end = threshold_db + knee_db / 2.0
-        
-        is_below = level_db < knee_start
-        is_inside = (level_db >= knee_start) & (level_db <= knee_end)
-        
-        gain_below = torch.zeros_like(level_db)
-        gain_inside = slope * (((level_db - knee_start) ** 2) / (2.0 * max(epsilon, knee_db)))
-        gain_above = slope * (level_db - threshold_db)
-        
-        gain_reduction_db = torch.where(
-            is_below, gain_below, torch.where(is_inside, gain_inside, gain_above)
-        )
-        
-        # --- 3. DOWNSAMPLED Envelope Follower ---
-        sidechain_target, _ = torch.max(torch.abs(gain_reduction_db), dim=0)
-        
-        # Downsample by averaging windows
-        downsampled_sidechain = F.avg_pool1d(sidechain_target.unsqueeze(0), kernel_size=downsample_factor, stride=downsample_factor).squeeze(0)
-        
-        num_samples_down = downsampled_sidechain.shape[0]
-        envelope_out_down = torch.zeros_like(downsampled_sidechain)
-        env = torch.tensor(initial_envelope, dtype=downsampled_sidechain.dtype, device=downsampled_sidechain.device)
-
-        # This loop now runs N times faster
-        for i in range(num_samples_down):
-            target = downsampled_sidechain[i]
+        for i in range(num_samples):
+            target = sidechain[i]
             coeff = attack_coeff if target > env else release_coeff
             env = target + coeff * (env - target)
-            envelope_out_down[i] = env
+            envelope_out[i] = env
             
-        # Upsample the envelope back to full size using linear interpolation
-        envelope_out_mono = F.interpolate(envelope_out_down.unsqueeze(0).unsqueeze(0), 
-                                          size=signal.shape[1], 
-                                          mode='linear', 
-                                          align_corners=False).squeeze(0).squeeze(0)
-
-        # 4. Apply Gain
-        gain_reduction_linear = 10 ** (-envelope_out_mono / 20.0)
-        output_signal = signal * gain_reduction_linear
-
-        return output_signal, env
+        return envelope_out, env
 
     def process(self, input_data: dict) -> dict:
         signal = input_data.get("in")
@@ -333,27 +296,64 @@ class CompressorNode(Node):
         if state_to_emit:
             self.emitter.stateUpdated.emit(state_to_emit)
 
-        # --- DSP Processing (MODIFIED) ---
-        # The sample rate for the envelope follower is now lower
+        # --- DSP Processing (MODIFIED FOR DELAY COMPENSATION) ---
+
+        # 1. Level Detection & Gain Computation (on original signal)
+        level_db = 20 * torch.log10(torch.abs(signal) + EPSILON)
+        
+        slope = 1.0 / ratio - 1.0
+        knee_start = threshold_db - knee_db / 2.0
+        knee_end = threshold_db + knee_db / 2.0
+        is_below = level_db < knee_start
+        is_inside = (level_db >= knee_start) & (level_db <= knee_end)
+        
+        gain_below = torch.zeros_like(level_db)
+        gain_inside = slope * (((level_db - knee_start) ** 2) / (2.0 * max(EPSILON, knee_db)))
+        gain_above = slope * (level_db - threshold_db)
+        
+        gain_reduction_db = torch.where(
+            is_below, gain_below, torch.where(is_inside, gain_inside, gain_above)
+        )
+        
+        # 2. Sidechain Preparation
+        sidechain_target, _ = torch.max(torch.abs(gain_reduction_db), dim=0)
+        
+        # 3. Downsample with stateless avg pooling
+        downsampled_sidechain = F.avg_pool1d(sidechain_target.unsqueeze(0), 
+                                             kernel_size=SIDECHAIN_DOWNSAMPLE_FACTOR, 
+                                             stride=SIDECHAIN_DOWNSAMPLE_FACTOR).squeeze(0)
+        
+        # 4. Run the JIT envelope follower
         downsampled_samplerate = self._samplerate / SIDECHAIN_DOWNSAMPLE_FACTOR
         attack_coeff = np.exp(-1.0 / (downsampled_samplerate * (attack_ms / 1000.0))).item()
         release_coeff = np.exp(-1.0 / (downsampled_samplerate * (release_ms / 1000.0))).item()
-        
-        # --- REPLACEMENT ---
-        # Call the final, all-encompassing JIT function with the downsampling factor
-        output_signal, final_env_tensor = self._jit_process_dsp(
-            signal,
-            initial_envelope,
-            threshold_db,
-            ratio,
-            knee_db,
-            attack_coeff,
-            release_coeff,
-            EPSILON,
-            SIDECHAIN_DOWNSAMPLE_FACTOR
+
+        envelope_out_down, final_env_tensor = self._jit_envelope_loop(
+            downsampled_sidechain, initial_envelope, attack_coeff, release_coeff
         )
         self._envelope = final_env_tensor.item()
-        # --- END REPLACEMENT ---
+        
+        # 5. Upsample with stateless linear interpolation
+        envelope_out_mono = F.interpolate(envelope_out_down.unsqueeze(0).unsqueeze(0), 
+                                          size=signal.shape[1], 
+                                          mode='linear', 
+                                          align_corners=False).squeeze(0).squeeze(0)
+        
+        # 6. DELAY COMPENSATION
+        # The resampling introduces a delay. We apply an equal delay to the audio signal.
+        if self._delay_samples > 0:
+            # Create a combined signal of the buffer and the current input
+            combined_signal = torch.cat((self._delay_buffer, signal), dim=1)
+            # The signal to be processed is the first part of this combined signal
+            delayed_signal = combined_signal[:, :signal.shape[1]]
+            # The new delay buffer is the last part of the combined signal
+            self._delay_buffer = combined_signal[:, signal.shape[1]:]
+        else:
+            delayed_signal = signal
+            
+        # 7. Apply Gain to the DELAYED signal
+        gain_reduction_linear = 10 ** (-envelope_out_mono / 20.0)
+        output_signal = delayed_signal * gain_reduction_linear
         
         return {"out": output_signal}
 
