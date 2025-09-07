@@ -58,9 +58,6 @@ class SampleLoadRunnable(QRunnable):
             self.signaller.load_finished.emit(("failure", err_msg, self.file_path))
 
 
-
-
-
 # ==============================================================================
 # 3. Custom UI Class (SampleNodeItem)
 # ==============================================================================

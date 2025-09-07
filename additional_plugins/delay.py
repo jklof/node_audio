@@ -9,7 +9,7 @@ from node_system import Node
 from constants import DEFAULT_DTYPE, DEFAULT_SAMPLERATE, DEFAULT_BLOCKSIZE
 
 # --- UI and Qt Imports ---
-from ui_elements import NodeItem, NodeStateEmitter, NODE_CONTENT_PADDING # <-- IMPORTED NodeStateEmitter
+from ui_elements import NodeItem, NodeStateEmitter, NODE_CONTENT_PADDING  # <-- IMPORTED NodeStateEmitter
 from PySide6.QtWidgets import QWidget, QSlider, QLabel, QVBoxLayout
 from PySide6.QtCore import Qt, Signal, Slot, QObject, QSignalBlocker
 
@@ -26,11 +26,13 @@ MIN_MIX = 0.0
 MAX_MIX = 1.0
 EPSILON = 1e-9
 
+
 # ==============================================================================
 # 1. UI Class for the Delay Node
 # ==============================================================================
 class DelayNodeItem(NodeItem):
     """Custom UI for the DelayNode, with sliders for delay parameters."""
+
     NODE_SPECIFIC_WIDTH = 200
 
     def __init__(self, node_logic: "DelayNode"):
@@ -53,8 +55,13 @@ class DelayNodeItem(NodeItem):
         main_layout.addWidget(self.delay_label)
         main_layout.addWidget(self.delay_slider)
         self.controls["delay_time_ms"] = {
-            "slider": self.delay_slider, "label": self.delay_label, "format": "{:.0f} ms",
-            "min_val": MIN_DELAY_MS, "max_val": MAX_DELAY_MS, "is_log": True, "name": "Delay Time",
+            "slider": self.delay_slider,
+            "label": self.delay_label,
+            "format": "{:.0f} ms",
+            "min_val": MIN_DELAY_MS,
+            "max_val": MAX_DELAY_MS,
+            "is_log": True,
+            "name": "Delay Time",
         }
 
         # Feedback Slider
@@ -64,8 +71,13 @@ class DelayNodeItem(NodeItem):
         main_layout.addWidget(self.feedback_label)
         main_layout.addWidget(self.feedback_slider)
         self.controls["feedback"] = {
-            "slider": self.feedback_slider, "label": self.feedback_label, "format": "{:.1%}",
-            "min_val": MIN_FEEDBACK, "max_val": MAX_FEEDBACK, "is_log": False, "name": "Feedback",
+            "slider": self.feedback_slider,
+            "label": self.feedback_label,
+            "format": "{:.1%}",
+            "min_val": MIN_FEEDBACK,
+            "max_val": MAX_FEEDBACK,
+            "is_log": False,
+            "name": "Feedback",
         }
 
         # Mix Slider
@@ -75,8 +87,13 @@ class DelayNodeItem(NodeItem):
         main_layout.addWidget(self.mix_label)
         main_layout.addWidget(self.mix_slider)
         self.controls["mix"] = {
-            "slider": self.mix_slider, "label": self.mix_label, "format": "{:.1%}",
-            "min_val": MIN_MIX, "max_val": MAX_MIX, "is_log": False, "name": "Mix",
+            "slider": self.mix_slider,
+            "label": self.mix_label,
+            "format": "{:.1%}",
+            "min_val": MIN_MIX,
+            "max_val": MAX_MIX,
+            "is_log": False,
+            "name": "Mix",
         }
 
         # Connect slider signals to their specific handlers
@@ -106,13 +123,15 @@ class DelayNodeItem(NodeItem):
             log_min = np.log10(info["min_val"])
             log_max = np.log10(info["max_val"])
             range_val = log_max - log_min
-            if abs(range_val) < EPSILON: return 0
+            if abs(range_val) < EPSILON:
+                return 0
             safe_val = np.clip(value, info["min_val"], info["max_val"])
             norm = (np.log10(safe_val) - log_min) / range_val
             return int(round(norm * 1000.0))
         else:
             range_val = info["max_val"] - info["min_val"]
-            if abs(range_val) < EPSILON: return 0
+            if abs(range_val) < EPSILON:
+                return 0
             norm = (np.clip(value, info["min_val"], info["max_val"]) - info["min_val"]) / range_val
             return int(round(norm * 1000.0))
 
@@ -152,6 +171,7 @@ class DelayNodeItem(NodeItem):
         self._on_state_updated(state)
         super().updateFromLogic()
 
+
 # ==============================================================================
 # 2. Logic Class for the Delay Node
 # ==============================================================================
@@ -187,7 +207,9 @@ class DelayNode(Node):
         self._delay_buffer = torch.zeros((num_channels, self._buffer_size_samples), dtype=DEFAULT_DTYPE)
         self._write_head = 0
         self._expected_channels = num_channels
-        logger.info(f"[{self.name}] Delay buffer initialized for {num_channels} channels, size {self._buffer_size_samples} samples.")
+        logger.info(
+            f"[{self.name}] Delay buffer initialized for {num_channels} channels, size {self._buffer_size_samples} samples."
+        )
 
     # --- Explicit, Thread-Safe Parameter Setters (for UI interaction) ---
     def set_delay_time_ms(self, value: float):
@@ -238,7 +260,7 @@ class DelayNode(Node):
             self._write_head = 0
             if self._delay_buffer is not None:
                 self._delay_buffer.zero_()
-            self._expected_channels = None # Force re-init on first process block
+            self._expected_channels = None  # Force re-init on first process block
 
     def process(self, input_data: dict) -> dict:
         dry_signal = input_data.get("in")
@@ -248,7 +270,7 @@ class DelayNode(Node):
         num_channels, block_size = dry_signal.shape
         if block_size != DEFAULT_BLOCKSIZE:
             logger.warning(f"[{self.name}] Input block size mismatch. Expected {DEFAULT_BLOCKSIZE}, got {block_size}.")
-            return {"out": dry_signal} # Pass through
+            return {"out": dry_signal}  # Pass through
 
         # --- CORRECTED: State update logic to prevent deadlock ---
         state_to_emit = None
@@ -304,7 +326,7 @@ class DelayNode(Node):
 
         indices_floor = indices_wrapped.long()
         indices_ceil = torch.fmod(indices_floor + 1, self._buffer_size_samples).long()
-        fraction = (indices_wrapped - indices_floor).unsqueeze(0) # Shape: (1, block_size)
+        fraction = (indices_wrapped - indices_floor).unsqueeze(0)  # Shape: (1, block_size)
 
         # 2. Read from buffer using linear interpolation
         sample1 = self._delay_buffer[:, indices_floor]
@@ -322,9 +344,9 @@ class DelayNode(Node):
         if write_indices_start + block_size > self._buffer_size_samples:
             part1_len = self._buffer_size_samples - write_indices_start
             self._delay_buffer[:, write_indices_start:] = feedback_signal[:, :part1_len]
-            self._delay_buffer[:, :block_size - part1_len] = feedback_signal[:, part1_len:]
+            self._delay_buffer[:, : block_size - part1_len] = feedback_signal[:, part1_len:]
         else:
-            self._delay_buffer[:, write_indices_start:write_indices_start + block_size] = feedback_signal
+            self._delay_buffer[:, write_indices_start : write_indices_start + block_size] = feedback_signal
 
         # 6. Advance write head
         self._write_head = (self._write_head + block_size) % self._buffer_size_samples

@@ -24,7 +24,7 @@ class PianoWidget(QWidget):
     """A custom widget that draws and handles interactions for a piano keyboard."""
 
     noteOn = Signal(int, int)  # note, velocity
-    noteOff = Signal(int)      # note
+    noteOff = Signal(int)  # note
 
     def __init__(self, start_note=48, num_octaves=2, parent=None):
         super().__init__(parent)
@@ -166,6 +166,12 @@ class MIDIKeyboardNodeItem(NodeItem):
         active_notes = state.get("active_notes", [])
         self.piano_widget.set_active_notes(active_notes)
 
+    @Slot()
+    def updateFromLogic(self):
+        state = self.node_logic.get_current_state_snapshot()
+        self._on_state_updated(state)
+        super().updateFromLogic()
+
 
 # ==============================================================================
 # 3. Node Logic Class (Refactored)
@@ -198,13 +204,13 @@ class MIDIKeyboardNode(Node):
             # 1. Update the internal state (queue a message and update active notes).
             msg = mido.Message("note_on", note=note, velocity=velocity)
             self._message_queue.append(msg)
-            
+
             # 2. Check if a state change occurred that requires a UI update.
             if note not in self._active_notes:
                 self._active_notes.add(note)
                 # 3. If so, capture the new state for later emission.
                 state_to_emit = {"active_notes": list(self._active_notes)}
-        
+
         # 4. After releasing the lock, emit the signal to the UI thread.
         if state_to_emit:
             self.emitter.stateUpdated.emit(state_to_emit)

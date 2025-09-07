@@ -35,6 +35,7 @@ class ShaperType(Enum):
     FOLD = "Foldback"
     SINE = "Sine Distortion"
 
+
 # ==============================================================================
 # UI Class for the WaveShaper Node
 # ==============================================================================
@@ -260,7 +261,7 @@ class WaveShaperNode(Node):
             drive = self._drive
             mix = self._mix
             shaper_type = self._shaper_type
-            
+
             # If a value changed, get a state snapshot to emit after releasing the lock
             if ui_update_needed:
                 state_to_emit = self.get_current_state_snapshot(locked=True)
@@ -305,7 +306,7 @@ class WaveShaperNode(Node):
             shaper_type_enum = ShaperType[shaper_type_name]
         except KeyError:
             shaper_type_enum = ShaperType.SOFT_CLIP
-        
+
         # Use the public setters during deserialization. This happens on the main
         # thread when the graph is loading, so it is perfectly safe and ensures
         # the UI is correctly initialized with the loaded state.

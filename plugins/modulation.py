@@ -22,9 +22,6 @@ MIN_TIME = 0.001
 EPSILON = 1e-9
 
 
-
-
-
 # ==============================================================================
 # 2. ADSR Node UI Class
 # ==============================================================================
@@ -69,6 +66,14 @@ class ADSRNodeItem(NodeItem):
         # Connect the logic node's state updates back to the UI
         self.node_logic.emitter.stateUpdated.connect(self._on_state_updated)
 
+    @Slot()
+    def updateFromLogic(self):
+        """
+        Pulls the current state from the logic node to initialize the UI.
+        """
+        state = self.node_logic.get_current_state_snapshot()
+        self._on_state_updated(state)
+        super().updateFromLogic()
 
     def _create_slider_control(self, name: str, min_val: float, max_val: float, fmt: str) -> tuple[QSlider, QLabel]:
         """Helper function to create a labeled slider."""
@@ -355,8 +360,6 @@ class ADSRNode(Node):
             self._release_s = data.get("release", 0.5)
 
 
-
-
 # ==============================================================================
 # 4. Gate Button Node UI Class
 # ==============================================================================
@@ -442,8 +445,6 @@ class GateButtonNode(Node):
         super().stop()
 
 
-
-
 # ==============================================================================
 # 6. LFO Node UI Class
 # ==============================================================================
@@ -479,6 +480,15 @@ class LFONodeItem(NodeItem):
         self.node_logic.emitter.stateUpdated.connect(self._on_state_updated)
 
         # Initial state emission will be triggered by graph_scene.py
+
+    @Slot()
+    def updateFromLogic(self):
+        """
+        Pulls the current state from the logic node to initialize the UI.
+        """
+        state = {"frequency": self.node_logic.get_frequency_hz()}
+        self._on_state_updated(state)
+        super().updateFromLogic()
 
     def _map_slider_to_logical(self, slider_value: int) -> float:
         # Map integer slider to float freq
@@ -550,8 +560,6 @@ class LFONode(Node):
     def get_frequency_hz(self) -> float:
         with self.lock:
             return self._frequency_hz
-
-
 
     # -----------------
     # Worker thread method

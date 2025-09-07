@@ -94,9 +94,6 @@ class IRLoadRunnable(QRunnable):
             self.signaller.load_finished.emit(("failure", err_msg, self.file_path))
 
 
-
-
-
 # ==============================================================================
 # 3. Custom UI Class (ConvolutionReverbNodeItem)
 # ==============================================================================
@@ -359,8 +356,6 @@ class ConvolutionReverbNode(Node):
     def get_current_state_snapshot(self) -> Dict:
         with self._lock:
             return self._get_current_state_snapshot_locked()
-
-
 
     def _reset_dsp_state_locked(self, num_channels: int):
         self._expected_channels = num_channels

@@ -316,7 +316,15 @@ class MIDIControlChangeNodeItem(NodeItem):
 
         self.cc_spinbox.valueChanged.connect(self.node_logic.set_cc_number)
         self.node_logic.emitter.stateUpdated.connect(self._on_state_updated)
-        # Removed updateFromLogic - using unidirectional data flow
+
+    @Slot()
+    def updateFromLogic(self):
+        """
+        Pulls the current state from the logic node to initialize the UI.
+        """
+        state = self.node_logic.get_current_state()
+        self._on_state_updated(state)
+        super().updateFromLogic()
 
     @Slot(dict)
     def _on_state_updated(self, state: Dict):
@@ -400,7 +408,15 @@ class MIDIPitchWheelNodeItem(NodeItem):
         self.setContentWidget(self.container_widget)
 
         self.node_logic.emitter.stateUpdated.connect(self._on_state_updated)
-        # Removed updateFromLogic - using unidirectional data flow
+
+    @Slot()
+    def updateFromLogic(self):
+        """
+        Pulls the current state from the logic node to initialize the UI.
+        """
+        state = self.node_logic.get_current_state()
+        self._on_state_updated(state)
+        super().updateFromLogic()
 
     @Slot(dict)
     def _on_state_updated(self, state: Dict):
@@ -618,7 +634,15 @@ class MIDIPitchWheelOutNodeItem(NodeItem):
         self.setContentWidget(self.container_widget)
 
         self.node_logic.emitter.stateUpdated.connect(self._on_state_updated)
-        # Removed updateFromLogic - using unidirectional data flow
+
+    @Slot()
+    def updateFromLogic(self):
+        """
+        Pulls the current state from the logic node to initialize the UI.
+        """
+        state = self.node_logic.get_current_state()
+        self._on_state_updated(state)
+        super().updateFromLogic()
 
     @Slot(dict)
     def _on_state_updated(self, state: Dict):
@@ -693,7 +717,15 @@ class MIDIControlChangeOutNodeItem(NodeItem):
 
         self.cc_spinbox.valueChanged.connect(self.node_logic.set_cc_number)
         self.node_logic.emitter.stateUpdated.connect(self._on_state_updated)
-        # Removed updateFromLogic - using unidirectional data flow
+
+    @Slot()
+    def updateFromLogic(self):
+        """
+        Pulls the current state from the logic node to initialize the UI.
+        """
+        state = self.node_logic.get_current_state()
+        self._on_state_updated(state)
+        super().updateFromLogic()
 
     @Slot(dict)
     def _on_state_updated(self, state: Dict):

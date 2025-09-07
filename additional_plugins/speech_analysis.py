@@ -8,6 +8,7 @@ from typing import Dict, Optional, Tuple
 # The librosa library is required for the 'PYIN' and 'YIN' methods to function.
 try:
     import librosa
+
     LIBROSA_AVAILABLE = True
 except ImportError:
     LIBROSA_AVAILABLE = False
@@ -122,6 +123,7 @@ class F0EstimatorNode(Node):
 
     class _PitchEngine:
         """Helper class to contain the pure DSP for autocorrelation."""
+
         def __init__(self, sample_rate: int):
             self.sample_rate = sample_rate
             self.min_f0 = 80.0
@@ -143,17 +145,20 @@ class F0EstimatorNode(Node):
             autocorr = np.correlate(processed, processed, mode="full")
             autocorr = autocorr[len(autocorr) // 2 :]
 
-            if autocorr[0] <= 0: return 0.0, 0.0
+            if autocorr[0] <= 0:
+                return 0.0, 0.0
             autocorr /= autocorr[0]
 
             search_range = autocorr[self.min_lag : min(self.max_lag, len(autocorr))]
-            if len(search_range) == 0: return 0.0, 0.0
+            if len(search_range) == 0:
+                return 0.0, 0.0
 
             peak_idx = np.argmax(search_range)
             peak_value = search_range[peak_idx]
 
             confidence = np.clip(peak_value / 0.8, 0.0, 1.0)
-            if peak_value < 0.3: return 0.0, confidence
+            if peak_value < 0.3:
+                return 0.0, confidence
 
             lag = peak_idx + self.min_lag
             f0 = self.sample_rate / lag
@@ -171,12 +176,12 @@ class F0EstimatorNode(Node):
         self._method = "pyin" if LIBROSA_AVAILABLE else "autocorr"
         self._buffer = np.array([], dtype=np.float32)
         self._pitch_engine = self._PitchEngine(DEFAULT_SAMPLERATE)
-        
+
         # --- State for UI update thread ---
         self._latest_f0_hz = 0.0
         self._latest_confidence = 0.0
         self._smoothed_f0 = 0.0
-        
+
         # --- UI update thread management ---
         self._ui_update_thread: Optional[threading.Thread] = None
         self._stop_ui_thread_event = threading.Event()
@@ -237,14 +242,23 @@ class F0EstimatorNode(Node):
 
             raw_f0, confidence = 0.0, 0.0
             if method == "pyin" and LIBROSA_AVAILABLE:
-                f0, _, probs = librosa.pyin(analysis_chunk, fmin=80, fmax=800, sr=DEFAULT_SAMPLERATE, frame_length=REQUIRED_FRAME_LENGTH, fill_na=0.0)
+                f0, _, probs = librosa.pyin(
+                    analysis_chunk,
+                    fmin=80,
+                    fmax=800,
+                    sr=DEFAULT_SAMPLERATE,
+                    frame_length=REQUIRED_FRAME_LENGTH,
+                    fill_na=0.0,
+                )
                 raw_f0 = float(f0[0]) if f0 is not None and len(f0) > 0 else 0.0
                 confidence = float(probs[0]) if probs is not None and len(probs) > 0 else 0.0
             elif method == "yin" and LIBROSA_AVAILABLE:
-                f0 = librosa.yin(analysis_chunk, fmin=80, fmax=800, sr=DEFAULT_SAMPLERATE, frame_length=REQUIRED_FRAME_LENGTH)
+                f0 = librosa.yin(
+                    analysis_chunk, fmin=80, fmax=800, sr=DEFAULT_SAMPLERATE, frame_length=REQUIRED_FRAME_LENGTH
+                )
                 raw_f0 = float(f0[0]) if f0 is not None and len(f0) > 0 and not np.isnan(f0[0]) else 0.0
                 confidence = 1.0 if raw_f0 > 0 else 0.0
-            else: # Autocorrelation fallback
+            else:  # Autocorrelation fallback
                 raw_f0, confidence = self._pitch_engine.autocorrelation_f0(analysis_chunk)
 
             with self._lock:
@@ -260,7 +274,8 @@ class F0EstimatorNode(Node):
 
         except Exception as e:
             logger.error(f"[{self.name}] Error during F0 estimation: {e}", exc_info=True)
-            with self._lock: self._smoothed_f0 = 0.0
+            with self._lock:
+                self._smoothed_f0 = 0.0
 
         return {"f0_hz": output_f0, "confidence": output_confidence}
 
@@ -279,7 +294,7 @@ class F0EstimatorNode(Node):
             self._latest_f0_hz = 0.0
             self._latest_confidence = 0.0
             self._pitch_engine.prev_sample = 0.0
-        
+
         self._stop_ui_thread_event.clear()
         self._ui_update_thread = threading.Thread(target=self._ui_updater_loop, daemon=True)
         self._ui_update_thread.start()
@@ -289,7 +304,7 @@ class F0EstimatorNode(Node):
         self._stop_ui_thread_event.set()
         if self._ui_update_thread:
             self._ui_update_thread.join(timeout=0.5)
-        
+
         # Send a final cleared state to the UI
         with self._lock:
             state = {"method": self._method, "f0_hz": 0.0, "confidence": 0.0}

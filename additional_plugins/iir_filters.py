@@ -5,6 +5,7 @@ import logging
 # --- Core Dependencies ---
 try:
     import scipy.signal
+
     SCIPY_AVAILABLE = True
 except ImportError:
     SCIPY_AVAILABLE = False
@@ -181,8 +182,13 @@ class BaseIIRFilterNode(Node):
         try:
             Wn = self._calculate_wn(clamped_cutoff, clamped_Q)
             self._sos = scipy.signal.iirfilter(
-                N=self.FILTER_ORDER, Wn=Wn, btype=self.filter_type,
-                analog=False, ftype="butter", output="sos", fs=self._samplerate
+                N=self.FILTER_ORDER,
+                Wn=Wn,
+                btype=self.filter_type,
+                analog=False,
+                ftype="butter",
+                output="sos",
+                fs=self._samplerate,
             )
             self._filter_state_zi = None  # Invalidate state so it gets re-initialized
             self._coefficients_dirty = False
@@ -219,6 +225,7 @@ class BaseIIRFilterNode(Node):
     def get_state_snapshot(self, locked: bool = False):
         def get_it():
             return {"cutoff_hz": self._cutoff_hz, "Q": self._Q, "filter_type": self.filter_type}
+
         if locked:
             return get_it()
         with self._lock:
@@ -232,7 +239,7 @@ class BaseIIRFilterNode(Node):
         state_to_emit = None
         with self._lock:
             ui_update_needed = False
-            
+
             cutoff_in = input_data.get("cutoff_hz")
             if cutoff_in is not None:
                 new_cutoff = np.clip(float(cutoff_in), MIN_CUTOFF_HZ, MAX_CUTOFF_HZ).item()
@@ -281,7 +288,7 @@ class BaseIIRFilterNode(Node):
         # Emit signal AFTER releasing the lock
         if state_to_emit:
             self.emitter.stateUpdated.emit(state_to_emit)
-        
+
         return {"out": output_tensor}
 
     def start(self):
@@ -300,6 +307,7 @@ class BaseIIRFilterNode(Node):
         self.set_cutoff_hz(data.get("cutoff_hz", 1000.0))
         self.set_q(data.get("Q", 1.0 / np.sqrt(2)))
 
+
 # ==============================================================================
 # 3. Concrete Filter Node Implementations
 # ==============================================================================
@@ -308,10 +316,12 @@ class LowpassFilterNode(BaseIIRFilterNode):
     DESCRIPTION = f"Applies a {DEFAULT_FILTER_ORDER}th order Butterworth lowpass filter."
     filter_type = "lowpass"
 
+
 class HighpassFilterNode(BaseIIRFilterNode):
     NODE_TYPE = "IIR Highpass Filter"
     DESCRIPTION = f"Applies a {DEFAULT_FILTER_ORDER}th order Butterworth highpass filter."
     filter_type = "highpass"
+
 
 class BandpassFilterNode(BaseIIRFilterNode):
     NODE_TYPE = "IIR Bandpass Filter"

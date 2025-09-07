@@ -28,15 +28,17 @@ HEADER_HEIGHT = 20
 SOCKET_Y_SPACING = 25
 NODE_CONTENT_PADDING = 5
 
+
 class NodeStateEmitter(QObject):
     """
     A generic emitter for sending state updates from a logic Node to its UI NodeItem.
     Centralized in ui_common.py to keep it separate from core system logic.
     """
+
     def __init__(self):
         super().__init__()
-    stateUpdated = Signal(dict)
 
+    stateUpdated = Signal(dict)
 
 
 class SocketItem(QGraphicsObject):

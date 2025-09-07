@@ -31,9 +31,6 @@ class NoiseType(Enum):
     VIOLET = "Violet"  # Also known as Purple Noise
 
 
-
-
-
 # ==============================================================================
 # UI Class for Noise Generator
 # ==============================================================================
@@ -94,6 +91,14 @@ class NoiseGeneratorNodeItem(NodeItem):
         self.level_dial.valueChanged.connect(self._handle_level_change)
         self.node_logic.emitter.stateUpdated.connect(self._on_state_updated)
 
+    @Slot()
+    def updateFromLogic(self):
+        """
+        Pulls the current state from the logic node to initialize the UI.
+        """
+        state = self.node_logic.get_current_state_snapshot()
+        self._on_state_updated(state)
+        super().updateFromLogic()
 
     @Slot(str)
     def _handle_type_change(self, type_text: str):
@@ -128,8 +133,6 @@ class NoiseGeneratorNodeItem(NodeItem):
         if is_level_socket_connected:
             label_text += " (ext)"
         self.level_value_label.setText(label_text)
-
-
 
 
 # ==============================================================================

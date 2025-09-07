@@ -54,6 +54,15 @@ class STFTNodeItem(NodeItem):
         self.window_size_combo.activated.connect(self._on_window_size_change)
         self.node_logic.emitter.stateUpdated.connect(self._on_state_updated)
 
+    @Slot()
+    def updateFromLogic(self):
+        """
+        Pulls the current state from the logic node to initialize the UI.
+        """
+        state = {"window_size": self.node_logic.get_window_size()}
+        self._on_state_updated(state)
+        super().updateFromLogic()
+
     @Slot(int)
     def _on_window_size_change(self, index: int):
         new_size = self.window_sizes[index]
@@ -96,8 +105,6 @@ class STFTNode(Node):
         self._expected_channels = None
 
         self._recalculate_params()
-
-
 
     def _recalculate_params(self):
         with self._lock:
@@ -366,7 +373,6 @@ class SpectralFilterNode(Node):
     CATEGORY = "Spectral"
     DESCRIPTION = "Applies a brick-wall filter to spectral frames."
     UI_CLASS = SpectralFilterNodeItem
-
 
     def __init__(self, name, node_id=None):
         super().__init__(name, node_id)

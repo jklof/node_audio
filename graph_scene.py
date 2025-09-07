@@ -80,6 +80,7 @@ class NodeGraphScene(QGraphicsScene):
                 node_item.set_processing_bar_visible(self._show_processing_load)
                 self.addItem(node_item)
                 self.node_items[node_id] = node_item
+                node_item.updateFromLogic()
                 logger.debug(f"UI Sync: Added new node item {node_id[:4]}")
             else:
                 # Node already exists, just update its state
@@ -87,7 +88,7 @@ class NodeGraphScene(QGraphicsScene):
                 # Update position if it has changed
                 if node_item.pos() != QPointF(*node_logic.pos):
                     node_item.setPos(QPointF(*node_logic.pos))
-                
+
                 # Directly tell the UI item to sync its state from its logic object.
                 # This ensures it re-evaluates everything, including socket connection status.
                 node_item.updateFromLogic()

@@ -36,9 +36,6 @@ class PlaybackState:
     ERROR = "ERROR"
 
 
-
-
-
 class AudioFilePlayerNodeItem(NodeItem):
     """Simplified UI for the AudioFilePlayerNode, with controls removed."""
 
@@ -86,6 +83,14 @@ class AudioFilePlayerNodeItem(NodeItem):
         self.seek_slider.sliderReleased.connect(self._on_seek)
         self.node_logic.emitter.stateUpdated.connect(self._on_playback_state_changed)
 
+    @Slot()
+    def updateFromLogic(self):
+        """
+        Pulls the current state from the logic node to initialize the UI.
+        """
+        state = self.node_logic.get_current_state_snapshot()
+        self._on_playback_state_changed(state)
+        super().updateFromLogic()
 
     def _format_time(self, seconds: float) -> str:
         if seconds < 0:
@@ -149,7 +154,6 @@ class AudioFilePlayerNodeItem(NodeItem):
         else:
             self.seek_slider.setEnabled(False)
             self.seek_slider.setValue(0)
-
 
 
 class AudioFilePlayerNode(Node):

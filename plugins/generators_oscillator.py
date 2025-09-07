@@ -36,9 +36,6 @@ class Waveform(Enum):
     TRIANGLE = "Triangle"
 
 
-
-
-
 # ==============================================================================
 # UI Class for the Oscillator Node
 # ==============================================================================
@@ -93,6 +90,14 @@ class OscillatorNodeItem(NodeItem):
         self.pw_dial.valueChanged.connect(self._handle_pw_change)
         self.node_logic.emitter.stateUpdated.connect(self._on_state_updated)
 
+    @Slot()
+    def updateFromLogic(self):
+        """
+        Pulls the current state from the logic node to initialize the UI.
+        """
+        state = self.node_logic.get_current_state_snapshot()
+        self._on_state_updated(state)
+        super().updateFromLogic()
 
     def _create_dial_with_labels(self, title: str, initial_value: str) -> tuple[QDial, QVBoxLayout]:
         """Helper factory to create a dial and its associated labels."""
@@ -173,8 +178,6 @@ class OscillatorNodeItem(NodeItem):
         # --- Show/Hide Pulse Width Control ---
         self.pw_widget.setVisible(waveform == Waveform.SQUARE)
         self.update_geometry()  # Request geometry update when visibility changes
-
-
 
 
 # ==============================================================================
