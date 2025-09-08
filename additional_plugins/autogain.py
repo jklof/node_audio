@@ -226,6 +226,7 @@ class AutoGainNode(Node):
     def process(self, input_data: dict) -> dict:
         signal = input_data.get("in")
         if not isinstance(signal, torch.Tensor):
+            # Return a gain of 1.0 (0 dB) if there is no valid input signal.
             return {"gain_out": 1.0}
 
         state_snapshot_to_emit = None
@@ -279,9 +280,10 @@ class AutoGainNode(Node):
     def start(self):
         """Reset DSP state when processing starts."""
         with self._lock:
-            # --- THE FIX: Start with a very low gain (effectively silent) ---
+            # --- Reset gain to a silent default on every start ---
             self._current_gain_db = -70.0
 
+            # Also clear the history to not use stale loudness data
             self._recalculate_deque_size()
             self._rms_history.clear()
         super().start()

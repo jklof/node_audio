@@ -276,6 +276,12 @@ class ConvolutionReverbNode(Node):
         self._history_idx: int = 0
         self._overlap_add_buffer: Optional[torch.Tensor] = None
         self._expected_channels: Optional[int] = None
+        # Optimization: Pre-allocated buffers
+        self._dry_signal_gained = None
+        self._wet_signal_gained = None
+        self._dry_signal_mixed = None
+        self._final_output = None
+        self._last_shape = None
         self.ir_loader_signaller = IRLoadSignaller()
         self.ir_loader_signaller.load_finished.connect(self._on_ir_load_finished)
 
@@ -434,17 +440,28 @@ class ConvolutionReverbNode(Node):
         if bypass or not has_ir:
             return {"out": dry_signal}
 
-        dry_signal_gained = dry_signal * input_gain
+        # Ensure dry_signal has proper dimensions
+        if dry_signal.dim() == 1:
+            dry_signal = dry_signal.unsqueeze(0)
 
-        if dry_signal_gained.dim() == 1:
-            dry_signal_gained = dry_signal_gained.unsqueeze(0)
-
-        num_channels, num_samples = dry_signal_gained.shape
+        num_channels, num_samples = dry_signal.shape
         if num_samples != PARTITION_SIZE:
             logger.warning(
                 f"[{self.name}] Input block size ({num_samples}) differs from partition size ({PARTITION_SIZE}). Skipping."
             )
             return {"out": dry_signal}
+
+        # Check for buffer reallocation (only on shape change)
+        current_shape = dry_signal.shape
+        if self._last_shape != current_shape:
+            self._dry_signal_gained = torch.empty_like(dry_signal)
+            self._wet_signal_gained = torch.empty_like(dry_signal)
+            self._dry_signal_mixed = torch.empty_like(dry_signal)
+            self._final_output = torch.empty_like(dry_signal)
+            self._last_shape = current_shape
+
+        # In-place operations using pre-allocated buffers
+        torch.multiply(dry_signal, input_gain, out=self._dry_signal_gained)
 
         with self._lock:
             if self._expected_channels != num_channels:
@@ -452,7 +469,7 @@ class ConvolutionReverbNode(Node):
             if self._input_fft_history is None or not self._ir_partitions_fft:
                 return {"out": dry_signal}
 
-            input_fft = torch.fft.rfft(dry_signal_gained, n=FFT_SIZE, dim=1)
+            input_fft = torch.fft.rfft(self._dry_signal_gained, n=FFT_SIZE, dim=1)
 
             self._history_idx = (self._history_idx + 1) % self._input_fft_history.shape[0]
             self._input_fft_history[self._history_idx] = input_fft
@@ -470,9 +487,12 @@ class ConvolutionReverbNode(Node):
             wet_signal = (convolved_block[:, :PARTITION_SIZE] + self._overlap_add_buffer).to(DEFAULT_DTYPE)
             self._overlap_add_buffer = convolved_block[:, PARTITION_SIZE:].to(DEFAULT_DTYPE)
 
-        wet_signal_gained = wet_signal * output_gain
-        final_output = (dry_signal * (1.0 - mix)) + (wet_signal_gained * mix)
-        return {"out": final_output}
+        # In-place operations using pre-allocated buffers
+        torch.multiply(wet_signal, output_gain, out=self._wet_signal_gained)
+        torch.multiply(dry_signal, (1.0 - mix), out=self._dry_signal_mixed)
+        torch.add(self._dry_signal_mixed, self._wet_signal_gained, out=self._final_output)
+
+        return {"out": self._final_output}
 
     def start(self):
         super().start()

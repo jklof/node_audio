@@ -187,6 +187,14 @@ class GainNode(Node):
         # --- Core Processing ---
         # Convert decibels to a linear amplitude multiplier
         # Formula: amplitude = 10^(dB / 20)
+        # Add safety check to prevent overflow
+        if current_gain_db > 60.0:  # Cap at reasonable maximum
+            current_gain_db = 60.0
+            logger.warning(f"[{self.name}] Gain dB clamped to +60 dB to prevent overflow")
+        elif current_gain_db < -120.0:  # Cap at reasonable minimum
+            current_gain_db = -120.0
+            logger.warning(f"[{self.name}] Gain dB clamped to -120 dB to prevent underflow")
+
         amplitude_factor = 10.0 ** (current_gain_db / 20.0)
 
         # Apply gain

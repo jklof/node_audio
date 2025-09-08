@@ -186,7 +186,7 @@ class RVCContentEncoderNodeItem(NodeItem):
         else:
             self.status_label.setText("Status: Idle")
             self.status_label.setStyleSheet("color: white;")
-        super.updateFromLogic()
+        super().updateFromLogic()
 
 
 class RVCContentEncoderNode(Node):
