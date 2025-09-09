@@ -472,6 +472,18 @@ class Engine:
     def shutdown(self):
         logger.info("Engine: Shutting down...")
         self.stop_processing()
+
+        # --- FIX: Explicitly clean up all nodes to stop their threads/resources ---
+        with self._lock:
+            nodes_to_remove = list(self.graph.nodes.values())
+        logger.info(f"Engine: Removing {len(nodes_to_remove)} nodes for cleanup...")
+        for node in nodes_to_remove:
+            try:
+                node.remove()
+            except Exception as e:
+                logger.error(f"Error during shutdown while removing node '{node.name}': {e}", exc_info=True)
+        # --- END FIX ---
+
         self._stop_event.set()
         # Release semaphore one last time to unblock the acquire in the thread
         self._tick_semaphore.release()

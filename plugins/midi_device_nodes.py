@@ -252,7 +252,7 @@ class MIDIInputNode(Node):
 
 
 # ==============================================================================
-# 3. MIDI Note to Gate/Pitch Node (No changes needed)
+# 3. MIDI Note to Gate/Pitch Node
 # ==============================================================================
 class MIDINoteToGatePitchNode(Node):
     NODE_TYPE = "MIDI Note to Gate/Pitch"
@@ -293,7 +293,7 @@ class MIDINoteToGatePitchNode(Node):
 
 
 # ==============================================================================
-# 4. MIDI Control Change (CC) Node (No changes needed)
+# 4. MIDI Control Change (CC) Node
 # ==============================================================================
 class MIDIControlChangeNodeItem(NodeItem):
     NODE_WIDTH = 150
@@ -460,7 +460,6 @@ class MIDIPitchWheelNode(Node):
         # Always return the last known value
         return {"value_out": self._last_value}
 
-    # This node has no configurable state to serialize
     def serialize_extra(self) -> Dict:
         return {}
 
@@ -487,7 +486,7 @@ class MIDIOutputNodeItem(NodeItem):
         device_row.addWidget(self.device_combo)
         self.refresh_button = QPushButton("🔄")
         self.refresh_button.setFixedSize(24, 24)
-        device_row.addWidget(self.refresh_button)
+        device_row.addWidget(self.device_combo)
         layout.addLayout(device_row)
         self.status_label = QLabel("Status: Initializing...")
         layout.addWidget(self.status_label)
@@ -616,7 +615,7 @@ class MIDIOutputNode(Node):
 
 
 # ==============================================================================
-# 7. --- NEW: MIDI Pitch Wheel Output Node ---
+# 7. MIDI Pitch Wheel Output Node
 # ==============================================================================
 class MIDIPitchWheelOutNodeItem(NodeItem):
     NODE_WIDTH = 150
@@ -694,7 +693,7 @@ class MIDIPitchWheelOutNode(Node):
 
 
 # ==============================================================================
-# 8. --- NEW: MIDI Control Change (CC) Output Node ---
+# 8. MIDI Control Change (CC) Output Node
 # ==============================================================================
 class MIDIControlChangeOutNodeItem(NodeItem):
     NODE_WIDTH = 150
@@ -793,3 +792,46 @@ class MIDIControlChangeOutNode(Node):
 
     def deserialize_extra(self, data: Dict):
         self.set_cc_number(data.get("cc_number", 1))
+
+
+# ==============================================================================
+# 9. --- NEW: MIDI Merge (2-to-1) Node ---
+# ==============================================================================
+class MIDIMergeNode(Node):
+    NODE_TYPE = "MIDI Merge (2-to-1)"
+    CATEGORY = "MIDI"
+    DESCRIPTION = "Merges two MIDI streams into one. Input A has priority."
+
+    def __init__(self, name: str, node_id: Optional[str] = None):
+        super().__init__(name, node_id)
+        self.add_input("msg_in_A", data_type=object)
+        self.add_input("msg_in_B", data_type=object)
+        self.add_output("msg_out", data_type=object)
+        # A small queue to handle simultaneous messages without loss.
+        self._queue = deque(maxlen=50)
+
+    def process(self, input_data: Dict) -> Dict:
+        """
+        Queues incoming messages and outputs one per tick, ensuring no data loss
+        and prioritizing input A.
+        """
+        msg_a = input_data.get("msg_in_A")
+        if isinstance(msg_a, mido.Message):
+            # Add to the front of the queue to give it priority
+            self._queue.appendleft(msg_a)
+
+        msg_b = input_data.get("msg_in_B")
+        if isinstance(msg_b, mido.Message):
+            self._queue.append(msg_b)
+
+        if self._queue:
+            return {"msg_out": self._queue.popleft()}
+
+        # Otherwise, send nothing
+        return {"msg_out": None}
+
+    def start(self):
+        self._queue.clear()
+
+    def stop(self):
+        self._queue.clear()

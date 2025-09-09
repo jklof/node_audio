@@ -406,14 +406,20 @@ class AudioFilePlayerNode(Node):
             with self._lock:
                 state_to_emit = self._update_state_snapshot_locked(state=PlaybackState.ERROR, file_path=self._file_path)
             if state_to_emit:
-                self.emitter.stateUpdated.emit(state_to_emit)
+                try:
+                    self.emitter.stateUpdated.emit(state_to_emit)
+                except RuntimeError:
+                    logger.debug(f"[{self.name}] Emitter deleted before final error state could be sent.")
 
         logger.info(f"[{self.name}] File reader thread finished.")
         with self._lock:
             if self._playback_state != PlaybackState.ERROR:
                 state_to_emit = self._update_state_snapshot_locked(state=PlaybackState.STOPPED, position=0.0)
         if state_to_emit:
-            self.emitter.stateUpdated.emit(state_to_emit)
+            try:
+                self.emitter.stateUpdated.emit(state_to_emit)
+            except RuntimeError:
+                logger.debug(f"[{self.name}] Emitter deleted before final stopped state could be sent.")
 
     def serialize_extra(self) -> dict:
         with self._lock:
