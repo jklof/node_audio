@@ -10,7 +10,7 @@ from node_system import Node
 from constants import DEFAULT_DTYPE
 
 # --- UI and Qt Imports ---
-from ui_elements import NodeItem, NodeStateEmitter
+from ui_elements import NodeItem, NodeStateEmitter, NODE_CONTENT_PADDING
 from PySide6.QtWidgets import (
     QWidget,
     QLabel,
