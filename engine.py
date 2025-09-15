@@ -50,6 +50,34 @@ class Engine:
         self._processing_thread = threading.Thread(target=self._processing_loop, daemon=True)
         self._processing_thread.start()
 
+    def hotswap_node_classes(self, new_class_map: dict[str, Type[Node]]):
+        """
+        Updates the class of existing node instances to their new, reloaded versions.
+        This is a 'hot-swap' operation that preserves the node's state.
+        """
+        with self._lock:
+            logger.info("Engine: Performing class hotswap on existing nodes...")
+            nodes_to_update = [node for node in self.graph.nodes.values() if node.NODE_TYPE in new_class_map]
+
+            if not nodes_to_update:
+                logger.info("Engine: No running node instances needed a hotswap.")
+                # We still emit a signal to force the UI to update its "Add Node" menu
+                self._emit_graph_changed()
+                return
+
+            for node in nodes_to_update:
+                new_class = new_class_map[node.NODE_TYPE]
+                logger.info(f"Swapping class for '{node.name}' from {node.__class__} to {new_class}")
+                node.__class__ = new_class
+
+            # After swapping, the processing plan must be rebuilt to use the new methods.
+            self._invalidate_plan_cache()
+
+        # Emit a final signal to ensure the entire UI is synced with any potential changes.
+        # This is crucial for updating the "Add Node" context menu.
+        self._emit_graph_changed()
+        logger.info(f"Engine: Hotswap complete for {len(nodes_to_update)} nodes.")
+
     def tick(self):
         # Only release the semaphore if the engine is actively running
         if self._state == EngineState.RUNNING:

@@ -6,7 +6,7 @@ from PySide6.QtWidgets import QApplication, QMainWindow, QMessageBox, QToolBar, 
 from PySide6.QtGui import QAction
 from PySide6.QtCore import Slot, QTimer, Qt, QSettings
 
-from plugin_loader import load_plugins
+from plugin_loader import load_plugins, reload_plugin_modules
 from engine import Engine
 from app_controller import AppController
 from graph_view import NodeGraphWidget
@@ -25,8 +25,10 @@ class MainWindow(QMainWindow):
             logger.info("Clean startup requested. Clearing all saved settings.")
             QSettings("ReNode", "ReNodeProcessor").clear()
 
-        load_plugins("plugins")
-        load_plugins("additional_plugins")
+        # Load plugins at startup and keep track of the module names
+        self.plugin_modules = []
+        self.plugin_modules.extend(load_plugins("plugins"))
+        self.plugin_modules.extend(load_plugins("additional_plugins"))
 
         self.engine = Engine()
         self.graph_widget = NodeGraphWidget(self.engine.graph, self)
@@ -149,6 +151,7 @@ class MainWindow(QMainWindow):
         file_menu = menu_bar.addMenu("&File")
         process_menu = menu_bar.addMenu("&Process")
         view_menu = menu_bar.addMenu("&View")
+        dev_menu = menu_bar.addMenu("&Developer")  # <-- New Menu
 
         # File Menu Actions
         save_action = QAction("Save Graph", self, triggered=self.controller.save_graph)
@@ -180,6 +183,20 @@ class MainWindow(QMainWindow):
         self.show_load_action.setChecked(False)
         self.show_load_action.toggled.connect(self.on_toggle_processing_load_view)
         view_menu.addAction(self.show_load_action)
+
+        # --- NEW: Developer Menu Action ---
+        reload_plugins_action = QAction("Reload Plugins", self, triggered=self.on_reload_plugins)
+        reload_plugins_action.setShortcut("Ctrl+R")
+        dev_menu.addAction(reload_plugins_action)
+
+    @Slot()
+    def on_reload_plugins(self):
+        """Slot to handle the reload request from the UI."""
+        logger.info("UI: Manual plugin reload requested.")
+        self.statusBar().showMessage("Reloading plugins...", 3000)
+        # The controller orchestrates the actual reloading process
+        self.controller.reload_all_plugins(self.plugin_modules)
+        self.statusBar().showMessage("Plugins reloaded.", 5000)
 
     @Slot(bool)
     def update_ui_for_processing_state(self, is_processing: bool):

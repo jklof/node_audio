@@ -3,9 +3,10 @@ import json
 from PySide6.QtCore import QObject, Slot
 from PySide6.QtWidgets import QFileDialog, QMessageBox, QWidget
 
-from engine import Engine
+from engine import Engine, EngineState
 from graph_view import NodeGraphWidget
 from node_system import Socket
+from plugin_loader import reload_plugin_modules
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +36,26 @@ class AppController(QObject):
         self.graph_widget.connectionRequested.connect(self.on_connection_requested)
         self.graph_widget.nodeDeletionRequested.connect(self.on_node_deletion_requested)
         self.graph_widget.connectionDeletionRequested.connect(self.on_connection_deletion_requested)
+
+    @Slot(list)
+    def reload_all_plugins(self, module_names: list[str]):
+        """Orchestrates the plugin reload process."""
+        logger.info("Controller: Handling plugin reload.")
+
+        # 1. Safely stop the engine if it's running
+        was_running = self.engine._state == EngineState.RUNNING
+        if was_running:
+            self.stop_processing()
+
+        # 2. Perform the reload and get the map of new classes for hotswapping
+        new_class_map = reload_plugin_modules(module_names)
+
+        # 3. Tell the engine to hotswap the classes of any existing nodes
+        self.engine.hotswap_node_classes(new_class_map)
+
+        # 4. Restart the engine if it was running before
+        if was_running:
+            self.start_processing()
 
     @Slot(type, str, tuple)
     def on_node_creation_requested(self, node_class, name, pos):

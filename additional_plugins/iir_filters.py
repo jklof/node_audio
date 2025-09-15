@@ -1,5 +1,3 @@
-# File: plugins/iir_filters.py
-
 import torch
 import numpy as np
 import scipy.signal
@@ -105,7 +103,7 @@ class BiquadFilterNodeItem(NodeItem):
 
     @Slot(dict)
     def _on_state_updated(self, state: dict):
-        filter_type = state.get("type", "Low Pass")
+        filter_type = state.get("filter_type", "Low Pass")
         with QSignalBlocker(self.type_combo):
             self.type_combo.setCurrentText(filter_type)
         for key, slider, label in [
@@ -168,22 +166,14 @@ class BiquadFilterNode(Node):
         self._expected_channels: Optional[int] = None
 
     def _recalculate_coeffs(self):
-        """
-        --- CORRECTED ---
-        Designs IIR coefficients using NumPy based on the RBJ Audio EQ Cookbook.
-        This is numerically stable and correct.
-        """
         sr = DEFAULT_SAMPLERATE
         freq, q, gain_db = self._cutoff_freq, self._q, self._gain_db
-
         A = 10 ** (gain_db / 40.0)
         w0 = 2 * np.pi * freq / sr
         cos_w0 = np.cos(w0)
         sin_w0 = np.sin(w0)
         alpha = sin_w0 / (2 * q)
-
         b0, b1, b2, a0, a1, a2 = 0.0, 0.0, 0.0, 1.0, 0.0, 0.0
-
         if self._filter_type == "Low Pass":
             b0 = (1 - cos_w0) / 2
             b1 = 1 - cos_w0
@@ -235,11 +225,8 @@ class BiquadFilterNode(Node):
             a0 = (A + 1) - (A - 1) * cos_w0 + beta
             a1 = 2 * ((A - 1) - (A + 1) * cos_w0)
             a2 = (A + 1) - (A - 1) * cos_w0 - beta
-
-        # Normalize all coefficients by a0 and store as float32 numpy arrays
         self._b_coeffs = np.array([b0 / a0, b1 / a0, b2 / a0], dtype=np.float32)
         self._a_coeffs = np.array([a0 / a0, a1 / a0, a2 / a0], dtype=np.float32)
-
         self._params_dirty = False
         logger.info(f"[{self.name}] Recalculated IIR coefficients for {self._filter_type}.")
 
@@ -283,7 +270,7 @@ class BiquadFilterNode(Node):
 
     def _get_current_state_snapshot_locked(self) -> Dict:
         return {
-            "type": self._filter_type,
+            "filter_type": self._filter_type,
             "freq": self._cutoff_freq,
             "q": self._q,
             "gain_db": self._gain_db,
@@ -350,11 +337,11 @@ class BiquadFilterNode(Node):
 
     def serialize_extra(self) -> Dict:
         with self._lock:
-            return {"type": self._filter_type, "freq": self._cutoff_freq, "q": self._q, "gain_db": self._gain_db}
+            return {"filter_type": self._filter_type, "freq": self._cutoff_freq, "q": self._q, "gain_db": self._gain_db}
 
     def deserialize_extra(self, data: Dict):
         with self._lock:
-            self._filter_type = data.get("type", "Low Pass")
+            self._filter_type = data.get("filter_type", "Low Pass")
             self._cutoff_freq = data.get("freq", 1000.0)
             self._q = data.get("q", 0.707)
             self._gain_db = data.get("gain_db", 0.0)

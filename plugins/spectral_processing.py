@@ -14,7 +14,7 @@ from constants import (
     DEFAULT_COMPLEX_DTYPE,
     DEFAULT_WINDOW_SIZE,
     DEFAULT_FFT_SIZE,
-    SpectralFrame,  # <-- IMPORT THE CENTRAL DEFINITION
+    SpectralFrame,
 )
 
 # --- Qt Imports ---
@@ -24,15 +24,11 @@ from PySide6.QtCore import Qt, Slot, QSignalBlocker, Signal, QObject
 # --- Logging ---
 logger = logging.getLogger(__name__)
 
-# NOTE: The SpectralFrame dataclass definition has been REMOVED from this file.
 
 # ==============================================================================
-# 2. STFT Node (Time Domain -> Spectral Domain) - UI and Logic REVISED
+# 2. STFT Node (Time Domain -> Spectral Domain)
 # ==============================================================================
-
-
 class STFTNodeItem(NodeItem):
-    """--- REVISED --- UI for the STFTNode with simplified controls."""
 
     def __init__(self, node_logic: "STFTNode"):
         super().__init__(node_logic)
@@ -56,9 +52,6 @@ class STFTNodeItem(NodeItem):
 
     @Slot()
     def updateFromLogic(self):
-        """
-        Pulls the current state from the logic node to initialize the UI.
-        """
         state = {"window_size": self.node_logic.get_window_size()}
         self._on_state_updated(state)
         super().updateFromLogic()
@@ -93,9 +86,7 @@ class STFTNode(Node):
         self.emitter = NodeStateEmitter()
         self.add_input("audio_in", data_type=torch.Tensor)
         self.add_output("spectral_frame_out", data_type=SpectralFrame)
-
         self._lock = threading.Lock()
-
         self._hop_size = DEFAULT_BLOCKSIZE
         self._window_size = DEFAULT_WINDOW_SIZE
         self._fft_size = DEFAULT_FFT_SIZE
@@ -103,7 +94,6 @@ class STFTNode(Node):
         self._analysis_window = None
         self._buffer = torch.tensor([], dtype=DEFAULT_DTYPE)
         self._expected_channels = None
-
         self._recalculate_params()
 
     def _recalculate_params(self):
@@ -135,33 +125,22 @@ class STFTNode(Node):
 
     def process(self, input_data: dict) -> dict:
         audio_chunk = input_data.get("audio_in")
-
         if audio_chunk is None:
             return {"spectral_frame_out": None}
-
         proc_chunk = torch.atleast_2d(audio_chunk.to(DEFAULT_DTYPE))
-
         num_channels, _ = proc_chunk.shape
-
         with self._lock:
-            # If channel count is uninitialized or has changed, reset state here.
             if self._expected_channels is None or self._expected_channels != num_channels:
                 logger.info(
                     f"[{self.name}] Channel count changed from {self._expected_channels} to {num_channels}. Resetting buffer."
                 )
                 self._expected_channels = num_channels
-                # Correctly initialize the buffer as a 2D array with the new channel count.
                 self._buffer = torch.zeros((num_channels, 0), dtype=DEFAULT_DTYPE)
-
             self._buffer = torch.cat((self._buffer, proc_chunk), dim=1)
-
             if self._buffer.shape[1] >= self._window_size:
                 frame_data = self._buffer[:, : self._window_size]
-                # Broadcasting (channels, samples) * (samples,) works correctly
                 windowed_frame = frame_data * self._analysis_window
-                # Perform FFT along the sample axis (axis=1)
                 fft_data = torch.fft.rfft(windowed_frame, n=self._fft_size, dim=1).to(DEFAULT_COMPLEX_DTYPE)
-
                 output_frame = SpectralFrame(
                     data=fft_data,
                     fft_size=self._fft_size,
@@ -170,18 +149,14 @@ class STFTNode(Node):
                     sample_rate=self._sample_rate,
                     analysis_window=self._analysis_window,
                 )
-
                 self._buffer = self._buffer[:, self._hop_size :]
                 return {"spectral_frame_out": output_frame}
-
         return {"spectral_frame_out": None}
 
 
 # ==============================================================================
 # 3. ISTFT Node (Spectral Domain -> Time Domain)
 # ==============================================================================
-
-
 class ISTFTNode(Node):
     NODE_TYPE = "ISTFT"
     CATEGORY = "Spectral"
@@ -191,7 +166,6 @@ class ISTFTNode(Node):
         super().__init__(name, node_id)
         self.add_input("spectral_frame_in", data_type=SpectralFrame)
         self.add_output("audio_out", data_type=torch.Tensor)
-
         self._lock = threading.Lock()
         self._ola_buffer = None
         self._expected_channels = None
@@ -204,13 +178,11 @@ class ISTFTNode(Node):
         for i in range(0, win_size, hop):
             sum_of_squares += torch.roll(win**2, i)
         sum_of_squares[sum_of_squares < 1e-9] = 1.0
-        # Keep window as 1D array for broadcasting
         self._synthesis_window = win / sum_of_squares
         logger.info(f"[{self.name}] Recalculated synthesis window for Win={win_size}, Hop={hop}.")
 
     def _initialize_buffers(self, frame: SpectralFrame, num_channels: int):
         self._recalculate_synthesis_params(frame)
-        # Buffer shape is (channels, samples)
         self._ola_buffer = torch.zeros((num_channels, frame.window_size), dtype=DEFAULT_DTYPE)
         self._expected_channels = num_channels
         self._last_params = (frame.window_size, frame.hop_size, frame.fft_size)
@@ -224,14 +196,10 @@ class ISTFTNode(Node):
 
     def process(self, input_data: dict) -> dict:
         frame = input_data.get("spectral_frame_in")
-
         if not isinstance(frame, SpectralFrame):
             channels = self._expected_channels if self._expected_channels is not None else 1
-            # Output silent block with (channels, samples)
             return {"audio_out": torch.zeros((channels, DEFAULT_BLOCKSIZE), dtype=DEFAULT_DTYPE)}
-
         num_channels = frame.data.shape[0]
-
         with self._lock:
             if (
                 self._ola_buffer is None
@@ -239,30 +207,20 @@ class ISTFTNode(Node):
                 or self._last_params != (frame.window_size, frame.hop_size, frame.fft_size)
             ):
                 self._initialize_buffers(frame, num_channels)
-
             if self._ola_buffer is None:
                 return {"audio_out": torch.zeros((num_channels, DEFAULT_BLOCKSIZE), dtype=DEFAULT_DTYPE)}
-
-            # Perform iFFT along the frequency bin axis (axis=1)
             ifft_frame_full = torch.fft.irfft(frame.data, n=frame.fft_size, dim=1).to(DEFAULT_DTYPE)
             ifft_frame = ifft_frame_full[:, : frame.window_size]
-
-            # Broadcasting (channels, samples) * (samples,) works
             windowed_ifft = ifft_frame * self._synthesis_window
-
             self._ola_buffer[:, : frame.window_size] += windowed_ifft
-
             output_block = self._ola_buffer[:, : frame.hop_size].clone()
-
-            # Roll along the sample axis (axis=1)
             self._ola_buffer = torch.roll(self._ola_buffer, -frame.hop_size, dims=1)
             self._ola_buffer[:, -frame.hop_size :] = 0.0
-
             return {"audio_out": output_block}
 
 
 # ==============================================================================
-# 4. Spectral Filter Node --- MODIFIED ---
+# 4. Spectral Filter Node
 # ==============================================================================
 class SpectralFilterNodeItem(NodeItem):
 
@@ -329,7 +287,7 @@ class SpectralFilterNodeItem(NodeItem):
 
     @Slot(dict)
     def _on_state_updated(self, state):
-        filter_type = state.get("type")
+        filter_type = state.get("filter_type")
         fc1 = state.get("fc1")
         fc2 = state.get("fc2")
 
@@ -390,7 +348,7 @@ class SpectralFilterNode(Node):
         self._cutoff_freq_2 = 4000.0
 
     def _get_state_locked(self):
-        return {"type": self._filter_type, "fc1": self._cutoff_freq_1, "fc2": self._cutoff_freq_2}
+        return {"filter_type": self._filter_type, "fc1": self._cutoff_freq_1, "fc2": self._cutoff_freq_2}
 
     def get_state(self):
         with self._lock:
@@ -403,7 +361,6 @@ class SpectralFilterNode(Node):
             if self._filter_type != f_type:
                 self._filter_type = f_type
                 state_to_emit = self._get_state_locked()
-
         if state_to_emit:
             self.emitter.stateUpdated.emit(state_to_emit)
 
@@ -494,6 +451,6 @@ class SpectralFilterNode(Node):
 
     def deserialize_extra(self, data: dict):
         with self._lock:
-            self._filter_type = data.get("type", "Low Pass")
+            self._filter_type = data.get("filter_type", "Low Pass")
             self._cutoff_freq_1 = data.get("fc1", 1000.0)
             self._cutoff_freq_2 = data.get("fc2", 4000.0)

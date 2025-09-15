@@ -104,7 +104,7 @@ class LinearPhaseEQNodeItem(NodeItem):
 
     @Slot(dict)
     def _on_state_updated(self, state: dict):
-        filter_type = state.get("type", "Low Pass")
+        filter_type = state.get("filter_type", "Low Pass")
         freq = state.get("freq", 1000.0)
         q = state.get("q", 1.0)
 
@@ -236,7 +236,7 @@ class LinearPhaseEQNode(Node):
         is_freq_ext = "cutoff_freq" in self.inputs and self.inputs["cutoff_freq"].connections
         is_q_ext = "q" in self.inputs and self.inputs["q"].connections
         return {
-            "type": self._filter_type,
+            "filter_type": self._filter_type,
             "freq": self._cutoff_freq,
             "q": self._q,
             "is_freq_ext": is_freq_ext,
@@ -293,11 +293,11 @@ class LinearPhaseEQNode(Node):
 
     def serialize_extra(self) -> Dict:
         with self._lock:
-            return {"type": self._filter_type, "freq": self._cutoff_freq, "q": self._q}
+            return {"filter_type": self._filter_type, "freq": self._cutoff_freq, "q": self._q}
 
     def deserialize_extra(self, data: Dict):
         with self._lock:
-            self._filter_type = data.get("type", "Low Pass")
+            self._filter_type = data.get("filter_type", "Low Pass")
             self._cutoff_freq = data.get("freq", 1000.0)
             self._q = data.get("q", 1.0)
             self._params_dirty = True
