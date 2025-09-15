@@ -360,6 +360,8 @@ class SpectralFilterNodeItem(NodeItem):
         if is_fc2_ext:
             fc2_label_text += " (ext)"
         self.fc2_label.setText(fc2_label_text)
+        self.container_widget.adjustSize()
+        self.update_geometry()
 
     @Slot()
     def updateFromLogic(self):

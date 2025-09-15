@@ -128,6 +128,7 @@ class BiquadFilterNodeItem(NodeItem):
         self.q_slider.setVisible(q_visible)
         self.gain_label.setVisible(gain_visible)
         self.gain_slider.setVisible(gain_visible)
+        self.container_widget.adjustSize()
         self.update_geometry()
 
     @Slot()

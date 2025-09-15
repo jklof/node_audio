@@ -177,6 +177,7 @@ class OscillatorNodeItem(NodeItem):
 
         # --- Show/Hide Pulse Width Control ---
         self.pw_widget.setVisible(waveform == Waveform.SQUARE)
+        self.container_widget.adjustSize()
         self.update_geometry()  # Request geometry update when visibility changes
 
 

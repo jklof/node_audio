@@ -125,6 +125,7 @@ class LinearPhaseEQNodeItem(NodeItem):
         q_visible = filter_type in ["Band Pass", "Band Stop (Notch)"]
         self.q_label.setVisible(q_visible)
         self.q_slider.setVisible(q_visible)
+        self.container_widget.adjustSize()
         self.update_geometry()
 
     @Slot()
