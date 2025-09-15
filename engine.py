@@ -11,6 +11,7 @@ from PySide6.QtCore import QObject, Signal
 
 from node_system import NodeGraph, Node, Socket, Connection, IClockProvider
 from plugin_loader import registry
+from plugin_loader import reload_plugin_modules
 from constants import TICK_DURATION_NS
 
 logger = logging.getLogger(__name__)
@@ -49,34 +50,6 @@ class Engine:
         self._tick_semaphore = threading.Semaphore(0)
         self._processing_thread = threading.Thread(target=self._processing_loop, daemon=True)
         self._processing_thread.start()
-
-    def hotswap_node_classes(self, new_class_map: dict[str, Type[Node]]):
-        """
-        Updates the class of existing node instances to their new, reloaded versions.
-        This is a 'hot-swap' operation that preserves the node's state.
-        """
-        with self._lock:
-            logger.info("Engine: Performing class hotswap on existing nodes...")
-            nodes_to_update = [node for node in self.graph.nodes.values() if node.NODE_TYPE in new_class_map]
-
-            if not nodes_to_update:
-                logger.info("Engine: No running node instances needed a hotswap.")
-                # We still emit a signal to force the UI to update its "Add Node" menu
-                self._emit_graph_changed()
-                return
-
-            for node in nodes_to_update:
-                new_class = new_class_map[node.NODE_TYPE]
-                logger.info(f"Swapping class for '{node.name}' from {node.__class__} to {new_class}")
-                node.__class__ = new_class
-
-            # After swapping, the processing plan must be rebuilt to use the new methods.
-            self._invalidate_plan_cache()
-
-        # Emit a final signal to ensure the entire UI is synced with any potential changes.
-        # This is crucial for updating the "Add Node" context menu.
-        self._emit_graph_changed()
-        logger.info(f"Engine: Hotswap complete for {len(nodes_to_update)} nodes.")
 
     def tick(self):
         # Only release the semaphore if the engine is actively running
@@ -463,11 +436,14 @@ class Engine:
         try:
             with open(file_path, "r") as f:
                 graph_data = json.load(f)
+            self.load_graph_from_dict(graph_data)
         except (IOError, json.JSONDecodeError) as e:
             logger.error(f"Failed to read or parse graph file {file_path}: {e}")
             self.signals.processingError.emit(f"Could not load file: {e}")
             return
 
+    def load_graph_from_dict(self, graph_data: dict):
+        """Loads a graph from a dictionary representation."""
         with self._lock:
             for node_data in graph_data.get("nodes", []):
                 node_type = node_data.get("type")
@@ -497,25 +473,89 @@ class Engine:
 
         self._emit_graph_changed()
 
+    def reload_plugins_and_graph(self, module_names: list[str]):
+        """
+        Performs a full, transactional reload of plugins and the graph.
+        This is a blocking operation that ensures thread safety.
+        1. Stops the processing engine completely.
+        2. Serializes the current graph to memory.
+        3. Clears the graph and all nodes.
+        4. Reloads the python plugin modules.
+        5. Re-loads the graph from the serialized data using the new classes.
+        6. Restarts the engine if it was previously running.
+        """
+        # 1. Check state and stop the engine synchronously.
+        was_running = self._state == EngineState.RUNNING
+        if was_running:
+            self.stop_processing()
+            # At this point, all audio threads are guaranteed to be stopped and joined.
+
+        # 2. Serialize the graph state to an in-memory dictionary.
+        # This must be done while the graph still exists.
+        graph_data = {
+            "nodes": [node.to_dict() for node in self.graph.nodes.values()],
+            "connections": [conn.to_dict() for conn in self.graph.connections.values()],
+            "clock_source_id": self.graph.selected_clock_node_id,
+        }
+
+        # 3. Clear the graph completely.
+        with self._lock:
+            self._clear_graph_locked()
+
+        # This emit is necessary to make the UI clear itself before reloading.
+        self._emit_graph_changed()
+
+        # 4. Reload the plugin modules. This is done outside of any lock.
+        reload_plugin_modules(module_names)
+
+        # 5. Re-load the graph from the dictionary.
+        try:
+            self.load_graph_from_dict(graph_data)
+        except Exception as e:
+            error_msg = f"Failed to reload graph from memory: {e}"
+            logger.error(error_msg, exc_info=True)
+            self.signals.processingError.emit(error_msg)
+            return
+
+        # 6. Restart processing if it was running before.
+        if was_running:
+            self.start_processing()
+
     def shutdown(self):
+        """
+        Performs a fully synchronous shutdown of the engine and all node resources
+        to prevent race conditions and segmentation faults on exit.
+        """
         logger.info("Engine: Shutting down...")
+
+        # 1. Stop the clock source (e.g., audio device) synchronously.
+        # This will stop new ticks from being generated.
         self.stop_processing()
 
-        # --- FIX: Explicitly clean up all nodes to stop their threads/resources ---
+        # 2. Stop the engine's own processing thread. This is the most critical step.
+        # We must ensure no more `node.process()` calls can occur before we start
+        # tearing down the nodes themselves.
+        self._stop_event.set()
+        # Release the semaphore one last time to unblock the thread if it's waiting
+        self._tick_semaphore.release()
+        if self._processing_thread.is_alive():
+            logger.info("Engine: Waiting for processing thread to terminate...")
+            self._processing_thread.join(timeout=2)
+            if self._processing_thread.is_alive():
+                logger.warning("Engine: Processing thread did not exit gracefully.")
+
+        logger.info("Engine: Processing thread stopped. Cleaning up nodes...")
+
+        # 3. Now that all processing is guaranteed to be stopped,
+        # clean up each node's individual resources (e.g., worker threads, files).
         with self._lock:
             nodes_to_remove = list(self.graph.nodes.values())
-        logger.info(f"Engine: Removing {len(nodes_to_remove)} nodes for cleanup...")
+
         for node in nodes_to_remove:
             try:
+                # The node's remove() method is responsible for joining its own threads.
                 node.remove()
             except Exception as e:
                 logger.error(f"Error during shutdown while removing node '{node.name}': {e}", exc_info=True)
-        # --- END FIX ---
 
-        self._stop_event.set()
-        # Release semaphore one last time to unblock the acquire in the thread
-        self._tick_semaphore.release()
-        self._processing_thread.join(timeout=2)
-        if self._processing_thread.is_alive():
-            logger.warning("Engine: Processing thread did not exit gracefully.")
         logger.info("Engine: Shutdown complete.")

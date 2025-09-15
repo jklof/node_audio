@@ -20,11 +20,18 @@ from ui_elements import (
     SOCKET_SIZE,
     SocketItem,
 )
-from PySide6.QtWidgets import QWidget, QLabel, QPushButton, QVBoxLayout, QPlainTextEdit, QSizePolicy, QGraphicsTextItem
+from PySide6.QtWidgets import (
+    QWidget,
+    QLabel,
+    QPushButton,
+    QVBoxLayout,
+    QPlainTextEdit,
+    QSizePolicy,
+    QGraphicsTextItem,
+    QTextEdit,
+)
 from PySide6.QtCore import Qt, Slot, QSignalBlocker, QPointF, QRectF
-# --- NEW: Additional imports for highlighting ---
 from PySide6.QtGui import QFont, QCursor, QPen, QColor, QSyntaxHighlighter, QTextCharFormat, QTextCursor
-from PySide6.QtWidgets import QTextEdit
 
 logger = logging.getLogger(__name__)
 
@@ -66,47 +73,67 @@ else:
 # Output variables must be assigned with their dictionary key names.
 """
 
-# --- NEW: Syntax Highlighter Class ---
+
 class PythonSyntaxHighlighter(QSyntaxHighlighter):
     """A syntax highlighter for basic Python syntax."""
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.highlighting_rules = []
 
         # Keywords
         keyword_format = QTextCharFormat()
-        keyword_format.setForeground(QColor("#ff79c6")) # Pink
+        keyword_format.setForeground(QColor("#ff79c6"))  # Pink
         keywords = [
-            "\\bif\\b", "\\belif\\b", "\\belse\\b", "\\bfor\\b", "\\bwhile\\b",
-            "\\bin\\b", "\\bis\\b", "\\bnot\\b", "\\band\\b", "\\bor\\b",
-            "\\bdef\\b", "\\bclass\\b", "\\breturn\\b", "\\bpass\\b", "\\bcontinue\\b",
-            "\\bbreak\\b", "\\btry\\b", "\\bexcept\\b", "\\bfinally\\b", "\\braise\\b",
-            "\\bimport\\b", "\\bfrom\\b", "\\bas\\b", "\\bwith\\b"
+            "\\bif\\b",
+            "\\belif\\b",
+            "\\belse\\b",
+            "\\bfor\\b",
+            "\\bwhile\\b",
+            "\\bin\\b",
+            "\\bis\\b",
+            "\\bnot\\b",
+            "\\band\\b",
+            "\\bor\\b",
+            "\\bdef\\b",
+            "\\bclass\\b",
+            "\\breturn\\b",
+            "\\bpass\\b",
+            "\\bcontinue\\b",
+            "\\bbreak\\b",
+            "\\btry\\b",
+            "\\bexcept\\b",
+            "\\bfinally\\b",
+            "\\braise\\b",
+            "\\bimport\\b",
+            "\\bfrom\\b",
+            "\\bas\\b",
+            "\\bwith\\b",
         ]
         for word in keywords:
             self.highlighting_rules.append((re.compile(word), keyword_format))
 
         # Built-ins and common variables
         builtin_format = QTextCharFormat()
-        builtin_format.setForeground(QColor("#8be9fd")) # Cyan
+        builtin_format.setForeground(QColor("#8be9fd"))  # Cyan
         builtins = ["torch", "np", "math", "state", "inputs", "outputs"]
         for word in builtins:
-             self.highlighting_rules.append((re.compile(f"\\b{word}\\b"), builtin_format))
+            self.highlighting_rules.append((re.compile(f"\\b{word}\\b"), builtin_format))
 
         # Numbers
         number_format = QTextCharFormat()
-        number_format.setForeground(QColor("#bd93f9")) # Purple
-        self.highlighting_rules.append((re.compile(r'\b[0-9]+\.?[0-9]*\b'), number_format))
+        number_format.setForeground(QColor("#bd93f9"))  # Purple
+        self.highlighting_rules.append((re.compile(r"\b[0-9]+\.?[0-9]*\b"), number_format))
 
         # Strings
         string_format = QTextCharFormat()
-        string_format.setForeground(QColor("#f1fa8c")) # Yellow
+        string_format.setForeground(QColor("#f1fa8c"))  # Yellow
         self.highlighting_rules.append((re.compile(r"'.*?'"), string_format))
         self.highlighting_rules.append((re.compile(r'".*?"'), string_format))
 
         # Comments
         comment_format = QTextCharFormat()
-        comment_format.setForeground(QColor("#6272a4")) # Gray/Blue
+        comment_format.setForeground(QColor("#6272a4"))  # Gray/Blue
         self.highlighting_rules.append((re.compile(r"#[^\n]*"), comment_format))
 
     def highlightBlock(self, text):
@@ -115,7 +142,7 @@ class PythonSyntaxHighlighter(QSyntaxHighlighter):
                 start, end = match.span()
                 self.setFormat(start, end - start, format)
 
-# --- MODIFIED: CodeNodeItem to include highlighter and error handling ---
+
 class CodeNodeItem(NodeItem):
     NODE_SPECIFIC_WIDTH = 450
     MIN_NODE_WIDTH = 250
@@ -141,8 +168,7 @@ class CodeNodeItem(NodeItem):
         self.code_editor.setFont(QFont("Courier New", 9))
         self.code_editor.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
         main_layout.addWidget(self.code_editor)
-        
-        # --- NEW: Instantiate and apply the syntax highlighter ---
+
         self.highlighter = PythonSyntaxHighlighter(self.code_editor.document())
 
         self.apply_button = QPushButton("Apply & Re-Init")
@@ -241,7 +267,6 @@ class CodeNodeItem(NodeItem):
             super().mouseReleaseEvent(event)
 
     def update_geometry(self):
-        # Override the base implementation to handle resizable content
         if self._is_updating_geometry:
             return
         self._is_updating_geometry = True
@@ -291,52 +316,57 @@ class CodeNodeItem(NodeItem):
     def _on_apply_clicked(self):
         self.node_logic.apply_code(self.code_editor.toPlainText())
 
-    # --- MODIFIED: _on_state_updated to handle error line highlighting ---
     @Slot(dict)
     def _on_state_updated(self, state: dict):
         status, error = state.get("status", "OK"), state.get("error", "")
         error_lineno = state.get("error_lineno", -1)
-        
-        # Clear previous error highlighting first
+
         self.code_editor.setExtraSelections([])
 
         if status == "Error":
             self.status_label.setText(f"Error: {error}")
             self.status_label.setStyleSheet("color: red;")
-
-            # --- NEW: Highlight error line and move cursor ---
             if error_lineno > 0:
                 selection = QTextEdit.ExtraSelection()
                 selection.format.setBackground(QColor(100, 0, 0, 150))
                 selection.format.setProperty(QTextCharFormat.Property.FullWidthSelection, True)
-                
                 cursor = self.code_editor.textCursor()
                 cursor.setPosition(0)
-                cursor.movePosition(QTextCursor.MoveOperation.NextBlock, QTextCursor.MoveMode.MoveAnchor, error_lineno - 1)
+                cursor.movePosition(
+                    QTextCursor.MoveOperation.NextBlock, QTextCursor.MoveMode.MoveAnchor, error_lineno - 1
+                )
                 selection.cursor = cursor
-                
                 self.code_editor.setExtraSelections([selection])
-                self.code_editor.setTextCursor(cursor) # Move cursor to the error line
+                self.code_editor.setTextCursor(cursor)
         else:
             self.status_label.setText("Status: OK")
             self.status_label.setStyleSheet("color: lightgreen;")
-        
+
         if state.get("sockets_changed", False):
             self._rebuild_sockets()
             self.update_geometry()
 
+        conn_ids_to_delete = state.get("connections_to_delete", [])
+        if conn_ids_to_delete:
+            view = self.scene().views()[0] if self.scene() and self.scene().views() else None
+            if view:
+                for conn_id in conn_ids_to_delete:
+                    view.connectionDeletionRequested.emit(conn_id)
+
     @Slot()
     def updateFromLogic(self):
+        # Handle code node specific updates
         state = self.node_logic.get_current_state_snapshot()
         with QSignalBlocker(self.code_editor):
             if self.code_editor.toPlainText() != state.get("code", ""):
                 self.code_editor.setPlainText(state.get("code", ""))
         self._on_state_updated(state)
-        # We don't call super().updateFromLogic() because we handle all geometry and updates ourselves.
-        self.update_geometry()
-        self.update()
 
-# --- MODIFIED: CodeNode logic to extract and send error line numbers ---
+        # Call the parent implementation
+        # This will handle common updates, including setting the node's title.
+        super().updateFromLogic()
+
+
 class CodeNode(Node):
     NODE_TYPE = "Programmable Code"
     UI_CLASS = CodeNodeItem
@@ -362,6 +392,8 @@ class CodeNode(Node):
 
     def apply_code(self, code: str, is_init: bool = False):
         sockets_changed = False
+        connections_to_delete_ids = []
+
         with self._lock:
             self._code = code
             try:
@@ -375,14 +407,25 @@ class CodeNode(Node):
                                     parsed_inputs = ast.literal_eval(node.value)
                                 elif target.id == "outputs":
                                     parsed_outputs = ast.literal_eval(node.value)
-                current_input_names, desired_input_names = set(self.inputs.keys()), set(parsed_inputs.keys())
-                for name in current_input_names - desired_input_names:
+
+                current_input_names = set(self.inputs.keys())
+                desired_input_names = set(parsed_inputs.keys())
+                inputs_to_remove = current_input_names - desired_input_names
+                for name in inputs_to_remove:
+                    for conn in self.inputs[name].connections:
+                        connections_to_delete_ids.append(conn.id)
                     self.inputs.pop(name)
                     sockets_changed = True
-                current_output_names, desired_output_names = set(self.outputs.keys()), set(parsed_outputs.keys())
-                for name in current_output_names - desired_output_names:
+
+                current_output_names = set(self.outputs.keys())
+                desired_output_names = set(parsed_outputs.keys())
+                outputs_to_remove = current_output_names - desired_output_names
+                for name in outputs_to_remove:
+                    for conn in self.outputs[name].connections:
+                        connections_to_delete_ids.append(conn.id)
                     self.outputs.pop(name)
                     sockets_changed = True
+
                 for name, type_str in parsed_inputs.items():
                     dtype = self._str_to_type(type_str)
                     if name not in self.inputs or self.inputs[name].data_type != dtype:
@@ -393,11 +436,13 @@ class CodeNode(Node):
                     if name not in self.outputs or self.outputs[name].data_type != dtype:
                         self.add_output(name, dtype)
                         sockets_changed = True
+
                 self._compiled_code = compile(self._code, f"<{self.name}>", "exec")
                 self._status, self._last_error, self._last_error_lineno = "OK", "", -1
                 if not is_init:
                     self._state.clear()
-            except SyntaxError as e: # --- MODIFIED: Catch SyntaxError specifically ---
+
+            except SyntaxError as e:
                 self._compiled_code = None
                 self._status = "Error"
                 self._last_error = f"Syntax: {e.msg}"
@@ -407,11 +452,13 @@ class CodeNode(Node):
                 self._compiled_code = None
                 self._status = "Error"
                 self._last_error = str(e).replace("\n", " ")
-                self._last_error_lineno = -1 # Can't get line number for non-syntax compile errors easily
+                self._last_error_lineno = -1
                 logger.error(f"[{self.name}] Code apply failed: {e}", exc_info=True)
 
             state_to_emit = self._get_current_state_snapshot_locked()
             state_to_emit["sockets_changed"] = sockets_changed
+            state_to_emit["connections_to_delete"] = connections_to_delete_ids
+
         self.emitter.stateUpdated.emit(state_to_emit)
 
     def get_current_state_snapshot(self) -> Dict:
@@ -440,18 +487,20 @@ class CodeNode(Node):
                     self.emitter.stateUpdated.emit(self._get_current_state_snapshot_locked())
                 return {name: execution_scope.get(name) for name in self.outputs}
         except Exception as e:
-            # --- MODIFIED: Extract runtime error line number ---
             lineno = -1
             try:
-                # Get the last entry in the traceback, which is where the error occurred
                 tb = traceback.extract_tb(e.__traceback__)
                 if tb:
                     lineno = tb[-1].lineno
             except Exception:
-                pass # Fallback to -1 if we can't get it
-
+                pass
             with self._lock:
-                self._status, self._last_error, self._last_error_lineno, self._compiled_code = "Error", f"Runtime: {e}", lineno, None
+                self._status, self._last_error, self._last_error_lineno, self._compiled_code = (
+                    "Error",
+                    f"Runtime: {e}",
+                    lineno,
+                    None,
+                )
                 self.emitter.stateUpdated.emit(self._get_current_state_snapshot_locked())
             logger.error(f"[{self.name}] Runtime error in user code: {e}", exc_info=True)
             return {name: None for name in self.outputs}
@@ -463,6 +512,7 @@ class CodeNode(Node):
     def deserialize_extra(self, data: dict):
         with self._lock:
             self._state = data.get("persistent_state", {})
-            code = data.get("code", DEFAULT_CODE)
             self.ui_size = data.get("ui_size")
+
+        code = data.get("code", DEFAULT_CODE)
         self.apply_code(code, is_init=True)

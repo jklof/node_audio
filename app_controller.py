@@ -6,7 +6,6 @@ from PySide6.QtWidgets import QFileDialog, QMessageBox, QWidget
 from engine import Engine, EngineState
 from graph_view import NodeGraphWidget
 from node_system import Socket
-from plugin_loader import reload_plugin_modules
 
 logger = logging.getLogger(__name__)
 
@@ -39,23 +38,16 @@ class AppController(QObject):
 
     @Slot(list)
     def reload_all_plugins(self, module_names: list[str]):
-        """Orchestrates the plugin reload process."""
-        logger.info("Controller: Handling plugin reload.")
+        """
+        Orchestrates the plugin reload process by delegating the entire
+        transactional operation to the engine.
+        """
+        logger.info("Controller: Requesting engine to perform transactional plugin reload.")
 
-        # 1. Safely stop the engine if it's running
-        was_running = self.engine._state == EngineState.RUNNING
-        if was_running:
-            self.stop_processing()
+        # Delegate the entire complex operation to the engine.
+        # This call will block until the reload is complete.
+        self.engine.reload_plugins_and_graph(module_names)
 
-        # 2. Perform the reload and get the map of new classes for hotswapping
-        new_class_map = reload_plugin_modules(module_names)
-
-        # 3. Tell the engine to hotswap the classes of any existing nodes
-        self.engine.hotswap_node_classes(new_class_map)
-
-        # 4. Restart the engine if it was running before
-        if was_running:
-            self.start_processing()
 
     @Slot(type, str, tuple)
     def on_node_creation_requested(self, node_class, name, pos):
