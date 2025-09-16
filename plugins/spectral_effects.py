@@ -8,7 +8,7 @@ from collections import deque
 # --- Node System Imports ---
 from node_system import Node
 from constants import SpectralFrame, DEFAULT_DTYPE, DEFAULT_COMPLEX_DTYPE
-from ui_elements import NodeItem, NodeStateEmitter, NODE_CONTENT_PADDING
+from ui_elements import ParameterNodeItem, NodeItem, NodeStateEmitter, NODE_CONTENT_PADDING
 
 # --- Qt Imports ---
 from PySide6.QtCore import Qt, Signal, Slot, QObject, QSignalBlocker
@@ -29,103 +29,41 @@ EPSILON = 1e-9
 # ==============================================================================
 # 2. Custom UI Class (SpectralShimmerNodeItem)
 # ==============================================================================
-class SpectralShimmerNodeItem(NodeItem):
+class SpectralShimmerNodeItem(ParameterNodeItem):
+    """UI for SpectralShimmerNode using ParameterNodeItem base class."""
+
     NODE_SPECIFIC_WIDTH = 200
 
     def __init__(self, node_logic: "SpectralShimmerNode"):
-        super().__init__(node_logic, width=self.NODE_SPECIFIC_WIDTH)
+        # Define the parameters for this node
+        parameters = [
+            {
+                "key": "pitch_shift",
+                "name": "Pitch Shift",
+                "min": -12.0,
+                "max": 24.0,
+                "format": "{:+.1f} st",
+                "is_log": False,
+            },
+            {
+                "key": "feedback",
+                "name": "Feedback",
+                "min": 0.0,
+                "max": 1.0,
+                "format": "{:.0%}",
+                "is_log": False,
+            },
+            {
+                "key": "mix",
+                "name": "Mix",
+                "min": 0.0,
+                "max": 1.0,
+                "format": "{:.0%}",
+                "is_log": False,
+            },
+        ]
 
-        self.container_widget = QWidget()
-        main_layout = QVBoxLayout(self.container_widget)
-        main_layout.setContentsMargins(
-            NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING
-        )
-        main_layout.setSpacing(5)
-
-        # --- Create Slider Controls ---
-        self.pitch_slider, self.pitch_label = self._create_slider_control("Pitch Shift", -12.0, 24.0, "{:+.1f} st")
-        self.feedback_slider, self.feedback_label = self._create_slider_control("Feedback", 0.0, 1.0, "{:.0%}")
-        self.mix_slider, self.mix_label = self._create_slider_control("Mix", 0.0, 1.0, "{:.0%}")
-
-        for label, slider in [
-            (self.pitch_label, self.pitch_slider),
-            (self.feedback_label, self.feedback_slider),
-            (self.mix_label, self.mix_slider),
-        ]:
-            main_layout.addWidget(label)
-            main_layout.addWidget(slider)
-
-        self.setContentWidget(self.container_widget)
-
-        # --- Connect Signals ---
-        self.pitch_slider.valueChanged.connect(self._on_pitch_changed)
-        self.feedback_slider.valueChanged.connect(self._on_feedback_changed)
-        self.mix_slider.valueChanged.connect(self._on_mix_changed)
-        self.node_logic.emitter.stateUpdated.connect(self._on_state_updated)
-
-        self.updateFromLogic()
-
-    def _create_slider_control(self, name: str, min_val: float, max_val: float, fmt: str) -> tuple[QSlider, QLabel]:
-        label = QLabel(f"{name}: ...")
-        slider = QSlider(Qt.Orientation.Horizontal)
-        slider.setRange(0, 1000)
-        slider.setProperty("min_val", min_val)
-        slider.setProperty("max_val", max_val)
-        slider.setProperty("name", name)
-        slider.setProperty("format", fmt)
-        return slider, label
-
-    def _map_slider_to_logical(self, slider: QSlider) -> float:
-        min_val, max_val = slider.property("min_val"), slider.property("max_val")
-        norm = slider.value() / 1000.0
-        return min_val + norm * (max_val - min_val)
-
-    def _map_logical_to_slider(self, slider: QSlider, value: float) -> int:
-        min_val, max_val = slider.property("min_val"), slider.property("max_val")
-        range_val = max_val - min_val
-        if range_val == 0:
-            return 0
-        norm = (value - min_val) / range_val
-        return int(np.clip(norm, 0.0, 1.0) * 1000.0)
-
-    @Slot()
-    def _on_pitch_changed(self):
-        self.node_logic.set_pitch_shift(self._map_slider_to_logical(self.pitch_slider))
-
-    @Slot()
-    def _on_feedback_changed(self):
-        self.node_logic.set_feedback(self._map_slider_to_logical(self.feedback_slider))
-
-    @Slot()
-    def _on_mix_changed(self):
-        self.node_logic.set_mix(self._map_slider_to_logical(self.mix_slider))
-
-    @Slot(dict)
-    def _on_state_updated(self, state: dict):
-        sliders_map = {
-            "pitch_shift": (self.pitch_slider, self.pitch_label),
-            "feedback": (self.feedback_slider, self.feedback_label),
-            "mix": (self.mix_slider, self.mix_label),
-        }
-
-        for key, (slider, label) in sliders_map.items():
-            value = state.get(key, slider.property("min_val"))
-            is_connected = key in self.node_logic.inputs and self.node_logic.inputs[key].connections
-            slider.setEnabled(not is_connected)
-
-            with QSignalBlocker(slider):
-                slider.setValue(self._map_logical_to_slider(slider, value))
-
-            label_text = f"{slider.property('name')}: {slider.property('format').format(value)}"
-            if is_connected:
-                label_text += " (ext)"
-            label.setText(label_text)
-
-    @Slot()
-    def updateFromLogic(self):
-        state = self.node_logic.get_current_state_snapshot()
-        self._on_state_updated(state)
-        super().updateFromLogic()
+        super().__init__(node_logic, parameters, width=self.NODE_SPECIFIC_WIDTH)
 
 
 # ==============================================================================
@@ -590,154 +528,73 @@ class SpectralReverbEmitter(QObject):
 # ==============================================================================
 # 2. Custom UI Class (SpectralReverbNodeItem)
 # ==============================================================================
-class SpectralReverbNodeItem(NodeItem):
-    NODE_SPECIFIC_WIDTH = 220
+class SpectralReverbNodeItem(ParameterNodeItem):
+    """UI for SpectralReverbNode using ParameterNodeItem base class."""
+
+    NODE_SPECIFIC_WIDTH = 240
 
     def __init__(self, node_logic: "SpectralReverbNode"):
-        super().__init__(node_logic, width=self.NODE_SPECIFIC_WIDTH)
+        # Define the parameters for this node
+        parameters = [
+            {
+                "key": "pre_delay_ms",
+                "name": "Pre-delay",
+                "min": 0.0,
+                "max": 250.0,
+                "format": "{:.0f} ms",
+                "is_log": False,
+            },
+            {
+                "key": "decay_time",
+                "name": "Decay Time",
+                "min": 0.1,
+                "max": 15.0,
+                "format": "{:.1f} s",
+                "is_log": False,
+            },
+            {
+                "key": "hf_damp",
+                "name": "HF Damp",
+                "min": 500.0,
+                "max": 20000.0,
+                "format": "{:.1f} Hz",
+                "is_log": True,
+            },
+            {
+                "key": "lf_damp",
+                "name": "LF Damp",
+                "min": 20.0,
+                "max": 2000.0,
+                "format": "{:.1f} Hz",
+                "is_log": True,
+            },
+            {
+                "key": "diffusion",
+                "name": "Diffusion",
+                "min": 0.0,
+                "max": 1.0,
+                "format": "{:.0%}",
+                "is_log": False,
+            },
+            {
+                "key": "width",
+                "name": "Stereo Width",
+                "min": 0.0,
+                "max": 1.0,
+                "format": "{:.0%}",
+                "is_log": False,
+            },
+            {
+                "key": "mix",
+                "name": "Mix",
+                "min": 0.0,
+                "max": 1.0,
+                "format": "{:.0%}",
+                "is_log": False,
+            },
+        ]
 
-        self.container_widget = QWidget()
-        main_layout = QVBoxLayout(self.container_widget)
-        main_layout.setContentsMargins(
-            NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING
-        )
-        main_layout.setSpacing(5)
-
-        # --- Create Slider Controls ---
-        self.pre_delay_slider, self.pre_delay_label = self._create_slider_control("Pre-delay", 0.0, 250.0, "{:.0f} ms")
-        self.decay_slider, self.decay_label = self._create_slider_control("Decay Time", 0.1, 15.0, "{:.1f} s")
-        self.damp_slider, self.damp_label = self._create_slider_control(
-            "HF Damp", 500.0, 20000.0, "{:.1f} Hz", is_log=True
-        )
-        self.lf_damp_slider, self.lf_damp_label = self._create_slider_control(
-            "LF Damp", 20.0, 2000.0, "{:.1f} Hz", is_log=True
-        )
-        self.diffusion_slider, self.diffusion_label = self._create_slider_control("Diffusion", 0.0, 1.0, "{:.0%}")
-        self.width_slider, self.width_label = self._create_slider_control("Stereo Width", 0.0, 1.0, "{:.0%}")
-        self.mix_slider, self.mix_label = self._create_slider_control("Mix", 0.0, 1.0, "{:.0%}")
-
-        for label, slider in [
-            (self.pre_delay_label, self.pre_delay_slider),
-            (self.decay_label, self.decay_slider),
-            (self.damp_label, self.damp_slider),
-            (self.lf_damp_label, self.lf_damp_slider),
-            (self.diffusion_label, self.diffusion_slider),
-            (self.width_label, self.width_slider),
-            (self.mix_label, self.mix_slider),
-        ]:
-            main_layout.addWidget(label)
-            main_layout.addWidget(slider)
-
-        self.setContentWidget(self.container_widget)
-
-        self.pre_delay_slider.valueChanged.connect(self._on_pre_delay_changed)
-        self.decay_slider.valueChanged.connect(self._on_decay_changed)
-        self.damp_slider.valueChanged.connect(self._on_damp_changed)
-        self.lf_damp_slider.valueChanged.connect(self._on_lf_damp_changed)
-        self.diffusion_slider.valueChanged.connect(self._on_diffusion_changed)
-        self.width_slider.valueChanged.connect(self._on_width_changed)
-        self.mix_slider.valueChanged.connect(self._on_mix_changed)
-        self.node_logic.emitter.stateUpdated.connect(self._on_state_updated)
-
-        self.updateFromLogic()
-
-    def _create_slider_control(
-        self, name: str, min_val: float, max_val: float, fmt: str, is_log: bool = False
-    ) -> tuple[QSlider, QLabel]:
-        label = QLabel(f"{name}: ...")
-        slider = QSlider(Qt.Orientation.Horizontal)
-        slider.setRange(0, 1000)
-        slider.setProperty("min_val", min_val)
-        slider.setProperty("max_val", max_val)
-        slider.setProperty("name", name)
-        slider.setProperty("format", fmt)
-        slider.setProperty("is_log", is_log)
-        return slider, label
-
-    def _map_slider_to_logical(self, slider: QSlider) -> float:
-        min_val = slider.property("min_val")
-        max_val = slider.property("max_val")
-        if slider.property("is_log"):
-            log_min = np.log10(min_val)
-            log_max = np.log10(max_val)
-            norm = slider.value() / 1000.0
-            return 10 ** (log_min + norm * (log_max - log_min))
-        else:
-            norm = slider.value() / 1000.0
-            return min_val + norm * (max_val - min_val)
-
-    def _map_logical_to_slider(self, slider: QSlider, value: float) -> int:
-        min_val = slider.property("min_val")
-        max_val = slider.property("max_val")
-
-        if slider.property("is_log"):
-            log_min = np.log10(min_val)
-            log_max = np.log10(max_val)
-            safe_val = np.clip(value, min_val, max_val)
-            norm = (np.log10(safe_val) - log_min) / (log_max - log_min)
-            return int(norm * 1000.0)
-        else:
-            range_val = max_val - min_val
-            if range_val == 0:
-                return 0
-            norm = (value - min_val) / range_val
-            return int(np.clip(norm, 0.0, 1.0) * 1000.0)
-
-    @Slot()
-    def _on_pre_delay_changed(self):
-        self.node_logic.set_pre_delay_ms(self._map_slider_to_logical(self.pre_delay_slider))
-
-    @Slot()
-    def _on_decay_changed(self):
-        self.node_logic.set_decay_time(self._map_slider_to_logical(self.decay_slider))
-
-    @Slot()
-    def _on_damp_changed(self):
-        self.node_logic.set_hf_damp(self._map_slider_to_logical(self.damp_slider))
-
-    @Slot()
-    def _on_lf_damp_changed(self):
-        self.node_logic.set_lf_damp(self._map_slider_to_logical(self.lf_damp_slider))
-
-    @Slot()
-    def _on_diffusion_changed(self):
-        self.node_logic.set_diffusion(self._map_slider_to_logical(self.diffusion_slider))
-
-    @Slot()
-    def _on_width_changed(self):
-        self.node_logic.set_width(self._map_slider_to_logical(self.width_slider))
-
-    @Slot()
-    def _on_mix_changed(self):
-        self.node_logic.set_mix(self._map_slider_to_logical(self.mix_slider))
-
-    @Slot(dict)
-    def _on_state_updated(self, state: dict):
-        sliders_map = {
-            "pre_delay_ms": (self.pre_delay_slider, self.pre_delay_label),
-            "decay_time": (self.decay_slider, self.decay_label),
-            "hf_damp": (self.damp_slider, self.damp_label),
-            "lf_damp": (self.lf_damp_slider, self.lf_damp_label),
-            "diffusion": (self.diffusion_slider, self.diffusion_label),
-            "width": (self.width_slider, self.width_label),
-            "mix": (self.mix_slider, self.mix_label),
-        }
-        for key, (slider, label) in sliders_map.items():
-            value = state.get(key, slider.property("min_val"))
-            is_connected = key in self.node_logic.inputs and self.node_logic.inputs[key].connections
-            slider.setEnabled(not is_connected)
-            with QSignalBlocker(slider):
-                slider.setValue(self._map_logical_to_slider(slider, value))
-            label_text = f"{slider.property('name')}: {slider.property('format').format(value)}"
-            if is_connected:
-                label_text += " (ext)"
-            label.setText(label_text)
-
-    @Slot()
-    def updateFromLogic(self):
-        state = self.node_logic.get_current_state_snapshot()
-        self._on_state_updated(state)
-        super().updateFromLogic()
+        super().__init__(node_logic, parameters, width=self.NODE_SPECIFIC_WIDTH)
 
 
 # ==============================================================================

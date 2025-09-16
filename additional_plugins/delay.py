@@ -9,7 +9,12 @@ from node_system import Node
 from constants import DEFAULT_DTYPE, DEFAULT_SAMPLERATE, DEFAULT_BLOCKSIZE
 
 # --- UI and Qt Imports ---
-from ui_elements import NodeItem, NodeStateEmitter, NODE_CONTENT_PADDING  # <-- IMPORTED NodeStateEmitter
+from ui_elements import (
+    ParameterNodeItem,
+    NodeItem,
+    NodeStateEmitter,
+    NODE_CONTENT_PADDING,
+)  # <-- IMPORTED NodeStateEmitter
 from PySide6.QtWidgets import QWidget, QSlider, QLabel, QVBoxLayout
 from PySide6.QtCore import Qt, Signal, Slot, QObject, QSignalBlocker
 
@@ -30,146 +35,41 @@ EPSILON = 1e-9
 # ==============================================================================
 # 1. UI Class for the Delay Node
 # ==============================================================================
-class DelayNodeItem(NodeItem):
+class DelayNodeItem(ParameterNodeItem):
     """Custom UI for the DelayNode, with sliders for delay parameters."""
 
     NODE_SPECIFIC_WIDTH = 200
 
     def __init__(self, node_logic: "DelayNode"):
-        super().__init__(node_logic, width=self.NODE_SPECIFIC_WIDTH)
+        # Define the parameters for this node
+        parameters = [
+            {
+                "key": "delay_time_ms",
+                "name": "Delay Time",
+                "min": MIN_DELAY_MS,
+                "max": MAX_DELAY_MS,
+                "format": "{:.0f} ms",
+                "is_log": True,
+            },
+            {
+                "key": "feedback",
+                "name": "Feedback",
+                "min": MIN_FEEDBACK,
+                "max": MAX_FEEDBACK,
+                "format": "{:.1%}",
+                "is_log": False,
+            },
+            {
+                "key": "mix",
+                "name": "Mix",
+                "min": MIN_MIX,
+                "max": MAX_MIX,
+                "format": "{:.1%}",
+                "is_log": False,
+            },
+        ]
 
-        self.container_widget = QWidget()
-        main_layout = QVBoxLayout(self.container_widget)
-        main_layout.setContentsMargins(
-            NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING
-        )
-        main_layout.setSpacing(5)
-
-        # --- Create Slider Controls (Explicitly) ---
-        self.controls = {}
-
-        # Delay Time Slider
-        self.delay_label = QLabel("Delay Time: ...")
-        self.delay_slider = QSlider(Qt.Orientation.Horizontal)
-        self.delay_slider.setRange(0, 1000)
-        main_layout.addWidget(self.delay_label)
-        main_layout.addWidget(self.delay_slider)
-        self.controls["delay_time_ms"] = {
-            "slider": self.delay_slider,
-            "label": self.delay_label,
-            "format": "{:.0f} ms",
-            "min_val": MIN_DELAY_MS,
-            "max_val": MAX_DELAY_MS,
-            "is_log": True,
-            "name": "Delay Time",
-        }
-
-        # Feedback Slider
-        self.feedback_label = QLabel("Feedback: ...")
-        self.feedback_slider = QSlider(Qt.Orientation.Horizontal)
-        self.feedback_slider.setRange(0, 1000)
-        main_layout.addWidget(self.feedback_label)
-        main_layout.addWidget(self.feedback_slider)
-        self.controls["feedback"] = {
-            "slider": self.feedback_slider,
-            "label": self.feedback_label,
-            "format": "{:.1%}",
-            "min_val": MIN_FEEDBACK,
-            "max_val": MAX_FEEDBACK,
-            "is_log": False,
-            "name": "Feedback",
-        }
-
-        # Mix Slider
-        self.mix_label = QLabel("Mix: ...")
-        self.mix_slider = QSlider(Qt.Orientation.Horizontal)
-        self.mix_slider.setRange(0, 1000)
-        main_layout.addWidget(self.mix_label)
-        main_layout.addWidget(self.mix_slider)
-        self.controls["mix"] = {
-            "slider": self.mix_slider,
-            "label": self.mix_label,
-            "format": "{:.1%}",
-            "min_val": MIN_MIX,
-            "max_val": MAX_MIX,
-            "is_log": False,
-            "name": "Mix",
-        }
-
-        # Connect slider signals to their specific handlers
-        self.delay_slider.valueChanged.connect(self._handle_delay_slider_change)
-        self.feedback_slider.valueChanged.connect(self._handle_feedback_slider_change)
-        self.mix_slider.valueChanged.connect(self._handle_mix_slider_change)
-
-        self.setContentWidget(self.container_widget)
-
-        # Connect the logic node's state updates back to the UI
-        self.node_logic.emitter.stateUpdated.connect(self._on_state_updated)
-        self.updateFromLogic()
-
-    def _map_slider_to_logical(self, key: str, value: int) -> float:
-        info = self.controls[key]
-        norm = value / 1000.0
-        if info["is_log"]:
-            log_min = np.log10(info["min_val"])
-            log_max = np.log10(info["max_val"])
-            return 10 ** (log_min + norm * (log_max - log_min))
-        else:
-            return info["min_val"] + norm * (info["max_val"] - info["min_val"])
-
-    def _map_logical_to_slider(self, key: str, value: float) -> int:
-        info = self.controls[key]
-        if info["is_log"]:
-            log_min = np.log10(info["min_val"])
-            log_max = np.log10(info["max_val"])
-            range_val = log_max - log_min
-            if abs(range_val) < EPSILON:
-                return 0
-            safe_val = np.clip(value, info["min_val"], info["max_val"])
-            norm = (np.log10(safe_val) - log_min) / range_val
-            return int(round(norm * 1000.0))
-        else:
-            range_val = info["max_val"] - info["min_val"]
-            if abs(range_val) < EPSILON:
-                return 0
-            norm = (np.clip(value, info["min_val"], info["max_val"]) - info["min_val"]) / range_val
-            return int(round(norm * 1000.0))
-
-    @Slot(int)
-    def _handle_delay_slider_change(self, value: int):
-        logical_val = self._map_slider_to_logical("delay_time_ms", value)
-        self.node_logic.set_delay_time_ms(logical_val)
-
-    @Slot(int)
-    def _handle_feedback_slider_change(self, value: int):
-        logical_val = self._map_slider_to_logical("feedback", value)
-        self.node_logic.set_feedback(logical_val)
-
-    @Slot(int)
-    def _handle_mix_slider_change(self, value: int):
-        logical_val = self._map_slider_to_logical("mix", value)
-        self.node_logic.set_mix(logical_val)
-
-    @Slot(dict)
-    def _on_state_updated(self, state: dict):
-        for key, control_info in self.controls.items():
-            value = state.get(key, control_info["min_val"])
-            is_connected = key in self.node_logic.inputs and self.node_logic.inputs[key].connections
-            control_info["slider"].setEnabled(not is_connected)
-
-            with QSignalBlocker(control_info["slider"]):
-                control_info["slider"].setValue(self._map_logical_to_slider(key, value))
-
-            label_text = f"{control_info['name']}: {control_info['format'].format(value)}"
-            if is_connected:
-                label_text += " (ext)"
-            control_info["label"].setText(label_text)
-
-    @Slot()
-    def updateFromLogic(self):
-        state = self.node_logic.get_current_state_snapshot()
-        self._on_state_updated(state)
-        super().updateFromLogic()
+        super().__init__(node_logic, parameters, width=self.NODE_SPECIFIC_WIDTH)
 
 
 # ==============================================================================

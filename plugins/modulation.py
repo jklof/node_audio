@@ -5,7 +5,7 @@ from typing import Dict, Optional
 
 # --- Node System Imports ---
 from node_system import Node
-from ui_elements import NodeItem, NodeStateEmitter, NODE_CONTENT_PADDING
+from ui_elements import ParameterNodeItem, NodeItem, NodeStateEmitter, NODE_CONTENT_PADDING
 from constants import DEFAULT_SAMPLERATE, DEFAULT_BLOCKSIZE, DEFAULT_DTYPE
 
 # --- Qt Imports ---
@@ -25,131 +25,49 @@ EPSILON = 1e-9
 # ==============================================================================
 # 2. ADSR Node UI Class
 # ==============================================================================
-class ADSRNodeItem(NodeItem):
+class ADSRNodeItem(ParameterNodeItem):
     """Provides a user interface with sliders to control the ADSR parameters."""
 
     NODE_SPECIFIC_WIDTH = 200
 
     def __init__(self, node_logic: "ADSRNode"):
-        super().__init__(node_logic, width=self.NODE_SPECIFIC_WIDTH)
+        # Define the parameters for this node
+        parameters = [
+            {
+                "key": "attack",
+                "name": "Attack",
+                "min": 0.0,
+                "max": 5.0,
+                "format": "{:.2f} s",
+                "is_log": False,
+            },
+            {
+                "key": "decay",
+                "name": "Decay",
+                "min": 0.0,
+                "max": 5.0,
+                "format": "{:.2f} s",
+                "is_log": False,
+            },
+            {
+                "key": "sustain",
+                "name": "Sustain",
+                "min": 0.0,
+                "max": 1.0,
+                "format": "{:.1%}",
+                "is_log": False,
+            },
+            {
+                "key": "release",
+                "name": "Release",
+                "min": 0.0,
+                "max": 5.0,
+                "format": "{:.2f} s",
+                "is_log": False,
+            },
+        ]
 
-        self.container_widget = QWidget()
-        main_layout = QVBoxLayout(self.container_widget)
-        main_layout.setContentsMargins(
-            NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING
-        )
-        main_layout.setSpacing(4)
-
-        # Create slider controls for each parameter
-        self.attack_slider, self.attack_label = self._create_slider_control("Attack", 0.0, 5.0, "{:.2f} s")
-        self.decay_slider, self.decay_label = self._create_slider_control("Decay", 0.0, 5.0, "{:.2f} s")
-        self.sustain_slider, self.sustain_label = self._create_slider_control("Sustain", 0.0, 1.0, "{:.1%}")
-        self.release_slider, self.release_label = self._create_slider_control("Release", 0.0, 5.0, "{:.2f} s")
-
-        for label, slider in [
-            (self.attack_label, self.attack_slider),
-            (self.decay_label, self.decay_slider),
-            (self.sustain_label, self.sustain_slider),
-            (self.release_label, self.release_slider),
-        ]:
-            main_layout.addWidget(label)
-            main_layout.addWidget(slider)
-
-        self.setContentWidget(self.container_widget)
-
-        # Connect UI interactions to the logic node
-        self.attack_slider.valueChanged.connect(self._on_attack_changed)
-        self.decay_slider.valueChanged.connect(self._on_decay_changed)
-        self.sustain_slider.valueChanged.connect(self._on_sustain_changed)
-        self.release_slider.valueChanged.connect(self._on_release_changed)
-
-        # Connect the logic node's state updates back to the UI
-        self.node_logic.emitter.stateUpdated.connect(self._on_state_updated)
-
-    @Slot()
-    def updateFromLogic(self):
-        """
-        Pulls the current state from the logic node to initialize the UI.
-        """
-        state = self.node_logic.get_current_state_snapshot()
-        self._on_state_updated(state)
-        super().updateFromLogic()
-
-    def _create_slider_control(self, name: str, min_val: float, max_val: float, fmt: str) -> tuple[QSlider, QLabel]:
-        """Helper function to create a labeled slider."""
-        label = QLabel(f"{name}: ...")
-        slider = QSlider(Qt.Orientation.Horizontal)
-        slider.setRange(0, 1000)
-        # Store metadata directly on the slider widget for easy access
-        slider.setProperty("min_val", min_val)
-        slider.setProperty("max_val", max_val)
-        slider.setProperty("name", name)
-        slider.setProperty("format", fmt)
-        return slider, label
-
-    def _map_slider_to_logical(self, slider: QSlider) -> float:
-        """Converts an integer slider position (0-1000) to its logical float value."""
-        min_val = slider.property("min_val")
-        max_val = slider.property("max_val")
-        normalized = slider.value() / 1000.0
-        return min_val + normalized * (max_val - min_val)
-
-    def _map_logical_to_slider(self, slider: QSlider, logical_value: float) -> int:
-        """Converts a logical float value to the corresponding integer slider position."""
-        min_val = slider.property("min_val")
-        max_val = slider.property("max_val")
-        range_val = max_val - min_val
-        if range_val == 0:
-            return 0
-        normalized = (logical_value - min_val) / range_val
-        return int(np.clip(normalized, 0.0, 1.0) * 1000.0)
-
-    @Slot(int)
-    def _on_attack_changed(self):
-        val = self._map_slider_to_logical(self.attack_slider)
-        self.node_logic.set_attack(val)
-
-    @Slot(int)
-    def _on_decay_changed(self):
-        val = self._map_slider_to_logical(self.decay_slider)
-        self.node_logic.set_decay(val)
-
-    @Slot(int)
-    def _on_sustain_changed(self):
-        val = self._map_slider_to_logical(self.sustain_slider)
-        self.node_logic.set_sustain(val)
-
-    @Slot(int)
-    def _on_release_changed(self):
-        val = self._map_slider_to_logical(self.release_slider)
-        self.node_logic.set_release(val)
-
-    @Slot(dict)
-    def _on_state_updated(self, state: dict):
-        """Updates all UI controls based on a state dictionary from the logic node."""
-        sliders_map = {
-            "attack": (self.attack_slider, self.attack_label),
-            "decay": (self.decay_slider, self.decay_label),
-            "sustain": (self.sustain_slider, self.sustain_label),
-            "release": (self.release_slider, self.release_label),
-        }
-
-        for key, (slider, label) in sliders_map.items():
-            value = state.get(key, slider.property("min_val"))
-            # Disable the slider if its corresponding input socket is connected
-            is_connected = key in self.node_logic.inputs and self.node_logic.inputs[key].connections
-            slider.setEnabled(not is_connected)
-
-            # Block signals to prevent feedback loops while setting the value
-            with QSignalBlocker(slider):
-                slider.setValue(self._map_logical_to_slider(slider, value))
-
-            label_text = f"{slider.property('name')}: {slider.property('format').format(value)}"
-            if is_connected:
-                label_text += " (ext)"  # Indicate external control
-            label.setText(label_text)
-
-        # Initial state emission will be triggered by graph_scene.py
+        super().__init__(node_logic, parameters, width=self.NODE_SPECIFIC_WIDTH)
 
 
 # ==============================================================================
@@ -448,71 +366,23 @@ class GateButtonNode(Node):
 # ==============================================================================
 # 6. LFO Node UI Class
 # ==============================================================================
-class LFONodeItem(NodeItem):
-    """UI for LFO node: just one slider for frequency control."""
+class LFONodeItem(ParameterNodeItem):
+    """UI for LFO node using ParameterNodeItem base class."""
 
     def __init__(self, node_logic: "LFONode"):
-        super().__init__(node_logic)
+        # Define the parameters for this node
+        parameters = [
+            {
+                "key": "frequency",
+                "name": "Frequency",
+                "min": 0.01,
+                "max": 20.0,
+                "format": "{:.2f} Hz",
+                "is_log": False,
+            },
+        ]
 
-        self.container_widget = QWidget()
-        layout = QVBoxLayout(self.container_widget)
-        layout.setContentsMargins(
-            NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING
-        )
-        layout.setSpacing(4)
-
-        self.freq_label = QLabel("Frequency: ...")
-        self.freq_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(self.freq_label)
-
-        self.freq_slider = QSlider(Qt.Orientation.Horizontal)
-        self.slider_min_int, self.slider_max_int = 1, 2000  # integer steps
-        self.logical_min_freq, self.logical_max_freq = 0.01, 20.0  # Hz range
-        self.freq_slider.setRange(self.slider_min_int, self.slider_max_int)
-        self.freq_slider.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        layout.addWidget(self.freq_slider)
-
-        self.container_widget.setLayout(layout)
-        self.setContentWidget(self.container_widget)
-
-        # Connect slider and signal
-        self.freq_slider.valueChanged.connect(self._on_slider_change)
-        self.node_logic.emitter.stateUpdated.connect(self._on_state_updated)
-
-        # Initial state emission will be triggered by graph_scene.py
-
-    @Slot()
-    def updateFromLogic(self):
-        """
-        Pulls the current state from the logic node to initialize the UI.
-        """
-        state = {"frequency": self.node_logic.get_frequency_hz()}
-        self._on_state_updated(state)
-        super().updateFromLogic()
-
-    def _map_slider_to_logical(self, slider_value: int) -> float:
-        # Map integer slider to float freq
-        norm = (slider_value - self.slider_min_int) / (self.slider_max_int - self.slider_min_int)
-        return self.logical_min_freq + norm * (self.logical_max_freq - self.logical_min_freq)
-
-    def _map_logical_to_slider(self, logical_value: float) -> int:
-        # Clamp logical value to ensure it's within the expected range before mapping
-        clamped_logical = max(self.logical_min_freq, min(logical_value, self.logical_max_freq))
-        norm = (clamped_logical - self.logical_min_freq) / (self.logical_max_freq - self.logical_min_freq)
-        return int(round(self.slider_min_int + norm * (self.slider_max_int - self.slider_min_int)))
-
-    @Slot(int)
-    def _on_slider_change(self, slider_value: int):
-        freq = self._map_slider_to_logical(slider_value)
-        self.node_logic.set_frequency_hz(freq)
-
-    @Slot(dict)
-    def _on_state_updated(self, state: dict):
-        """Updates the UI from a state dictionary."""
-        freq = state.get("frequency", 1.0)
-        self.freq_label.setText(f"Frequency: {freq:.2f} Hz")
-        with QSignalBlocker(self.freq_slider):
-            self.freq_slider.setValue(self._map_logical_to_slider(freq))
+        super().__init__(node_logic, parameters, width=180)
 
 
 # ==============================================================================
@@ -530,6 +400,7 @@ class LFONode(Node):
         self.emitter = NodeStateEmitter()
 
         self.add_input("sync_control", data_type=bool)
+        self.add_input("frequency", data_type=float)
         self.add_output("sine_out", data_type=float)
         self.add_output("square_out", data_type=float)
         self.add_output("saw_out", data_type=float)
@@ -547,7 +418,7 @@ class LFONode(Node):
     # UI thread methods (thread-safe)
     # -----------------
     @Slot(float)
-    def set_frequency_hz(self, freq: float):
+    def set_frequency(self, freq: float):
         state_to_emit = None
         with self.lock:
             new_freq = max(0.001, float(freq))  # Avoid 0 Hz
@@ -561,13 +432,34 @@ class LFONode(Node):
         with self.lock:
             return self._frequency_hz
 
+    def get_current_state_snapshot(self) -> Dict:
+        with self.lock:
+            return {"frequency": self._frequency_hz}
+
     # -----------------
     # Worker thread method
     # -----------------
     def process(self, input_data: dict) -> dict:
-        sync_trigger = input_data.get("sync_control")
+        state_snapshot_to_emit = None
         with self.lock:
+            ui_update_needed = False
+
+            # --- Prioritize socket inputs over internal state ---
+            frequency_socket = input_data.get("frequency")
+            if frequency_socket is not None:
+                new_freq = max(0.001, float(frequency_socket))  # Avoid 0 Hz
+                if self._frequency_hz != new_freq:
+                    self._frequency_hz = new_freq
+                    ui_update_needed = True
+
+            if ui_update_needed:
+                state_snapshot_to_emit = {"frequency": self._frequency_hz}
+
+            sync_trigger = input_data.get("sync_control")
             freq = self._frequency_hz
+
+        if state_snapshot_to_emit:
+            self.emitter.stateUpdated.emit(state_snapshot_to_emit)
 
         # phase increment calculation.
         # The phase must advance by the number of samples in one processing block (tick).
@@ -590,9 +482,9 @@ class LFONode(Node):
 
     def serialize_extra(self):
         with self.lock:
-            return {"frequency_hz": self._frequency_hz, "phase": self._phase}
+            return {"frequency": self._frequency_hz, "phase": self._phase}
 
     def deserialize_extra(self, data):
         with self.lock:
-            self._frequency_hz = float(data.get("frequency_hz", 1.0))
+            self._frequency_hz = float(data.get("frequency", 1.0))
             self._phase = float(data.get("phase", 0.0))

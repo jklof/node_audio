@@ -1,4 +1,5 @@
 import logging
+import numpy as np
 from PySide6.QtWidgets import (
     QGraphicsItem,
     QGraphicsObject,
@@ -10,9 +11,12 @@ from PySide6.QtWidgets import (
     QGraphicsProxyWidget,
     QInputDialog,
     QLineEdit,
+    QVBoxLayout,
+    QSlider,
+    QLabel,
 )
 from PySide6.QtGui import QPainter, QPen, QColor, QBrush, QPainterPath, QPainterPathStroker, QAction
-from PySide6.QtCore import Qt, QRectF, QPointF, Signal, Slot, QTimer, QObject, Signal
+from PySide6.QtCore import Qt, QRectF, QPointF, Signal, Slot, QTimer, QObject, Signal, QSignalBlocker
 from typing import Any
 
 # Import the interface to check against
@@ -446,3 +450,137 @@ class ConnectionItem(QGraphicsPathItem):
             delete_action.triggered.connect(lambda: view.connectionDeletionRequested.emit(self.connection_logic.id))
         menu.exec(event.screenPos())
         event.accept()
+
+
+# --- Constants ---
+EPSILON = 1e-9
+
+
+class ParameterNodeItem(NodeItem):
+    """
+    Generic NodeItem base class that creates slider-based UI controls from a parameter configuration.
+    This handles all the repetitive slider creation, mapping, and state management logic.
+    """
+
+    def __init__(self, node_logic, parameters: list[dict], width=200, **kwargs):
+        super().__init__(node_logic, width=width, **kwargs)
+
+        self.parameters = parameters
+        self._controls = {}
+
+        # Create container widget
+        self.container_widget = QWidget()
+        main_layout = QVBoxLayout(self.container_widget)
+        main_layout.setContentsMargins(
+            NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING
+        )
+        main_layout.setSpacing(5)
+
+        # Create sliders from parameters list
+        for param in self.parameters:
+            self._create_slider_control(param, main_layout)
+
+        self.setContentWidget(self.container_widget)
+
+        # Connect logic node's state updates to UI
+        self.node_logic.emitter.stateUpdated.connect(lambda state: self._on_state_updated(state))
+        self.updateFromLogic()
+
+    def _create_slider_control(self, param: dict, layout: QVBoxLayout):
+        """Creates a slider control and label for a parameter definition."""
+        key = param["key"]
+        name = param["name"]
+        min_val = param["min"]
+        max_val = param["max"]
+        format_str = param["format"]
+        is_log = param.get("is_log", False)
+
+        # Create label
+        label = QLabel(f"{name}: ...")
+        layout.addWidget(label)
+
+        # Create slider
+        slider = QSlider(Qt.Orientation.Horizontal)
+        slider.setRange(0, 1000)
+        layout.addWidget(slider)
+
+        # Store control information
+        self._controls[key] = {
+            "slider": slider,
+            "label": label,
+            "format": format_str,
+            "min_val": min_val,
+            "max_val": max_val,
+            "is_log": is_log,
+            "name": name,
+        }
+
+        # Connect slider signal to generic handler
+        slider.valueChanged.connect(lambda value, k=key: self._on_generic_slider_change(k))
+
+    def _map_slider_to_logical(self, key: str, value: int) -> float:
+        """Maps slider value (0-1000) to logical parameter value."""
+        info = self._controls[key]
+        norm = value / 1000.0
+        if info["is_log"]:
+            log_min = np.log10(info["min_val"])
+            log_max = np.log10(info["max_val"])
+            return 10 ** (log_min + norm * (log_max - log_min))
+        else:
+            return info["min_val"] + norm * (info["max_val"] - info["min_val"])
+
+    def _map_logical_to_slider(self, key: str, value: float) -> int:
+        """Maps logical parameter value to slider value (0-1000)."""
+        info = self._controls[key]
+        if info["is_log"]:
+            log_min = np.log10(info["min_val"])
+            log_max = np.log10(info["max_val"])
+            range_val = log_max - log_min
+            if abs(range_val) < EPSILON:
+                return 0
+            safe_val = np.clip(value, info["min_val"], info["max_val"])
+            norm = (np.log10(safe_val) - log_min) / range_val
+            return int(round(norm * 1000.0))
+        else:
+            range_val = info["max_val"] - info["min_val"]
+            if abs(range_val) < EPSILON:
+                return 0
+            norm = (np.clip(value, info["min_val"], info["max_val"]) - info["min_val"]) / range_val
+            return int(round(norm * 1000.0))
+
+    @Slot(str)
+    def _on_generic_slider_change(self, key: str):
+        """Generic handler for slider value changes."""
+        slider = self._controls[key]["slider"]
+        logical_val = self._map_slider_to_logical(key, slider.value())
+
+        # Call the corresponding setter on the logic node
+        setter_name = f"set_{key}"
+        if hasattr(self.node_logic, setter_name):
+            setter_func = getattr(self.node_logic, setter_name)
+            setter_func(logical_val)
+        else:
+            logger.warning(f"Logic node {self.node_logic.__class__.__name__} has no setter {setter_name}")
+
+    @Slot(dict)
+    def _on_state_updated(self, state: dict):
+        """Updates all sliders and labels based on the incoming state dictionary."""
+        for key, control_info in self._controls.items():
+            value = state.get(key, control_info["min_val"])
+            is_connected = key in self.node_logic.inputs and self.node_logic.inputs[key].connections
+
+            control_info["slider"].setEnabled(not is_connected)
+
+            with QSignalBlocker(control_info["slider"]):
+                control_info["slider"].setValue(self._map_logical_to_slider(key, value))
+
+            label_text = f"{control_info['name']}: {control_info['format'].format(value)}"
+            if is_connected:
+                label_text += " (ext)"
+            control_info["label"].setText(label_text)
+
+    @Slot()
+    def updateFromLogic(self):
+        state = self.node_logic.get_current_state_snapshot()
+        self._on_state_updated(state)
+        super().updateFromLogic()

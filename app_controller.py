@@ -48,7 +48,6 @@ class AppController(QObject):
         # This call will block until the reload is complete.
         self.engine.reload_plugins_and_graph(module_names)
 
-
     @Slot(type, str, tuple)
     def on_node_creation_requested(self, node_class, name, pos):
         """Handles a request from the UI to create a new node."""

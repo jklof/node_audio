@@ -8,7 +8,7 @@ from typing import Dict
 # --- Node System Imports ---
 from node_system import Node
 from constants import DEFAULT_SAMPLERATE, DEFAULT_BLOCKSIZE, DEFAULT_DTYPE
-from ui_elements import NodeItem, NodeStateEmitter, NODE_CONTENT_PADDING
+from ui_elements import ParameterNodeItem, NodeItem, NodeStateEmitter, NODE_CONTENT_PADDING
 
 # --- UI and Qt Imports ---
 from PySide6.QtWidgets import QWidget, QLabel, QSlider, QVBoxLayout
@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 # ==============================================================================
 # 1. UI Class for the AutoGain Node
 # ==============================================================================
-class AutoGainNodeItem(NodeItem):
+class AutoGainNodeItem(ParameterNodeItem):
     """
     UI for the AutoGainNode with intuitive controls for professional leveling.
     """
@@ -31,116 +31,35 @@ class AutoGainNodeItem(NodeItem):
     NODE_SPECIFIC_WIDTH = 220
 
     def __init__(self, node_logic: "AutoGainNode"):
-        super().__init__(node_logic, width=self.NODE_SPECIFIC_WIDTH)
+        # Define the parameters for this node
+        parameters = [
+            {
+                "key": "target_db",
+                "name": "Target Level",
+                "min": -40.0,
+                "max": 0.0,
+                "format": "{:.1f} dB",
+                "is_log": False,
+            },
+            {
+                "key": "averaging_time_s",
+                "name": "Averaging Time",
+                "min": 0.5,
+                "max": 10.0,
+                "format": "{:.1f} s",
+                "is_log": False,
+            },
+            {
+                "key": "gain_smoothing_ms",
+                "name": "Gain Smoothing",
+                "min": 50.0,
+                "max": 2000.0,
+                "format": "{:.0f} ms",
+                "is_log": True,
+            },
+        ]
 
-        self.container_widget = QWidget()
-        main_layout = QVBoxLayout(self.container_widget)
-        main_layout.setContentsMargins(
-            NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING
-        )
-        main_layout.setSpacing(4)
-
-        # --- Create Intuitive Slider Controls ---
-        self.target_slider, self.target_label = self._create_slider_control("Target Level", -40.0, 0.0, "{:.1f} dB")
-        self.averaging_slider, self.averaging_label = self._create_slider_control(
-            "Averaging Time", 0.5, 10.0, "{:.1f} s"
-        )
-        self.smoothing_slider, self.smoothing_label = self._create_slider_control(
-            "Gain Smoothing", 50.0, 2000.0, "{:.0f} ms", is_log=True
-        )
-
-        for label, slider in [
-            (self.target_label, self.target_slider),
-            (self.averaging_label, self.averaging_slider),
-            (self.smoothing_label, self.smoothing_slider),
-        ]:
-            main_layout.addWidget(label)
-            main_layout.addWidget(slider)
-
-        self.setContentWidget(self.container_widget)
-
-        # --- Connect Signals ---
-        self.target_slider.valueChanged.connect(self._on_target_changed)
-        self.averaging_slider.valueChanged.connect(self._on_averaging_changed)
-        self.smoothing_slider.valueChanged.connect(self._on_smoothing_changed)
-        self.node_logic.emitter.stateUpdated.connect(self._on_state_updated)
-
-    def _create_slider_control(
-        self, name: str, min_val: float, max_val: float, fmt: str, is_log: bool = False
-    ) -> tuple[QSlider, QLabel]:
-        """Helper factory to create a labeled slider."""
-        label = QLabel(f"{name}: ...")
-        slider = QSlider(Qt.Orientation.Horizontal)
-        slider.setRange(0, 1000)
-        slider.setProperty("min_val", min_val)
-        slider.setProperty("max_val", max_val)
-        slider.setProperty("name", name)
-        slider.setProperty("format", fmt)
-        slider.setProperty("is_log", is_log)
-        return slider, label
-
-    def _map_slider_to_logical(self, slider: QSlider) -> float:
-        min_val = slider.property("min_val")
-        max_val = slider.property("max_val")
-        norm = slider.value() / 1000.0
-        if slider.property("is_log"):
-            log_min = np.log10(min_val)
-            log_max = np.log10(max_val)
-            return 10 ** (log_min + norm * (log_max - log_min))
-        else:
-            return min_val + norm * (max_val - min_val)
-
-    def _map_logical_to_slider(self, slider: QSlider, value: float) -> int:
-        min_val = slider.property("min_val")
-        max_val = slider.property("max_val")
-        if slider.property("is_log"):
-            log_min = np.log10(min_val)
-            log_max = np.log10(max_val)
-            safe_val = np.clip(value, min_val, max_val)
-            norm = (np.log10(safe_val) - log_min) / (log_max - log_min)
-            return int(norm * 1000.0)
-        else:
-            range_val = max_val - min_val
-            if range_val == 0:
-                return 0
-            norm = (value - min_val) / range_val
-            return int(np.clip(norm, 0.0, 1.0) * 1000.0)
-
-    @Slot()
-    def _on_target_changed(self):
-        self.node_logic.set_target_db(self._map_slider_to_logical(self.target_slider))
-
-    @Slot()
-    def _on_averaging_changed(self):
-        self.node_logic.set_averaging_time_s(self._map_slider_to_logical(self.averaging_slider))
-
-    @Slot()
-    def _on_smoothing_changed(self):
-        self.node_logic.set_gain_smoothing_ms(self._map_slider_to_logical(self.smoothing_slider))
-
-    @Slot(dict)
-    def _on_state_updated(self, state: dict):
-        sliders_map = {
-            "target_db": (self.target_slider, self.target_label),
-            "averaging_time_s": (self.averaging_slider, self.averaging_label),
-            "gain_smoothing_ms": (self.smoothing_slider, self.smoothing_label),
-        }
-        for key, (slider, label) in sliders_map.items():
-            value = state.get(key, slider.property("min_val"))
-            is_connected = key in self.node_logic.inputs and self.node_logic.inputs[key].connections
-            slider.setEnabled(not is_connected)
-            with QSignalBlocker(slider):
-                slider.setValue(self._map_logical_to_slider(slider, value))
-            label_text = f"{slider.property('name')}: {slider.property('format').format(value)}"
-            if is_connected:
-                label_text += " (ext)"
-            label.setText(label_text)
-
-    @Slot()
-    def updateFromLogic(self):
-        state = self.node_logic.get_current_state_snapshot()
-        self._on_state_updated(state)
-        super().updateFromLogic()
+        super().__init__(node_logic, parameters, width=self.NODE_SPECIFIC_WIDTH)
 
 
 # ==============================================================================

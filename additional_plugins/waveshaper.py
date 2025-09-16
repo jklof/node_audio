@@ -10,7 +10,7 @@ from node_system import Node
 from constants import DEFAULT_DTYPE
 
 # --- UI and Qt Imports ---
-from ui_elements import NodeItem, NodeStateEmitter, NODE_CONTENT_PADDING
+from ui_elements import ParameterNodeItem, NodeItem, NodeStateEmitter, NODE_CONTENT_PADDING
 from PySide6.QtWidgets import (
     QWidget,
     QLabel,
@@ -39,85 +39,52 @@ class ShaperType(Enum):
 # ==============================================================================
 # UI Class for the WaveShaper Node
 # ==============================================================================
-class WaveShaperNodeItem(NodeItem):
-    """Custom NodeItem for the WaveShaperNode, providing user controls."""
+class WaveShaperNodeItem(ParameterNodeItem):
+    """Custom NodeItem for the WaveShaperNode using ParameterNodeItem with additional combo box for shaper type."""
 
-    NODE_SPECIFIC_WIDTH = 180
+    NODE_SPECIFIC_WIDTH = 220
 
     def __init__(self, node_logic: "WaveShaperNode"):
-        super().__init__(node_logic, width=self.NODE_SPECIFIC_WIDTH)
+        # Define the parameters for this node (drive and mix)
+        parameters = [
+            {
+                "key": "drive",
+                "name": "Drive",
+                "min": 1.0,
+                "max": 100.0,
+                "format": "{:.1f}",
+                "is_log": False,
+            },
+            {
+                "key": "mix",
+                "name": "Mix",
+                "min": 0.0,
+                "max": 1.0,
+                "format": "{:.2f}",
+                "is_log": False,
+            },
+        ]
 
-        self.container_widget = QWidget()
-        main_layout = QVBoxLayout(self.container_widget)
-        main_layout.setContentsMargins(
-            NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING
-        )
-        main_layout.setSpacing(6)
+        super().__init__(node_logic, parameters, width=self.NODE_SPECIFIC_WIDTH)
 
-        # --- Shaper Type Selection ---
-        main_layout.addWidget(QLabel("Shaper Type:"))
+        # Add shaper type combo box above the parameters
+        shaper_type_label = QLabel("Shaper Type:")
+        self.container_widget.layout().insertWidget(0, shaper_type_label)
+
         self.type_combo = QComboBox()
         for st in ShaperType:
             self.type_combo.addItem(st.value, st)
-        main_layout.addWidget(self.type_combo)
+        self.container_widget.layout().insertWidget(1, self.type_combo)
 
-        # --- Drive Control ---
-        drive_layout = QHBoxLayout()
-        drive_layout.setSpacing(5)
-
-        self.drive_dial = QDial()
-        self.drive_dial.setRange(0, 1000)
-        self.drive_dial.setNotchesVisible(True)
-
-        drive_labels_vbox = QVBoxLayout()
-        drive_labels_vbox.setSpacing(1)
-        self.drive_title_label = QLabel("Drive")
-        self.drive_title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.drive_value_label = QLabel("...")
-        self.drive_value_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        fm = QFontMetrics(self.drive_value_label.font())
-        min_width = fm.boundingRect("100.0 (ext)").width()
-        self.drive_title_label.setMinimumWidth(min_width)
-
-        drive_labels_vbox.addWidget(self.drive_title_label)
-        drive_labels_vbox.addWidget(self.drive_value_label)
-
-        drive_layout.addWidget(self.drive_dial)
-        drive_layout.addLayout(drive_labels_vbox)
-        main_layout.addLayout(drive_layout)
-
-        # --- Mix Control ---
-        mix_layout = QHBoxLayout()
-        mix_layout.setSpacing(5)
-
-        self.mix_dial = QDial()
-        self.mix_dial.setRange(0, 1000)
-        self.mix_dial.setNotchesVisible(True)
-
-        mix_labels_vbox = QVBoxLayout()
-        mix_labels_vbox.setSpacing(1)
-        self.mix_title_label = QLabel("Mix")
-        self.mix_title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.mix_title_label.setMinimumWidth(min_width)
-        self.mix_value_label = QLabel("...")
-        self.mix_value_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
-        mix_labels_vbox.addWidget(self.mix_title_label)
-        mix_labels_vbox.addWidget(self.mix_value_label)
-
-        mix_layout.addWidget(self.mix_dial)
-        mix_layout.addLayout(mix_labels_vbox)
-        main_layout.addLayout(mix_layout)
-
-        self.setContentWidget(self.container_widget)
-
-        # --- Connect Signals ---
+        # Connect combo box signal
         self.type_combo.currentTextChanged.connect(self._handle_type_change)
-        self.drive_dial.valueChanged.connect(self._handle_drive_change)
-        self.mix_dial.valueChanged.connect(self._handle_mix_change)
-        self.node_logic.emitter.stateUpdated.connect(self._on_state_updated)
 
-        self.updateFromLogic()
+        # Initialize combo box
+        state = self.node_logic.get_current_state_snapshot()
+        shaper_type = state.get("shaper_type")
+        index = self.type_combo.findData(shaper_type)
+        if index != -1:
+            self.type_combo.setCurrentIndex(index)
 
     @Slot(str)
     def _handle_type_change(self, type_text: str):
@@ -125,49 +92,18 @@ class WaveShaperNodeItem(NodeItem):
         if isinstance(selected_enum, ShaperType):
             self.node_logic.set_shaper_type(selected_enum)
 
-    @Slot(int)
-    def _handle_drive_change(self, dial_value: int):
-        logical_drive = 1.0 + (dial_value / 1000.0) * 99.0
-        self.node_logic.set_drive(logical_drive)
-
-    @Slot(int)
-    def _handle_mix_change(self, dial_value: int):
-        logical_mix = dial_value / 1000.0
-        self.node_logic.set_mix(logical_mix)
-
-    @Slot(dict)
-    def _on_state_updated(self, state: dict):
-        shaper_type = state.get("shaper_type")
-        drive = state.get("drive", 1.0)
-        mix = state.get("mix", 1.0)
-
-        with QSignalBlocker(self.type_combo):
-            index = self.type_combo.findData(shaper_type)
-            if index != -1:
-                self.type_combo.setCurrentIndex(index)
-
-        with QSignalBlocker(self.drive_dial):
-            dial_value = int(((drive - 1.0) / 99.0) * 1000.0)
-            self.drive_dial.setValue(dial_value)
-
-        is_drive_socket_connected = "drive" in self.node_logic.inputs and self.node_logic.inputs["drive"].connections
-        self.drive_dial.setEnabled(not is_drive_socket_connected)
-        label_text = f"{drive:.1f}{' (ext)' if is_drive_socket_connected else ''}"
-        self.drive_value_label.setText(label_text)
-
-        with QSignalBlocker(self.mix_dial):
-            dial_value = int(mix * 1000.0)
-            self.mix_dial.setValue(dial_value)
-
-        is_mix_socket_connected = "mix" in self.node_logic.inputs and self.node_logic.inputs["mix"].connections
-        self.mix_dial.setEnabled(not is_mix_socket_connected)
-        label_text = f"{mix:.2f}{' (ext)' if is_mix_socket_connected else ''}"
-        self.mix_value_label.setText(label_text)
-
     @Slot()
     def updateFromLogic(self):
-        state = self.node_logic.get_current_state_snapshot()
-        self._on_state_updated(state)
+        # Update combo box first
+        if hasattr(self, "type_combo"):
+            state = self.node_logic.get_current_state_snapshot()
+            shaper_type = state.get("shaper_type")
+            with QSignalBlocker(self.type_combo):
+                index = self.type_combo.findData(shaper_type)
+                if index != -1:
+                    self.type_combo.setCurrentIndex(index)
+
+        # Then handle parameter sliders using parent class logic
         super().updateFromLogic()
 
 

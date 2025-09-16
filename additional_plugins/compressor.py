@@ -10,7 +10,7 @@ from node_system import Node
 from constants import DEFAULT_DTYPE, DEFAULT_SAMPLERATE, DEFAULT_BLOCKSIZE, DEFAULT_CHANNELS
 
 # --- UI and Qt Imports ---
-from ui_elements import NodeItem, NodeStateEmitter, NODE_CONTENT_PADDING
+from ui_elements import ParameterNodeItem, NodeItem, NodeStateEmitter, NODE_CONTENT_PADDING
 from PySide6.QtWidgets import QWidget, QSlider, QLabel, QVBoxLayout
 from PySide6.QtCore import Qt, Signal, Slot, QObject, QSignalBlocker
 
@@ -35,140 +35,57 @@ SIDECHAIN_DOWNSAMPLE_FACTOR = 4
 # ==============================================================================
 # 1. UI Class for the Compressor Node (Unchanged)
 # ==============================================================================
-class CompressorNodeItem(NodeItem):
-    """Custom UI for the CompressorNode with explicit slider controls."""
+class CompressorNodeItem(ParameterNodeItem):
+    """Custom UI for the CompressorNode with slider controls."""
 
     NODE_SPECIFIC_WIDTH = 220
 
     def __init__(self, node_logic: "CompressorNode"):
-        super().__init__(node_logic, width=self.NODE_SPECIFIC_WIDTH)
+        # Define the parameters for this node
+        parameters = [
+            {
+                "key": "threshold_db",
+                "name": "Threshold",
+                "min": MIN_THRESHOLD_DB,
+                "max": MAX_THRESHOLD_DB,
+                "format": "{:.1f} dB",
+                "is_log": False,
+            },
+            {
+                "key": "ratio",
+                "name": "Ratio",
+                "min": MIN_RATIO,
+                "max": MAX_RATIO,
+                "format": "{:.1f}:1",
+                "is_log": False,
+            },
+            {
+                "key": "attack_ms",
+                "name": "Attack",
+                "min": MIN_ATTACK_MS,
+                "max": MAX_ATTACK_MS,
+                "format": "{:.1f} ms",
+                "is_log": True,
+            },
+            {
+                "key": "release_ms",
+                "name": "Release",
+                "min": MIN_RELEASE_MS,
+                "max": MAX_RELEASE_MS,
+                "format": "{:.0f} ms",
+                "is_log": True,
+            },
+            {
+                "key": "knee_db",
+                "name": "Knee",
+                "min": MIN_KNEE_DB,
+                "max": MAX_KNEE_DB,
+                "format": "{:.1f} dB",
+                "is_log": False,
+            },
+        ]
 
-        self.container_widget = QWidget()
-        main_layout = QVBoxLayout(self.container_widget)
-        main_layout.setContentsMargins(
-            NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING
-        )
-        main_layout.setSpacing(5)
-        self.controls = {}
-
-        # --- Create Controls Explicitly ---
-        self.threshold_label, self.threshold_slider = self._create_control(
-            main_layout, "threshold_db", "Threshold", "{:.1f} dB", MIN_THRESHOLD_DB, MAX_THRESHOLD_DB, False
-        )
-        self.ratio_label, self.ratio_slider = self._create_control(
-            main_layout, "ratio", "Ratio", "{:.1f}:1", MIN_RATIO, MAX_RATIO, False
-        )
-        self.attack_label, self.attack_slider = self._create_control(
-            main_layout, "attack_ms", "Attack", "{:.1f} ms", MIN_ATTACK_MS, MAX_ATTACK_MS, True
-        )
-        self.release_label, self.release_slider = self._create_control(
-            main_layout, "release_ms", "Release", "{:.0f} ms", MIN_RELEASE_MS, MAX_RELEASE_MS, True
-        )
-        self.knee_label, self.knee_slider = self._create_control(
-            main_layout, "knee_db", "Knee", "{:.1f} dB", MIN_KNEE_DB, MAX_KNEE_DB, False
-        )
-
-        # --- Connect Signals Explicitly ---
-        self.threshold_slider.valueChanged.connect(self._handle_threshold_change)
-        self.ratio_slider.valueChanged.connect(self._handle_ratio_change)
-        self.attack_slider.valueChanged.connect(self._handle_attack_change)
-        self.release_slider.valueChanged.connect(self._handle_release_change)
-        self.knee_slider.valueChanged.connect(self._handle_knee_change)
-
-        self.setContentWidget(self.container_widget)
-
-        # Connect the logic node's state updates back to the UI
-        self.node_logic.emitter.stateUpdated.connect(self._on_state_updated)
-        self.updateFromLogic()
-
-    def _create_control(self, layout, key, name, fmt, p_min, p_max, is_log):
-        """Helper to reduce boilerplate for creating a label and slider."""
-        label = QLabel(f"{name}: ...")
-        slider = QSlider(Qt.Orientation.Horizontal)
-        slider.setRange(0, 1000)
-        layout.addWidget(label)
-        layout.addWidget(slider)
-
-        self.controls[key] = {
-            "slider": slider,
-            "label": label,
-            "format": fmt,
-            "min_val": p_min,
-            "max_val": p_max,
-            "is_log": is_log,
-            "name": name,
-        }
-        return label, slider
-
-    def _map_slider_to_logical(self, key: str, value: int) -> float:
-        info = self.controls[key]
-        norm = value / 1000.0
-        if info["is_log"]:
-            log_min = np.log10(info["min_val"])
-            log_max = np.log10(info["max_val"])
-            return 10 ** (log_min + norm * (log_max - log_min))
-        else:
-            return info["min_val"] + norm * (info["max_val"] - info["min_val"])
-
-    def _map_logical_to_slider(self, key: str, value: float) -> int:
-        info = self.controls[key]
-        if info["is_log"]:
-            log_min = np.log10(info["min_val"])
-            log_max = np.log10(info["max_val"])
-            range_val = log_max - log_min
-            if abs(range_val) < EPSILON:
-                return 0
-            safe_val = np.clip(value, info["min_val"], info["max_val"])
-            norm = (np.log10(safe_val) - log_min) / range_val
-            return int(round(norm * 1000.0))
-        else:
-            range_val = info["max_val"] - info["min_val"]
-            if abs(range_val) < EPSILON:
-                return 0
-            norm = (np.clip(value, info["min_val"], info["max_val"]) - info["min_val"]) / range_val
-            return int(round(norm * 1000.0))
-
-    # --- Explicit Signal Handlers ---
-    @Slot(int)
-    def _handle_threshold_change(self, value: int):
-        self.node_logic.set_threshold_db(self._map_slider_to_logical("threshold_db", value))
-
-    @Slot(int)
-    def _handle_ratio_change(self, value: int):
-        self.node_logic.set_ratio(self._map_slider_to_logical("ratio", value))
-
-    @Slot(int)
-    def _handle_attack_change(self, value: int):
-        self.node_logic.set_attack_ms(self._map_slider_to_logical("attack_ms", value))
-
-    @Slot(int)
-    def _handle_release_change(self, value: int):
-        self.node_logic.set_release_ms(self._map_slider_to_logical("release_ms", value))
-
-    @Slot(int)
-    def _handle_knee_change(self, value: int):
-        self.node_logic.set_knee_db(self._map_slider_to_logical("knee_db", value))
-
-    @Slot(dict)
-    def _on_state_updated(self, state: dict):
-        for key, control_info in self.controls.items():
-            value = state.get(key, control_info["min_val"])
-            is_connected = key in self.node_logic.inputs and self.node_logic.inputs[key].connections
-            control_info["slider"].setEnabled(not is_connected)
-
-            with QSignalBlocker(control_info["slider"]):
-                control_info["slider"].setValue(self._map_logical_to_slider(key, value))
-
-            label_text = f"{control_info['name']}: {control_info['format'].format(value)}"
-            if is_connected:
-                label_text += " (ext)"
-            control_info["label"].setText(label_text)
-
-    @Slot()
-    def updateFromLogic(self):
-        state = self.node_logic.get_current_state_snapshot()
-        self._on_state_updated(state)
-        super().updateFromLogic()
+        super().__init__(node_logic, parameters, width=self.NODE_SPECIFIC_WIDTH)
 
 
 # ==============================================================================
