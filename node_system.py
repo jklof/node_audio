@@ -89,6 +89,11 @@ class Node:
         self.inputs = OrderedDict()
         self.outputs = OrderedDict()
         self.pos = (0.0, 0.0)
+        self.error_state: str | None = None  # Attribute to hold error messages
+
+    def clear_error_state(self):
+        """Resets the node's error state."""
+        self.error_state = None
 
     def add_input(self, name: str, data_type: type = torch.Tensor) -> Socket:
         socket = Socket(name, self, True, data_type)

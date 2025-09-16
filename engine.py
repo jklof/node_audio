@@ -34,6 +34,7 @@ class EngineSignals(QObject):
     processingStateChanged = Signal(bool)
     processingError = Signal(str)
     nodeProcessingStatsUpdated = Signal(dict)
+    nodeErrorOccurred = Signal(str, str)  # (node_id, error_message)
 
 
 class Engine:
@@ -112,9 +113,15 @@ class Engine:
     ):
         """
         Processes one tick of the graph using a pre-computed plan.
+        MODIFIED: Now handles errors on a per-node basis.
         """
         stats.clear()
         for node, input_sources, input_data in processing_plan:
+            # If node is already in an error state, skip it.
+            if node.error_state is not None:
+                stats[node.id] = 0.0  # Show zero processing load
+                continue
+
             try:
                 for name in node.inputs:
                     source_socket = input_sources.get(name)
@@ -133,7 +140,22 @@ class Engine:
                             node.outputs[name]._data = data
 
             except Exception as e:
-                raise RuntimeError(f"Error processing node '{node.name}': {e}") from e
+                # --- Per-node error handling ---
+                error_msg = f"Error in '{node.name}': {e}"
+                logger.error(f"{error_msg}\n{traceback.format_exc()}")
+
+                # 1. Set the error state on the node itself.
+                node.error_state = error_msg
+
+                # 2. Clear all its output sockets to prevent propagating stale/bad data.
+                for output_socket in node.outputs.values():
+                    output_socket._data = None
+
+                # 3. Emit a signal so the UI can be updated.
+                self.signals.nodeErrorOccurred.emit(node.id, error_msg)
+
+                # This node has failed, but we continue the loop for other nodes.
+                # The original exception is caught and handled, so it doesn't crash the engine.
 
     def _get_processing_plan(self) -> list[tuple[Node, dict[str, Socket], dict[str, Any]]] | None:
         """
@@ -206,9 +228,10 @@ class Engine:
 
             self._invalidate_plan_cache()
 
-            # Call start() on ALL nodes first.
+            # Call start() and clear errors on ALL nodes first.
             for node in self.graph.nodes.values():
                 try:
+                    node.clear_error_state()
                     node.start()
                 except Exception as e:
                     error_to_emit = f"Error starting node '{node.name}': {e}"
@@ -235,6 +258,9 @@ class Engine:
                 self._state = EngineState.RUNNING
 
         # --- Now emit signals outside the lock ---
+        # Emit graph changed to ensure UI clears any old error states
+        self._emit_graph_changed()
+
         if error_to_emit:
             self.signals.processingError.emit(error_to_emit)
             return

@@ -115,12 +115,14 @@ class NodeItem(QGraphicsObject):
         self._is_updating_geometry = False  # Re-entrancy guard for update_geometry
         self._processing_percentage = 0.0
         self._show_processing_bar = False
+        self._is_in_error_state = False
 
         # --- Set Flags ---
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges)
         self.setCacheMode(QGraphicsItem.CacheMode.DeviceCoordinateCache)
+        self.setToolTip("")
 
         # --- Create UI Children ---
         self.title_item = QGraphicsTextItem(self.node_logic.name, self)
@@ -180,6 +182,13 @@ class NodeItem(QGraphicsObject):
         if self._show_processing_bar != visible:
             self._show_processing_bar = visible
             self.update()
+
+    @Slot(str)
+    def set_error_display_state(self, error_message: str | None):
+        """Updates the UI's internal error state."""
+        self._is_in_error_state = error_message is not None
+        self.setToolTip(error_message or "")
+        self.update()  # Schedule a repaint
 
     @Slot()
     def _schedule_geometry_update(self):
@@ -310,6 +319,13 @@ class NodeItem(QGraphicsObject):
             painter.setPen(Qt.PenStyle.NoPen)
             painter.drawRect(bar_rect)
 
+        # Draw an error outline if the node is in an error state
+        if self._is_in_error_state:
+            error_pen = QPen(QColor(255, 50, 50), 2.5)  # A bright red pen
+            painter.setPen(error_pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRoundedRect(body_rect, 5, 5)
+
         # Selection outline
         if self.isSelected():
             painter.setPen(QPen(QColor("orange"), 1.5))
@@ -338,6 +354,10 @@ class NodeItem(QGraphicsObject):
         # Explicitly check and update the title text from the logic object
         if self.title_item.toPlainText() != self.node_logic.name:
             self.title_item.setPlainText(self.node_logic.name)
+
+        # Update the UI's error state from the logic's state
+        self.set_error_display_state(self.node_logic.error_state)
+
         self.update_geometry()
         self.update()
 

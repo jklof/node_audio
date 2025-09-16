@@ -187,28 +187,6 @@ class CodeNodeItem(NodeItem):
 
         self.updateFromLogic()
 
-    def _rebuild_sockets(self):
-        """Clears and re-creates all socket UI items from the logic node."""
-        for item in self._socket_items.values():
-            if item.scene():
-                self.scene().removeItem(item)
-        for item in self._socket_labels.values():
-            if item.scene():
-                self.scene().removeItem(item)
-        self._socket_items.clear()
-        self._socket_labels.clear()
-
-        for logic_socket in self.node_logic.inputs.values():
-            self._socket_items[logic_socket] = SocketItem(logic_socket, self)
-            label = QGraphicsTextItem(logic_socket.name, self)
-            label.setDefaultTextColor(Qt.GlobalColor.lightGray)
-            self._socket_labels[logic_socket] = label
-        for logic_socket in self.node_logic.outputs.values():
-            self._socket_items[logic_socket] = SocketItem(logic_socket, self)
-            label = QGraphicsTextItem(logic_socket.name, self)
-            label.setDefaultTextColor(Qt.GlobalColor.lightGray)
-            self._socket_labels[logic_socket] = label
-
     def paint(self, painter, option, widget=None):
         super().paint(painter, option, widget)
         handle_rect = self._get_resize_handle_rect()
@@ -338,13 +316,12 @@ class CodeNodeItem(NodeItem):
                 selection.cursor = cursor
                 self.code_editor.setExtraSelections([selection])
                 self.code_editor.setTextCursor(cursor)
+            self.set_error_display_state(error)
         else:
             self.status_label.setText("Status: OK")
             self.status_label.setStyleSheet("color: lightgreen;")
+            self.set_error_display_state(None)
 
-        if state.get("sockets_changed", False):
-            self._rebuild_sockets()
-            self.update_geometry()
 
         conn_ids_to_delete = state.get("connections_to_delete", [])
         if conn_ids_to_delete:
@@ -363,7 +340,6 @@ class CodeNodeItem(NodeItem):
         self._on_state_updated(state)
 
         # Call the parent implementation
-        # This will handle common updates, including setting the node's title.
         super().updateFromLogic()
 
 
@@ -438,6 +414,7 @@ class CodeNode(Node):
                         sockets_changed = True
 
                 self._compiled_code = compile(self._code, f"<{self.name}>", "exec")
+                self.clear_error_state()
                 self._status, self._last_error, self._last_error_lineno = "OK", "", -1
                 if not is_init:
                     self._state.clear()
@@ -474,6 +451,9 @@ class CodeNode(Node):
         }
 
     def process(self, input_data: dict) -> dict:
+        if self.error_state is not None:
+            return {name: None for name in self.outputs}
+
         with self._lock:
             if self._compiled_code is None:
                 return {name: None for name in self.outputs}
@@ -485,7 +465,7 @@ class CodeNode(Node):
                 if self._status == "Error":
                     self._status, self._last_error, self._last_error_lineno = "OK", "", -1
                     self.emitter.stateUpdated.emit(self._get_current_state_snapshot_locked())
-                return {name: execution_scope.get(name) for name in self.outputs}
+            return {name: execution_scope.get(name) for name in self.outputs}
         except Exception as e:
             lineno = -1
             try:
@@ -494,13 +474,14 @@ class CodeNode(Node):
                     lineno = tb[-1].lineno
             except Exception:
                 pass
+
             with self._lock:
                 self._status = "Error"
-                self._last_error = f"Runtime: {e}"
+                self._last_error = f"Runtime: {str(e).replace(chr(10), ' ')}"
                 self._last_error_lineno = lineno
                 self.emitter.stateUpdated.emit(self._get_current_state_snapshot_locked())
-            logger.error(f"[{self.name}] Runtime error in user code: {e}", exc_info=True)
-            return {name: None for name in self.outputs}
+
+            raise e
 
     def serialize_extra(self) -> dict:
         with self._lock:

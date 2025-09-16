@@ -27,6 +27,7 @@ class AppController(QObject):
         self.engine.signals.graphChanged.connect(self.graph_widget.graph_scene.sync_from_graph)
         self.engine.signals.processingError.connect(self._on_processing_error)
         self.engine.signals.nodeProcessingStatsUpdated.connect(self.graph_widget.graph_scene.on_node_stats_updated)
+        self.engine.signals.nodeErrorOccurred.connect(self.graph_widget.graph_scene.on_node_error)
 
         # Connect View (UI) request signals to Controller slots
         self.graph_widget.graph_scene.nodeCreationRequested.connect(self.on_node_creation_requested)
