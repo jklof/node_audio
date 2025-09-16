@@ -495,12 +495,9 @@ class CodeNode(Node):
             except Exception:
                 pass
             with self._lock:
-                self._status, self._last_error, self._last_error_lineno, self._compiled_code = (
-                    "Error",
-                    f"Runtime: {e}",
-                    lineno,
-                    None,
-                )
+                self._status = "Error"
+                self._last_error = f"Runtime: {e}"
+                self._last_error_lineno = lineno
                 self.emitter.stateUpdated.emit(self._get_current_state_snapshot_locked())
             logger.error(f"[{self.name}] Runtime error in user code: {e}", exc_info=True)
             return {name: None for name in self.outputs}

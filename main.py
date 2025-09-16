@@ -150,7 +150,6 @@ class MainWindow(QMainWindow):
         menu_bar = self.menuBar()
         file_menu = menu_bar.addMenu("&File")
         process_menu = menu_bar.addMenu("&Process")
-        view_menu = menu_bar.addMenu("&View")
         dev_menu = menu_bar.addMenu("&Developer")  # <-- New Menu
 
         # File Menu Actions
@@ -178,16 +177,14 @@ class MainWindow(QMainWindow):
         process_menu.addAction(self.start_action)
         process_menu.addAction(self.stop_action)
 
-        # View Menu Actions
+        # --- Developer Menu Actions ---
+        reload_plugins_action = QAction("Reload Plugins", self, triggered=self.on_reload_plugins)
+        reload_plugins_action.setShortcut("Ctrl+R")
         self.show_load_action = QAction("Show Processing Load", self, checkable=True)
         self.show_load_action.setChecked(False)
         self.show_load_action.toggled.connect(self.on_toggle_processing_load_view)
-        view_menu.addAction(self.show_load_action)
-
-        # --- NEW: Developer Menu Action ---
-        reload_plugins_action = QAction("Reload Plugins", self, triggered=self.on_reload_plugins)
-        reload_plugins_action.setShortcut("Ctrl+R")
         dev_menu.addAction(reload_plugins_action)
+        dev_menu.addAction(self.show_load_action)
 
     @Slot()
     def on_reload_plugins(self):
