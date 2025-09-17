@@ -29,7 +29,7 @@ MAX_RELEASE_MS = 2000.0
 MIN_KNEE_DB = 0.0
 MAX_KNEE_DB = 24.0
 EPSILON = 1e-9
-SIDECHAIN_DOWNSAMPLE_FACTOR = 4
+SIDECHAIN_DOWNSAMPLE_FACTOR = 8
 
 
 # ==============================================================================
@@ -41,7 +41,6 @@ class CompressorNodeItem(ParameterNodeItem):
     NODE_SPECIFIC_WIDTH = 220
 
     def __init__(self, node_logic: "CompressorNode"):
-        # Define the parameters for this node
         parameters = [
             {
                 "key": "threshold_db",
@@ -84,12 +83,11 @@ class CompressorNodeItem(ParameterNodeItem):
                 "is_log": False,
             },
         ]
-
         super().__init__(node_logic, parameters, width=self.NODE_SPECIFIC_WIDTH)
 
 
 # ==============================================================================
-# 2. Logic Class for the Compressor Node (MODIFIED)
+# 2. Logic Class for the Compressor Node
 # ==============================================================================
 class CompressorNode(Node):
     NODE_TYPE = "Compressor"
@@ -117,60 +115,102 @@ class CompressorNode(Node):
         self._samplerate = DEFAULT_SAMPLERATE
         self._envelope = 0.0
 
-        # --- NEW: Delay buffer for latency compensation ---
         self._delay_samples = SIDECHAIN_DOWNSAMPLE_FACTOR // 2
         self._delay_buffer = torch.zeros((DEFAULT_CHANNELS, self._delay_samples), dtype=DEFAULT_DTYPE)
 
-    # --- Parameter Setters (Unchanged) ---
+        # --- Performance Optimization Attributes ---
+        self._params_dirty = True
+        self._attack_coeff = 0.0
+        self._release_coeff = 0.0
+        self._last_signal_shape = None
+
+        # Pre-allocated buffers
+        self._power_buffer = None
+        self._sidechain_power = None
+        self._indices_buffer = None
+        self._downsampled_sidechain = None
+        self._envelope_out_down = None
+        self._envelope_out_mono_power = None
+        self._envelope_db = None
+        self._gain_reduction_db = None
+        self._gain_reduction_linear = None
+        self._gain_below = None
+        self._gain_inside = None
+        self._gain_above = None
+
+    def _update_coefficients(self):
+        """Recalculates time-based coefficients only when parameters change."""
+        downsampled_samplerate = self._samplerate / SIDECHAIN_DOWNSAMPLE_FACTOR
+        self._attack_coeff = torch.exp(
+            torch.tensor(-1.0 / (downsampled_samplerate * (self._attack_ms / 1000.0)))
+        ).item()
+        self._release_coeff = torch.exp(
+            torch.tensor(-1.0 / (downsampled_samplerate * (self._release_ms / 1000.0)))
+        ).item()
+        self._params_dirty = False
+
+    def _resize_buffers(self, signal_shape: torch.Size):
+        """Re-allocates all intermediate buffers if the input signal shape changes."""
+        _num_channels, block_size = signal_shape
+        downsampled_size = block_size // SIDECHAIN_DOWNSAMPLE_FACTOR
+
+        self._power_buffer = torch.empty(signal_shape, dtype=DEFAULT_DTYPE)
+        self._sidechain_power = torch.empty(block_size, dtype=DEFAULT_DTYPE)
+        # --- FIX: Allocate the indices buffer with torch.long dtype ---
+        self._indices_buffer = torch.empty(block_size, dtype=torch.long)
+
+        self._downsampled_sidechain = torch.empty(downsampled_size, dtype=DEFAULT_DTYPE)
+        self._envelope_out_down = torch.empty(downsampled_size, dtype=DEFAULT_DTYPE)
+        self._envelope_out_mono_power = torch.empty(block_size, dtype=DEFAULT_DTYPE)
+        self._envelope_db = torch.empty(block_size, dtype=DEFAULT_DTYPE)
+        self._gain_reduction_db = torch.empty(block_size, dtype=DEFAULT_DTYPE)
+        self._gain_reduction_linear = torch.empty(block_size, dtype=DEFAULT_DTYPE)
+
+        # Buffers for the torch.where calculation
+        self._gain_below = torch.zeros(block_size, dtype=DEFAULT_DTYPE)
+        self._gain_inside = torch.empty(block_size, dtype=DEFAULT_DTYPE)
+        self._gain_above = torch.empty(block_size, dtype=DEFAULT_DTYPE)
+
+        self._last_signal_shape = signal_shape
+        logger.debug(f"[{self.name}] Resized internal buffers for shape {signal_shape}")
+
+    # --- Parameter Setters ---
     def set_threshold_db(self, value: float):
-        state_to_emit = None
         with self._lock:
             clipped_value = np.clip(float(value), MIN_THRESHOLD_DB, MAX_THRESHOLD_DB)
             if self._threshold_db != clipped_value:
                 self._threshold_db = clipped_value
-                state_to_emit = self.get_current_state_snapshot(locked=True)
-        if state_to_emit:
-            self.emitter.stateUpdated.emit(state_to_emit)
+        self.emitter.stateUpdated.emit(self.get_current_state_snapshot())
 
     def set_ratio(self, value: float):
-        state_to_emit = None
         with self._lock:
             clipped_value = np.clip(float(value), MIN_RATIO, MAX_RATIO)
             if self._ratio != clipped_value:
                 self._ratio = clipped_value
-                state_to_emit = self.get_current_state_snapshot(locked=True)
-        if state_to_emit:
-            self.emitter.stateUpdated.emit(state_to_emit)
+        self.emitter.stateUpdated.emit(self.get_current_state_snapshot())
 
     def set_attack_ms(self, value: float):
-        state_to_emit = None
         with self._lock:
             clipped_value = np.clip(float(value), MIN_ATTACK_MS, MAX_ATTACK_MS)
             if self._attack_ms != clipped_value:
                 self._attack_ms = clipped_value
-                state_to_emit = self.get_current_state_snapshot(locked=True)
-        if state_to_emit:
-            self.emitter.stateUpdated.emit(state_to_emit)
+                self._params_dirty = True
+        self.emitter.stateUpdated.emit(self.get_current_state_snapshot())
 
     def set_release_ms(self, value: float):
-        state_to_emit = None
         with self._lock:
             clipped_value = np.clip(float(value), MIN_RELEASE_MS, MAX_RELEASE_MS)
             if self._release_ms != clipped_value:
                 self._release_ms = clipped_value
-                state_to_emit = self.get_current_state_snapshot(locked=True)
-        if state_to_emit:
-            self.emitter.stateUpdated.emit(state_to_emit)
+                self._params_dirty = True
+        self.emitter.stateUpdated.emit(self.get_current_state_snapshot())
 
     def set_knee_db(self, value: float):
-        state_to_emit = None
         with self._lock:
             clipped_value = np.clip(float(value), MIN_KNEE_DB, MAX_KNEE_DB)
             if self._knee_db != clipped_value:
                 self._knee_db = clipped_value
-                state_to_emit = self.get_current_state_snapshot(locked=True)
-        if state_to_emit:
-            self.emitter.stateUpdated.emit(state_to_emit)
+        self.emitter.stateUpdated.emit(self.get_current_state_snapshot())
 
     def get_current_state_snapshot(self, locked: bool = False) -> Dict:
         state = {
@@ -189,142 +229,155 @@ class CompressorNode(Node):
         with self._lock:
             self._envelope = 0.0
             self._delay_buffer.zero_()
+            self._last_signal_shape = None  # Force buffer reallocation on first run
+            self._params_dirty = True
 
     @staticmethod
     @torch.jit.script
     def _jit_envelope_loop(
-        sidechain: torch.Tensor, initial_envelope: float, attack_coeff: float, release_coeff: float
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-
+        sidechain: torch.Tensor,
+        envelope_out: torch.Tensor,
+        initial_envelope: float,
+        attack_coeff: float,
+        release_coeff: float,
+    ) -> torch.Tensor:
         num_samples = sidechain.shape[0]
-        envelope_out = torch.zeros_like(sidechain)
         env = torch.tensor(initial_envelope, dtype=sidechain.dtype, device=sidechain.device)
-
         for i in range(num_samples):
             target = sidechain[i]
             coeff = attack_coeff if target > env else release_coeff
             env = target + coeff * (env - target)
             envelope_out[i] = env
-
-        return envelope_out, env
+        return env  # Return only the final envelope state
 
     def process(self, input_data: dict) -> dict:
         signal = input_data.get("in")
         if not isinstance(signal, torch.Tensor):
             return {"out": None}
 
-        # --- State update logic (Unchanged) ---
-        state_to_emit = None
-        ui_update_needed = False
-        with self._lock:
-            # This section remains the same...
-            threshold_socket_val = input_data.get("threshold_db")
-            if threshold_socket_val is not None:
-                clipped_val = np.clip(float(threshold_socket_val), MIN_THRESHOLD_DB, MAX_THRESHOLD_DB)
-                if self._threshold_db != clipped_val:
-                    self._threshold_db = clipped_val
-                    ui_update_needed = True
-            ratio_socket_val = input_data.get("ratio")
-            if ratio_socket_val is not None:
-                clipped_val = np.clip(float(ratio_socket_val), MIN_RATIO, MAX_RATIO)
-                if self._ratio != clipped_val:
-                    self._ratio = clipped_val
-                    ui_update_needed = True
-            attack_socket_val = input_data.get("attack_ms")
-            if attack_socket_val is not None:
-                clipped_val = np.clip(float(attack_socket_val), MIN_ATTACK_MS, MAX_ATTACK_MS)
-                if self._attack_ms != clipped_val:
-                    self._attack_ms = clipped_val
-                    ui_update_needed = True
-            release_socket_val = input_data.get("release_ms")
-            if release_socket_val is not None:
-                clipped_val = np.clip(float(release_socket_val), MIN_RELEASE_MS, MAX_RELEASE_MS)
-                if self._release_ms != clipped_val:
-                    self._release_ms = clipped_val
-                    ui_update_needed = True
-            knee_socket_val = input_data.get("knee_db")
-            if knee_socket_val is not None:
-                clipped_val = np.clip(float(knee_socket_val), MIN_KNEE_DB, MAX_KNEE_DB)
-                if self._knee_db != clipped_val:
-                    self._knee_db = clipped_val
-                    ui_update_needed = True
+        with torch.no_grad():
+            # --- State update logic ---
+            with self._lock:
+                # Socket updates can still happen here. We read them and update the internal state.
+                ui_update_needed = False
+                threshold_socket_val = input_data.get("threshold_db")
+                if threshold_socket_val is not None:
+                    clipped_val = np.clip(float(threshold_socket_val), MIN_THRESHOLD_DB, MAX_THRESHOLD_DB)
+                    if self._threshold_db != clipped_val:
+                        self._threshold_db = clipped_val
+                        ui_update_needed = True
+                ratio_socket_val = input_data.get("ratio")
+                if ratio_socket_val is not None:
+                    clipped_val = np.clip(float(ratio_socket_val), MIN_RATIO, MAX_RATIO)
+                    if self._ratio != clipped_val:
+                        self._ratio = clipped_val
+                        ui_update_needed = True
+                attack_socket_val = input_data.get("attack_ms")
+                if attack_socket_val is not None:
+                    clipped_val = np.clip(float(attack_socket_val), MIN_ATTACK_MS, MAX_ATTACK_MS)
+                    if self._attack_ms != clipped_val:
+                        self._attack_ms = clipped_val
+                        self._params_dirty = True
+                        ui_update_needed = True
+                release_socket_val = input_data.get("release_ms")
+                if release_socket_val is not None:
+                    clipped_val = np.clip(float(release_socket_val), MIN_RELEASE_MS, MAX_RELEASE_MS)
+                    if self._release_ms != clipped_val:
+                        self._release_ms = clipped_val
+                        self._params_dirty = True
+                        ui_update_needed = True
+                knee_socket_val = input_data.get("knee_db")
+                if knee_socket_val is not None:
+                    clipped_val = np.clip(float(knee_socket_val), MIN_KNEE_DB, MAX_KNEE_DB)
+                    if self._knee_db != clipped_val:
+                        self._knee_db = clipped_val
+                        ui_update_needed = True
 
-            threshold_db, ratio, attack_ms, release_ms, knee_db, initial_envelope = (
-                self._threshold_db,
-                self._ratio,
-                self._attack_ms,
-                self._release_ms,
-                self._knee_db,
-                self._envelope,
+                # If any socket caused a change, emit the new state to the UI
+                if ui_update_needed:
+                    self.emitter.stateUpdated.emit(self.get_current_state_snapshot(locked=True))
+
+                # Copy locked parameters to local variables for this tick's processing
+                threshold_db, ratio, knee_db, initial_envelope = (
+                    self._threshold_db,
+                    self._ratio,
+                    self._knee_db,
+                    self._envelope,
+                )
+
+                if self._params_dirty:
+                    self._update_coefficients()
+
+                # Check if we need to reallocate buffers
+                if signal.shape != self._last_signal_shape:
+                    self._resize_buffers(signal.shape)
+
+            # --- DSP Processing ---
+
+            # 1. Level Detection using squared amplitude (power) into a pre-allocated buffer.
+            torch.square(signal, out=self._power_buffer)
+            # --- Provide the pre-allocated indices buffer to the out= argument ---
+            torch.max(self._power_buffer, dim=0, out=(self._sidechain_power, self._indices_buffer))
+
+            # 2. Downsample the power sidechain.
+            self._downsampled_sidechain = F.avg_pool1d(
+                self._sidechain_power.unsqueeze(0), kernel_size=SIDECHAIN_DOWNSAMPLE_FACTOR
+            ).squeeze(0)
+
+            # 3. Run the JIT envelope follower.
+            final_env = self._jit_envelope_loop(
+                self._downsampled_sidechain,
+                self._envelope_out_down,
+                initial_envelope,
+                self._attack_coeff,
+                self._release_coeff,
+            )
+            self._envelope = final_env.item()
+
+            # 4. Upsample using efficient repeat_interleave.
+            self._envelope_out_mono_power = torch.repeat_interleave(
+                self._envelope_out_down, SIDECHAIN_DOWNSAMPLE_FACTOR
             )
 
-            if ui_update_needed:
-                state_to_emit = self.get_current_state_snapshot(locked=True)
+            # 5. Convert smoothed power to dB.
+            torch.log10(self._envelope_out_mono_power + EPSILON, out=self._envelope_db)
+            self._envelope_db.mul_(10.0)
 
-        if state_to_emit:
-            self.emitter.stateUpdated.emit(state_to_emit)
+            # 6. Calculate gain reduction in dB (fully vectorized).
+            slope = 1.0 / ratio - 1.0
+            knee_start = threshold_db - knee_db / 2.0
+            knee_end = threshold_db + knee_db / 2.0
 
-        # --- DSP Processing (MODIFIED FOR DELAY COMPENSATION) ---
-
-        # 1. Level Detection & Gain Computation (on original signal)
-        level_db = 20 * torch.log10(torch.abs(signal) + EPSILON)
-
-        slope = 1.0 / ratio - 1.0
-        knee_start = threshold_db - knee_db / 2.0
-        knee_end = threshold_db + knee_db / 2.0
-        is_below = level_db < knee_start
-        is_inside = (level_db >= knee_start) & (level_db <= knee_end)
-
-        gain_below = torch.zeros_like(level_db)
-        gain_inside = slope * (((level_db - knee_start) ** 2) / (2.0 * max(EPSILON, knee_db)))
-        gain_above = slope * (level_db - threshold_db)
-
-        gain_reduction_db = torch.where(is_below, gain_below, torch.where(is_inside, gain_inside, gain_above))
-
-        # 2. Sidechain Preparation
-        sidechain_target, _ = torch.max(torch.abs(gain_reduction_db), dim=0)
-
-        # 3. Downsample with stateless avg pooling
-        downsampled_sidechain = F.avg_pool1d(
-            sidechain_target.unsqueeze(0), kernel_size=SIDECHAIN_DOWNSAMPLE_FACTOR, stride=SIDECHAIN_DOWNSAMPLE_FACTOR
-        ).squeeze(0)
-
-        # 4. Run the JIT envelope follower
-        downsampled_samplerate = self._samplerate / SIDECHAIN_DOWNSAMPLE_FACTOR
-        attack_coeff = np.exp(-1.0 / (downsampled_samplerate * (attack_ms / 1000.0))).item()
-        release_coeff = np.exp(-1.0 / (downsampled_samplerate * (release_ms / 1000.0))).item()
-
-        envelope_out_down, final_env_tensor = self._jit_envelope_loop(
-            downsampled_sidechain, initial_envelope, attack_coeff, release_coeff
-        )
-        self._envelope = final_env_tensor.item()
-
-        # 5. Upsample with stateless linear interpolation
-        envelope_out_mono = (
-            F.interpolate(
-                envelope_out_down.unsqueeze(0).unsqueeze(0), size=signal.shape[1], mode="linear", align_corners=False
+            torch.sub(self._envelope_db, threshold_db, out=self._gain_above).mul_(slope)
+            torch.sub(self._envelope_db, knee_start, out=self._gain_inside).pow_(2).mul_(
+                slope / (2.0 * max(EPSILON, knee_db))
             )
-            .squeeze(0)
-            .squeeze(0)
-        )
 
-        # 6. DELAY COMPENSATION
-        # The resampling introduces a delay. We apply an equal delay to the audio signal.
-        if self._delay_samples > 0:
-            # Create a combined signal of the buffer and the current input
-            combined_signal = torch.cat((self._delay_buffer, signal), dim=1)
-            # The signal to be processed is the first part of this combined signal
-            delayed_signal = combined_signal[:, : signal.shape[1]]
-            # The new delay buffer is the last part of the combined signal
-            self._delay_buffer = combined_signal[:, signal.shape[1] :]
-        else:
-            delayed_signal = signal
+            is_below = self._envelope_db < knee_start
+            is_inside = (self._envelope_db >= knee_start) & (self._envelope_db <= knee_end)
 
-        # 7. Apply Gain to the DELAYED signal
-        gain_reduction_linear = 10 ** (-envelope_out_mono / 20.0)
-        output_signal = delayed_signal * gain_reduction_linear
+            torch.where(
+                is_below,
+                self._gain_below,
+                torch.where(is_inside, self._gain_inside, self._gain_above),
+                out=self._gain_reduction_db,
+            )
 
-        return {"out": output_signal}
+            # 7. DELAY COMPENSATION
+            if self._delay_samples > 0:
+                combined_signal = torch.cat((self._delay_buffer, signal), dim=1)
+                delayed_signal = combined_signal[:, : signal.shape[1]]
+                self._delay_buffer = combined_signal[:, signal.shape[1] :]
+            else:
+                delayed_signal = signal
+
+            # 8. Apply Gain.
+            torch.div(self._gain_reduction_db, 20.0, out=self._gain_reduction_db)
+            torch.pow(10.0, self._gain_reduction_db, out=self._gain_reduction_linear)
+
+            output_signal = delayed_signal * self._gain_reduction_linear
+
+            return {"out": output_signal}
 
     def serialize_extra(self) -> dict:
         return self.get_current_state_snapshot()
@@ -336,3 +389,4 @@ class CompressorNode(Node):
             self._attack_ms = data.get("attack_ms", 5.0)
             self._release_ms = data.get("release_ms", 100.0)
             self._knee_db = data.get("knee_db", 6.0)
+            self._params_dirty = True

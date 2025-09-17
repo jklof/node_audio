@@ -322,7 +322,6 @@ class CodeNodeItem(NodeItem):
             self.status_label.setStyleSheet("color: lightgreen;")
             self.set_error_display_state(None)
 
-
         conn_ids_to_delete = state.get("connections_to_delete", [])
         if conn_ids_to_delete:
             view = self.scene().views()[0] if self.scene() and self.scene().views() else None

@@ -5,7 +5,7 @@ import weakref
 from typing import Dict, Optional, List
 
 import torch
-import numpy as np  # Kept for UI slider mapping
+import numpy as np
 import soundfile as sf
 import torchaudio.transforms as T
 
@@ -26,15 +26,12 @@ logger = logging.getLogger(__name__)
 PARTITION_SIZE = DEFAULT_BLOCKSIZE
 FFT_SIZE = PARTITION_SIZE * 2
 
-# ==============================================================================
-# 1. Background IR Loader (QRunnable with Signal Emitter)
-# ==============================================================================
 
-
+# ==============================================================================
+# 1. Background IR Loader
+# ==============================================================================
 class IRLoadSignaller(QObject):
-    """Signal emitter to communicate from background thread to node."""
-
-    load_finished = Signal(tuple)  # ('status', data, filepath)
+    load_finished = Signal(tuple)
 
 
 class IRLoadRunnable(QRunnable):
@@ -49,44 +46,32 @@ class IRLoadRunnable(QRunnable):
         node = self._node_ref()
         if not node:
             return
-
         try:
-            logger.info(f"[{node.name}] Starting IR load for: {self.file_path}")
-            # Load with soundfile (numpy) and immediately convert to torch tensor
-            ir_data_np, source_sr = sf.read(self.file_path, dtype="float32")
-            ir_data = torch.from_numpy(ir_data_np)
-
-            if ir_data.dim() > 1:
-                ir_data = torch.mean(ir_data, dim=1)  # Mixdown to mono
-
-            # --- Use torchaudio for resampling ---
+            ir_data_np, source_sr = sf.read(self.file_path, dtype="float32", always_2d=True)
+            ir_data = torch.from_numpy(ir_data_np.T).to(DEFAULT_DTYPE)
+            if ir_data.shape[0] > 1:
+                ir_data = torch.mean(ir_data, dim=0, keepdim=True)
             if source_sr != self.target_sr:
-                logger.info(
-                    f"[{node.name}] Resampling IR from {source_sr} Hz to {self.target_sr} Hz using torchaudio..."
-                )
-                resampler = T.Resample(orig_freq=source_sr, new_freq=self.target_sr, dtype=ir_data.dtype)
-                # Resample expects (..., time), so add a channel dimension for mono and remove it after
-                ir_data = resampler(ir_data.unsqueeze(0)).squeeze(0)
-
+                resampler = T.Resample(orig_freq=source_sr, new_freq=self.target_sr, dtype=DEFAULT_DTYPE)
+                ir_data = resampler(ir_data)
             max_val = torch.max(torch.abs(ir_data))
             if max_val > 0:
                 ir_data /= max_val
-            logger.info(f"[{node.name}] IR loaded. Now calculating FFT partitions...")
 
-            num_partitions = int(np.ceil(ir_data.shape[0] / PARTITION_SIZE))
+            num_partitions = int(np.ceil(ir_data.shape[1] / PARTITION_SIZE))
             padded_len = num_partitions * PARTITION_SIZE
-            pad_amount = padded_len - ir_data.shape[0]
-            padded_ir = torch.nn.functional.pad(ir_data, (0, pad_amount), "constant", 0)
+            pad_amount = padded_len - ir_data.shape[1]
+            padded_ir = torch.nn.functional.pad(ir_data, (0, pad_amount), "constant", 0).squeeze(0)
 
-            fft_partitions = [
-                torch.fft.rfft(padded_ir[i * PARTITION_SIZE : (i + 1) * PARTITION_SIZE], n=FFT_SIZE).to(
-                    DEFAULT_COMPLEX_DTYPE
-                )
+            partition_ffts = [
+                torch.fft.rfft(padded_ir[i * PARTITION_SIZE : (i + 1) * PARTITION_SIZE], n=FFT_SIZE)
                 for i in range(num_partitions)
             ]
 
-            logger.info(f"[{node.name}] IR prepared into {num_partitions} FFT partitions.")
-            self.signaller.load_finished.emit(("success", fft_partitions, self.file_path))
+            stacked_ffts = torch.stack(partition_ffts).unsqueeze(1).to(DEFAULT_COMPLEX_DTYPE)
+
+            logger.info(f"[{node.name}] IR prepared into a single tensor of shape {stacked_ffts.shape}.")
+            self.signaller.load_finished.emit(("success", stacked_ffts, self.file_path))
 
         except Exception as e:
             err_msg = f"Failed to load or process IR '{os.path.basename(self.file_path)}': {e}"
@@ -95,21 +80,19 @@ class IRLoadRunnable(QRunnable):
 
 
 # ==============================================================================
-# 3. Custom UI Class (ConvolutionReverbNodeItem)
+# 3. Custom UI Class
 # ==============================================================================
 class ConvolutionReverbNodeItem(NodeItem):
     NODE_SPECIFIC_WIDTH = 240
 
     def __init__(self, node_logic: "ConvolutionReverbNode"):
         super().__init__(node_logic, width=self.NODE_SPECIFIC_WIDTH)
-
         self.container_widget = QWidget()
         main_layout = QVBoxLayout(self.container_widget)
         main_layout.setContentsMargins(
             NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING
         )
         main_layout.setSpacing(5)
-
         self.load_button = QPushButton("Load Impulse Response")
         self.status_label = QLabel("Status: No IR Loaded")
         self.filename_label = QLabel("File: None")
@@ -117,35 +100,28 @@ class ConvolutionReverbNodeItem(NodeItem):
         self.filename_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.filename_label.setWordWrap(True)
         self.status_label.setWordWrap(True)
-
         main_layout.addWidget(self.load_button)
         main_layout.addWidget(self.status_label)
         main_layout.addWidget(self.filename_label)
-
         self.input_gain_slider, self.input_gain_label = self._create_slider_control("Input", -24.0, 24.0, "{:+.1f} dB")
         self.mix_slider, self.mix_label = self._create_slider_control("Mix", 0.0, 1.0, "{:.0%}")
         self.output_gain_slider, self.output_gain_label = self._create_slider_control(
             "Output", -24.0, 24.0, "{:+.1f} dB"
         )
-
         main_layout.addWidget(self.input_gain_label)
         main_layout.addWidget(self.input_gain_slider)
         main_layout.addWidget(self.mix_label)
         main_layout.addWidget(self.mix_slider)
         main_layout.addWidget(self.output_gain_label)
         main_layout.addWidget(self.output_gain_slider)
-
         self.bypass_checkbox = QCheckBox("Bypass")
         main_layout.addWidget(self.bypass_checkbox)
-
         self.setContentWidget(self.container_widget)
-
         self.load_button.clicked.connect(self._handle_load_button)
         self.input_gain_slider.valueChanged.connect(self._on_input_gain_changed)
         self.mix_slider.valueChanged.connect(self._on_mix_changed)
         self.output_gain_slider.valueChanged.connect(self._on_output_gain_changed)
         self.bypass_checkbox.toggled.connect(self.node_logic.set_bypass)
-
         self.node_logic.emitter.stateUpdated.connect(self._on_state_updated)
 
     def _create_slider_control(self, name: str, min_val: float, max_val: float, fmt: str) -> tuple[QSlider, QLabel]:
@@ -184,24 +160,20 @@ class ConvolutionReverbNodeItem(NodeItem):
 
     @Slot(int)
     def _on_input_gain_changed(self, value: int):
-        logical_val = self._map_slider_value_to_logical(self.input_gain_slider, value)
-        self.node_logic.set_input_gain_db(logical_val)
+        self.node_logic.set_input_gain_db(self._map_slider_value_to_logical(self.input_gain_slider, value))
 
     @Slot(int)
     def _on_mix_changed(self, value: int):
-        logical_val = self._map_slider_value_to_logical(self.mix_slider, value)
-        self.node_logic.set_mix(logical_val)
+        self.node_logic.set_mix(self._map_slider_value_to_logical(self.mix_slider, value))
 
     @Slot(int)
     def _on_output_gain_changed(self, value: int):
-        logical_val = self._map_slider_value_to_logical(self.output_gain_slider, value)
-        self.node_logic.set_output_gain_db(logical_val)
+        self.node_logic.set_output_gain_db(self._map_slider_value_to_logical(self.output_gain_slider, value))
 
     @Slot(dict)
     def _on_state_updated(self, state: dict):
         status = state.get("status", "Unknown")
         self.status_label.setText(f"Status: {status}")
-
         ir_filepath = state.get("ir_filepath")
         if ir_filepath:
             self.filename_label.setText(f"File: {os.path.basename(ir_filepath)}")
@@ -209,32 +181,27 @@ class ConvolutionReverbNodeItem(NodeItem):
         else:
             self.filename_label.setText("File: None")
             self.filename_label.setToolTip("")
-
         if "Error" in status:
             self.status_label.setStyleSheet("color: red;")
         elif "Loading" in status:
             self.status_label.setStyleSheet("color: orange;")
         else:
             self.status_label.setStyleSheet("color: lightgreen;")
-
         sliders_map = {
             "input_gain_db": (self.input_gain_slider, self.input_gain_label),
             "mix": (self.mix_slider, self.mix_label),
             "output_gain_db": (self.output_gain_slider, self.output_gain_label),
         }
-
         for key, (slider, label) in sliders_map.items():
             value = state.get(key, slider.property("min_val"))
             is_connected = key in self.node_logic.inputs and self.node_logic.inputs[key].connections
             slider.setEnabled(not is_connected)
-
             with QSignalBlocker(slider):
                 slider.setValue(self._map_logical_to_slider_value(slider, value))
             label_text = f"{slider.property('name')}: {slider.property('format').format(value)}"
             if is_connected:
                 label_text += " (ext)"
             label.setText(label_text)
-
         with QSignalBlocker(self.bypass_checkbox):
             self.bypass_checkbox.setChecked(state.get("bypass", False))
 
@@ -246,7 +213,7 @@ class ConvolutionReverbNodeItem(NodeItem):
 
 
 # ==============================================================================
-# 4. Node Logic Class (ConvolutionReverbNode)
+# 4. Node Logic Class (ConvolutionReverbNode) - REWRITTEN FOR PERFORMANCE
 # ==============================================================================
 class ConvolutionReverbNode(Node):
     NODE_TYPE = "Convolution Reverb"
@@ -262,92 +229,84 @@ class ConvolutionReverbNode(Node):
         self.add_input("mix", data_type=float)
         self.add_input("output_gain_db", data_type=float)
         self.add_output("out", data_type=torch.Tensor)
+
         self._lock = threading.Lock()
+
+        # --- Target parameters set by UI/Sockets ---
         self._ir_filepath: Optional[str] = None
         self._input_gain_db: float = 0.0
         self._output_gain_db: float = 0.0
         self._mix: float = 0.5
         self._bypass: bool = False
+
+        # --- Smoothed parameters for processing ---
+        self._current_input_gain = 1.0
+        self._current_output_gain = 1.0
+        self._current_mix = 0.5
+        self._smoothing_coeff = 1.0 - np.exp(-1 / (0.01 * (DEFAULT_SAMPLERATE / DEFAULT_BLOCKSIZE)))
+
+        # --- DSP State ---
         self._status: str = "No IR Loaded"
         self._is_loading: bool = False
-
-        self._ir_partitions_fft: List[torch.Tensor] = []
+        self._ir_partitions_fft: Optional[torch.Tensor] = None
         self._input_fft_history: Optional[torch.Tensor] = None
         self._history_idx: int = 0
         self._overlap_add_buffer: Optional[torch.Tensor] = None
         self._expected_channels: Optional[int] = None
-        # Optimization: Pre-allocated buffers
-        self._dry_signal_gained = None
-        self._wet_signal_gained = None
-        self._dry_signal_mixed = None
-        self._final_output = None
-        self._last_shape = None
+
         self.ir_loader_signaller = IRLoadSignaller()
         self.ir_loader_signaller.load_finished.connect(self._on_ir_load_finished)
 
     def load_file(self, file_path: str):
-        state_snapshot = None
         with self._lock:
             if self._is_loading:
-                logger.warning(f"[{self.name}] Load request ignored, already loading.")
                 return
             self._is_loading = True
             self._ir_filepath = file_path
             self._status = "Loading..."
-            state_snapshot = self._get_current_state_snapshot_locked()
-
-        self.emitter.stateUpdated.emit(state_snapshot)
-
+        self.emitter.stateUpdated.emit(self._get_current_state_snapshot_locked())
         runnable = IRLoadRunnable(weakref.ref(self), file_path, DEFAULT_SAMPLERATE, self.ir_loader_signaller)
         QThreadPool.globalInstance().start(runnable)
 
     @Slot(tuple)
     def _on_ir_load_finished(self, result: tuple):
-        result_type, data, file_path = result
-        state_snapshot = None
+        status, data, filepath = result
         with self._lock:
-            if file_path != self._ir_filepath:
-                logger.warning(f"[{self.name}] Ignoring stale load result for {file_path}")
+            if filepath != self._ir_filepath:
                 return
             self._is_loading = False
-            if result_type == "success":
+            if status == "success":
                 self._ir_partitions_fft = data
-                if self._expected_channels is not None:
-                    self._reset_dsp_state_locked(self._expected_channels)
                 self._status = "Ready"
+                self._reset_dsp_state_locked(self._expected_channels or 1)
             else:
-                self._ir_partitions_fft = []
+                self._ir_partitions_fft = None
                 self._status = f"Error: {data}"
-            state_snapshot = self._get_current_state_snapshot_locked()
-        self.emitter.stateUpdated.emit(state_snapshot)
+        self.emitter.stateUpdated.emit(self._get_current_state_snapshot_locked())
 
     @Slot(float)
     def set_input_gain_db(self, value: float):
         with self._lock:
             self._input_gain_db = value
-            state = self._get_current_state_snapshot_locked()
-        self.emitter.stateUpdated.emit(state)
+        self.emitter.stateUpdated.emit(self.get_current_state_snapshot())
 
     @Slot(float)
     def set_output_gain_db(self, value: float):
         with self._lock:
             self._output_gain_db = value
-            state = self._get_current_state_snapshot_locked()
-        self.emitter.stateUpdated.emit(state)
+        self.emitter.stateUpdated.emit(self.get_current_state_snapshot())
 
     @Slot(float)
     def set_mix(self, value: float):
         with self._lock:
             self._mix = np.clip(value, 0.0, 1.0).item()
-            state = self._get_current_state_snapshot_locked()
-        self.emitter.stateUpdated.emit(state)
+        self.emitter.stateUpdated.emit(self.get_current_state_snapshot())
 
     @Slot(bool)
     def set_bypass(self, value: bool):
         with self._lock:
             self._bypass = value
-            state = self._get_current_state_snapshot_locked()
-        self.emitter.stateUpdated.emit(state)
+        self.emitter.stateUpdated.emit(self.get_current_state_snapshot())
 
     def _get_current_state_snapshot_locked(self) -> Dict:
         return {
@@ -365,9 +324,9 @@ class ConvolutionReverbNode(Node):
 
     def _reset_dsp_state_locked(self, num_channels: int):
         self._expected_channels = num_channels
-        num_ir_partitions = len(self._ir_partitions_fft)
-        if num_ir_partitions > 0:
-            fft_bins = self._ir_partitions_fft[0].shape[0]
+        if self._ir_partitions_fft is not None:
+            num_ir_partitions = self._ir_partitions_fft.shape[0]
+            fft_bins = self._ir_partitions_fft.shape[2]
             self._input_fft_history = torch.zeros(
                 (num_ir_partitions, num_channels, fft_bins), dtype=DEFAULT_COMPLEX_DTYPE
             )
@@ -378,130 +337,79 @@ class ConvolutionReverbNode(Node):
         logger.debug(f"[{self.name}] DSP state reset for {num_channels} channels.")
 
     def process(self, input_data: dict) -> dict:
-        dry_signal = input_data.get("in")
-        if dry_signal is None:
+        signal = input_data.get("in")
+        if not isinstance(signal, torch.Tensor):
             return {"out": None}
 
-        # --- State Update from Sockets ---
-        state_snapshot_to_emit = None
-        with self._lock:
-            ui_update_needed = False
+        with torch.no_grad():
+            if signal.shape[1] != PARTITION_SIZE:
+                padded_signal = torch.zeros((signal.shape[0], PARTITION_SIZE), dtype=DEFAULT_DTYPE)
+                copy_len = min(signal.shape[1], PARTITION_SIZE)
+                padded_signal[:, :copy_len] = signal[:, :copy_len]
+                signal = padded_signal
 
-            # Check for socket inputs and update the node's internal state.
-            input_gain_db_socket = input_data.get("input_gain_db")
-            if input_gain_db_socket is not None:
-                try:
-                    val = float(input_gain_db_socket)
-                    if self._input_gain_db != val:
-                        self._input_gain_db = val
-                        ui_update_needed = True
-                except (ValueError, TypeError):
-                    pass
+            with self._lock:
+                input_gain_socket = input_data.get("input_gain_db")
+                if input_gain_socket is not None:
+                    self._input_gain_db = float(input_gain_socket)
+                output_gain_socket = input_data.get("output_gain_db")
+                if output_gain_socket is not None:
+                    self._output_gain_db = float(output_gain_socket)
+                mix_socket = input_data.get("mix")
+                if mix_socket is not None:
+                    self._mix = np.clip(float(mix_socket), 0.0, 1.0)
 
-            output_gain_db_socket = input_data.get("output_gain_db")
-            if output_gain_db_socket is not None:
-                try:
-                    val = float(output_gain_db_socket)
-                    if self._output_gain_db != val:
-                        self._output_gain_db = val
-                        ui_update_needed = True
-                except (ValueError, TypeError):
-                    pass
+                target_input_gain = 10 ** (self._input_gain_db / 20.0)
+                target_output_gain = 10 ** (self._output_gain_db / 20.0)
+                target_mix = self._mix
 
-            mix_socket = input_data.get("mix")
-            if mix_socket is not None:
-                try:
-                    val = np.clip(float(mix_socket), 0.0, 1.0)
-                    if self._mix != val:
-                        self._mix = val
-                        ui_update_needed = True
-                except (ValueError, TypeError):
-                    pass
+                self._current_input_gain += self._smoothing_coeff * (target_input_gain - self._current_input_gain)
+                self._current_output_gain += self._smoothing_coeff * (target_output_gain - self._current_output_gain)
+                self._current_mix += self._smoothing_coeff * (target_mix - self._current_mix)
 
-            # If the state changed, prepare a snapshot to be emitted after releasing the lock.
-            if ui_update_needed:
-                state_snapshot_to_emit = self._get_current_state_snapshot_locked()
+                if self._bypass or self._ir_partitions_fft is None:
+                    return {"out": signal}
 
-            # Get parameters for this processing tick using the most up-to-date state.
-            input_gain_db = self._input_gain_db
-            output_gain_db = self._output_gain_db
-            mix = self._mix
-            bypass = self._bypass
-            has_ir = bool(self._ir_partitions_fft)
+                num_channels = signal.shape[0]
+                if self._expected_channels != num_channels:
+                    self._reset_dsp_state_locked(num_channels)
 
-        # Emit the signal after the lock is released to avoid holding it during signal emission.
-        if state_snapshot_to_emit:
-            self.emitter.stateUpdated.emit(state_snapshot_to_emit)
+                if self._input_fft_history is None:
+                    return {"out": signal}
 
-        # --- Audio Processing ---
-        input_gain = 10 ** (input_gain_db / 20.0)
-        output_gain = 10 ** (output_gain_db / 20.0)
+                gained_signal = signal * self._current_input_gain
+                input_fft = torch.fft.rfft(gained_signal, n=FFT_SIZE, dim=1).to(DEFAULT_COMPLEX_DTYPE)
 
-        if bypass or not has_ir:
-            return {"out": dry_signal}
+                self._history_idx = (self._history_idx + 1) % self._input_fft_history.shape[0]
+                self._input_fft_history[self._history_idx] = input_fft
 
-        # Ensure dry_signal has proper dimensions
-        if dry_signal.dim() == 1:
-            dry_signal = dry_signal.unsqueeze(0)
+                rolled_history = torch.roll(self._input_fft_history, shifts=-self._history_idx - 1, dims=0)
+                convolved_partitions = rolled_history * self._ir_partitions_fft
+                output_fft_sum = torch.sum(convolved_partitions, dim=0)
 
-        num_channels, num_samples = dry_signal.shape
-        if num_samples != PARTITION_SIZE:
-            logger.warning(
-                f"[{self.name}] Input block size ({num_samples}) differs from partition size ({PARTITION_SIZE}). Skipping."
-            )
-            return {"out": dry_signal}
+                # --- FIX: Use the full IFFT result for correct overlap-add ---
+                full_ifft = torch.fft.irfft(output_fft_sum, n=FFT_SIZE, dim=1)
 
-        # Check for buffer reallocation (only on shape change)
-        current_shape = dry_signal.shape
-        if self._last_shape != current_shape:
-            self._dry_signal_gained = torch.empty_like(dry_signal)
-            self._wet_signal_gained = torch.empty_like(dry_signal)
-            self._dry_signal_mixed = torch.empty_like(dry_signal)
-            self._final_output = torch.empty_like(dry_signal)
-            self._last_shape = current_shape
+                # The first half is added to the previous block's tail
+                wet_signal = (full_ifft[:, :PARTITION_SIZE] + self._overlap_add_buffer).to(DEFAULT_DTYPE)
 
-        # In-place operations using pre-allocated buffers
-        torch.multiply(dry_signal, input_gain, out=self._dry_signal_gained)
+                # The second half becomes the new tail for the *next* block
+                self._overlap_add_buffer = full_ifft[:, PARTITION_SIZE:].to(DEFAULT_DTYPE)
 
-        with self._lock:
-            if self._expected_channels != num_channels:
-                self._reset_dsp_state_locked(num_channels)
-            if self._input_fft_history is None or not self._ir_partitions_fft:
-                return {"out": dry_signal}
+                wet_signal_gained = wet_signal * self._current_output_gain
 
-            input_fft = torch.fft.rfft(self._dry_signal_gained, n=FFT_SIZE, dim=1)
+                output_signal = (signal * (1.0 - self._current_mix)) + (wet_signal_gained * self._current_mix)
 
-            self._history_idx = (self._history_idx + 1) % self._input_fft_history.shape[0]
-            self._input_fft_history[self._history_idx] = input_fft
-
-            output_fft_sum = torch.zeros_like(input_fft)
-            num_parts = len(self._ir_partitions_fft)
-            history_len = self._input_fft_history.shape[0]
-
-            for i in range(num_parts):
-                history_index = (self._history_idx - i + history_len) % history_len
-                output_fft_sum += self._input_fft_history[history_index] * self._ir_partitions_fft[i].unsqueeze(0)
-
-            convolved_block = torch.fft.irfft(output_fft_sum, n=FFT_SIZE, dim=1)
-
-            wet_signal = (convolved_block[:, :PARTITION_SIZE] + self._overlap_add_buffer).to(DEFAULT_DTYPE)
-            self._overlap_add_buffer = convolved_block[:, PARTITION_SIZE:].to(DEFAULT_DTYPE)
-
-        # In-place operations using pre-allocated buffers
-        torch.multiply(wet_signal, output_gain, out=self._wet_signal_gained)
-        torch.multiply(dry_signal, (1.0 - mix), out=self._dry_signal_mixed)
-        torch.add(self._dry_signal_mixed, self._wet_signal_gained, out=self._final_output)
-
-        return {"out": self._final_output}
+        return {"out": output_signal}
 
     def start(self):
-        super().start()
         with self._lock:
-            if self._expected_channels:
-                self._reset_dsp_state_locked(self._expected_channels)
+            self._reset_dsp_state_locked(self._expected_channels or 1)
+            self._current_input_gain = 10 ** (self._input_gain_db / 20.0)
+            self._current_output_gain = 10 ** (self._output_gain_db / 20.0)
+            self._current_mix = self._mix
 
     def remove(self):
-        logger.info(f"[{self.name}] Remove called.")
         self.ir_loader_signaller.load_finished.disconnect(self._on_ir_load_finished)
         super().remove()
 
@@ -521,7 +429,6 @@ class ConvolutionReverbNode(Node):
             self._output_gain_db = data.get("output_gain_db", 0.0)
             self._mix = data.get("mix", 0.5)
             self._bypass = data.get("bypass", False)
-
         filepath = data.get("ir_filepath")
         if filepath and os.path.exists(filepath):
             self.load_file(filepath)

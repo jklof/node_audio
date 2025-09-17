@@ -46,11 +46,40 @@ class Engine:
         self._cached_plan: list[tuple[Node, dict[str, Socket], dict[str, Any]]] | None = None
 
         self._state = EngineState.STOPPED
-        self._stop_event = threading.Event()  # Used to gracefully exit the processing thread
-
+        self._stop_event = threading.Event()
         self._tick_semaphore = threading.Semaphore(0)
+        self._processing_thread: threading.Thread | None = None
+
+        # Start the initial processing thread
+        self._start_processing_thread()
+
+    def _start_processing_thread(self):
+        """Creates and starts a new processing thread. Safe to call only when thread is confirmed stopped."""
+        if self._processing_thread is not None and self._processing_thread.is_alive():
+            logger.warning("Engine: Attempted to start a thread when one was already running.")
+            return
+        self._stop_event.clear()
         self._processing_thread = threading.Thread(target=self._processing_loop, daemon=True)
         self._processing_thread.start()
+        logger.info("Engine: Processing thread started.")
+
+    def _synchronous_stop_processing_thread(self):
+        """Signals the processing thread to stop and waits (joins) until it has fully terminated."""
+        if self._processing_thread is None or not self._processing_thread.is_alive():
+            return
+
+        logger.info("Engine: Beginning synchronous stop of processing thread...")
+        self._stop_event.set()
+        # Release the semaphore one last time to unblock the thread if it's waiting on acquire()
+        self._tick_semaphore.release()
+
+        # Wait for the thread to finish its loop and exit. This is the critical synchronous step.
+        self._processing_thread.join(timeout=2.0)
+        if self._processing_thread.is_alive():
+            logger.error("Engine: Processing thread failed to stop gracefully within the timeout!")
+
+        self._processing_thread = None
+        logger.info("Engine: Processing thread has been successfully stopped and joined.")
 
     def tick(self):
         # Only release the semaphore if the engine is actively running
@@ -218,7 +247,6 @@ class Engine:
         error_to_emit = None
 
         with self._lock:
-            # Guard against starting if not in a stopped state.
             if self._state != EngineState.STOPPED:
                 logger.warning(f"Engine: Cannot start processing. Current state is {self._state.name}.")
                 return
@@ -228,7 +256,6 @@ class Engine:
 
             self._invalidate_plan_cache()
 
-            # Call start() and clear errors on ALL nodes first.
             for node in self.graph.nodes.values():
                 try:
                     node.clear_error_state()
@@ -251,14 +278,11 @@ class Engine:
                 else:
                     logger.warning("Engine: Starting processing without an active clock source.")
 
-            # Atomically decide the final state and which signals to emit
             if error_to_emit:
-                self._state = EngineState.STOPPED  # Revert state on failure
+                self._state = EngineState.STOPPED
             else:
                 self._state = EngineState.RUNNING
 
-        # --- Now emit signals outside the lock ---
-        # Emit graph changed to ensure UI clears any old error states
         self._emit_graph_changed()
 
         if error_to_emit:
@@ -275,7 +299,6 @@ class Engine:
 
         clock_node_id = self.graph.selected_clock_node_id
 
-        # Stop the active clock source
         if clock_node_id and clock_node_id in self.graph.nodes:
             clock_node = self.graph.nodes[clock_node_id]
             if isinstance(clock_node, IClockProvider):
@@ -291,7 +314,6 @@ class Engine:
 
     def stop_processing(self):
         with self._lock:
-            # Guard against stopping if not running.
             if self._state != EngineState.RUNNING:
                 return
             self._stop_processing_locked()
@@ -503,35 +525,32 @@ class Engine:
         """
         Performs a full, transactional reload of plugins and the graph.
         This is a blocking operation that ensures thread safety.
-        1. Stops the processing engine completely.
-        2. Serializes the current graph to memory.
-        3. Clears the graph and all nodes.
-        4. Reloads the python plugin modules.
-        5. Re-loads the graph from the serialized data using the new classes.
-        6. Restarts the engine if it was previously running.
         """
-        # 1. Check state and stop the engine synchronously.
+        logger.info("Engine: Starting plugin reload transaction.")
+
+        # 1. Synchronously stop all processing.
         was_running = self._state == EngineState.RUNNING
         if was_running:
             self.stop_processing()
-            # At this point, all audio threads are guaranteed to be stopped and joined.
+
+        # --- FIX: Synchronously stop the entire processing thread ---
+        # This guarantees the audio thread is not accessing any graph data.
+        self._synchronous_stop_processing_thread()
 
         # 2. Serialize the graph state to an in-memory dictionary.
-        # This must be done while the graph still exists.
-        graph_data = {
-            "nodes": [node.to_dict() for node in self.graph.nodes.values()],
-            "connections": [conn.to_dict() for conn in self.graph.connections.values()],
-            "clock_source_id": self.graph.selected_clock_node_id,
-        }
+        with self._lock:
+            graph_data = {
+                "nodes": [node.to_dict() for node in self.graph.nodes.values()],
+                "connections": [conn.to_dict() for conn in self.graph.connections.values()],
+                "clock_source_id": self.graph.selected_clock_node_id,
+            }
 
         # 3. Clear the graph completely.
         with self._lock:
             self._clear_graph_locked()
-
-        # This emit is necessary to make the UI clear itself before reloading.
         self._emit_graph_changed()
 
-        # 4. Reload the plugin modules. This is done outside of any lock.
+        # 4. Reload the python plugin modules.
         reload_plugin_modules(module_names)
 
         # 5. Re-load the graph from the dictionary.
@@ -541,11 +560,18 @@ class Engine:
             error_msg = f"Failed to reload graph from memory: {e}"
             logger.error(error_msg, exc_info=True)
             self.signals.processingError.emit(error_msg)
+            # --- FIX: Restart the thread even on failure to restore a working state ---
+            self._start_processing_thread()
             return
+
+        # --- FIX: Restart the processing thread ---
+        self._start_processing_thread()
 
         # 6. Restart processing if it was running before.
         if was_running:
             self.start_processing()
+
+        logger.info("Engine: Plugin reload transaction complete.")
 
     def shutdown(self):
         """
@@ -555,31 +581,21 @@ class Engine:
         logger.info("Engine: Shutting down...")
 
         # 1. Stop the clock source (e.g., audio device) synchronously.
-        # This will stop new ticks from being generated.
-        self.stop_processing()
+        if self._state == EngineState.RUNNING:
+            self.stop_processing()
 
         # 2. Stop the engine's own processing thread. This is the most critical step.
-        # We must ensure no more `node.process()` calls can occur before we start
-        # tearing down the nodes themselves.
-        self._stop_event.set()
-        # Release the semaphore one last time to unblock the thread if it's waiting
-        self._tick_semaphore.release()
-        if self._processing_thread.is_alive():
-            logger.info("Engine: Waiting for processing thread to terminate...")
-            self._processing_thread.join(timeout=2)
-            if self._processing_thread.is_alive():
-                logger.warning("Engine: Processing thread did not exit gracefully.")
+        self._synchronous_stop_processing_thread()
 
         logger.info("Engine: Processing thread stopped. Cleaning up nodes...")
 
         # 3. Now that all processing is guaranteed to be stopped,
-        # clean up each node's individual resources (e.g., worker threads, files).
+        # clean up each node's individual resources.
         with self._lock:
             nodes_to_remove = list(self.graph.nodes.values())
 
         for node in nodes_to_remove:
             try:
-                # The node's remove() method is responsible for joining its own threads.
                 node.remove()
             except Exception as e:
                 logger.error(f"Error during shutdown while removing node '{node.name}': {e}", exc_info=True)
