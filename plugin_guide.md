@@ -108,6 +108,7 @@ def process(self, input_data: dict) -> dict:
     
     #
     # --- Perform your DSP/processing logic here ---
+    # See Section V for critical real-time guidelines.
     #
     processed_signal = audio_signal * current_intensity
 
@@ -261,4 +262,90 @@ def _on_state_updated(self, state: dict):
     if is_ext_controlled:
          self.intensity_label.setText(f"Intensity: {intensity:.2f} (ext)")
 ```
+
+V. Writing Real-Time Safe Code in process()
+
+The process() method is special. It runs in a high-priority, real-time thread where performance and predictability are critical. An operation that is slow or unpredictable can cause audible glitches ("dropouts"). Follow these rules to ensure your node is well-behaved.
+Rule 1: No Memory Allocations
+
+Avoid creating new Python objects or PyTorch tensors inside process(). Allocations can trigger the Garbage Collector (GC), which may pause the audio thread unpredictably.
+
+    DO NOT create new tensors with torch.tensor(), torch.zeros(), torch.empty(), etc.
+
+    DO NOT create lists, dictionaries, or other Python objects inside the process() method.
+
+Solution: Pre-allocation.
+Allocate all necessary buffers once in the __init__ method. If their size depends on the input signal, create a _resize_buffers(shape) method that re-allocates them only when the input shape changes. The CompressorNode is the canonical example of this pattern.
+Rule 2: Use Vectorized Operations
+
+Never use Python loops (for, while) to iterate over samples in a tensor. A single PyTorch operation is thousands of times faster.
+
+    BAD (Slow):
+```Python
+# NEVER DO THIS in process()
+output = torch.empty_like(signal)
+for i in range(signal.shape[1]):
+    output[0, i] = signal[0, i] * 0.5
+```
   
+GOOD (Fast):
+```Python
+    # This is a single, highly-optimized operation.
+    output = signal * 0.5
+```
+      
+
+Rule 3: Use In-Place Operations to Avoid Temporaries
+
+Even simple vectorized operations can create hidden "temporary" tensors. Use in-place functions to write results directly into pre-allocated buffers.
+
+    OK, but creates a temporary tensor:
+    code Python
+
+```Python
+# `signal / 20.0` creates a new tensor to hold the result
+# before passing it to torch.pow.
+torch.pow(10.0, signal / 20.0, out=self.output_buffer)
+```
+  
+
+BETTER (No temporary tensor):
+```Python
+# 1. First, divide in-place into the original buffer.
+torch.div(signal, 20.0, out=signal)
+# 2. Then, use the modified buffer for the next step.
+torch.pow(10.0, signal, out=self.output_buffer)
+```
+  
+
+BEST (Chained in-place):
+```Python
+    # The `out=` argument returns a reference to the output buffer,
+    # allowing you to chain an in-place method call (`mul_`).
+    torch.log10(signal, out=self.output_buffer).mul_(10.0)
+```
+      
+    (Note: Look for functions with a trailing underscore like mul_, add_, sub_ for in-place versions).
+
+Rule 4: Minimize Time Spent Under Lock
+
+The threading.Lock is essential for safe communication with the UI thread, but it can block the real-time thread. Keep the code inside the with self._lock: block as short as possible.
+
+    BAD (DSP logic is locked):
+```Python
+with self._lock:
+    current_intensity = self._intensity
+    # This complex DSP is unnecessarily blocking the UI from setting a new intensity.
+    processed_signal = some_very_slow_torch_function(signal, current_intensity)
+```  
+
+GOOD (Only state copy is locked):
+```Python        
+    with self._lock:
+        # Quickly copy the shared parameter to a local variable.
+        current_intensity = self._intensity
+
+    # Perform all heavy calculations AFTER the lock is released.
+    processed_signal = some_very_slow_torch_function(signal, current_intensity)
+```
+

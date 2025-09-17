@@ -156,7 +156,6 @@ class CompressorNode(Node):
 
         self._power_buffer = torch.empty(signal_shape, dtype=DEFAULT_DTYPE)
         self._sidechain_power = torch.empty(block_size, dtype=DEFAULT_DTYPE)
-        # --- FIX: Allocate the indices buffer with torch.long dtype ---
         self._indices_buffer = torch.empty(block_size, dtype=torch.long)
 
         self._downsampled_sidechain = torch.empty(downsampled_size, dtype=DEFAULT_DTYPE)
