@@ -42,7 +42,7 @@ class STFTNodeItem(NodeItem):
 
         layout.addWidget(QLabel("Window Size (Overlap):"))
         self.window_size_combo = QComboBox()
-        self.window_sizes = [512, 1024, 2048, 4096]  # Must be >= block_size
+        self.window_sizes = [512, 1024, 2048, 4096, 8192]  # Must be >= block_size
         self.window_size_combo.addItems([f"{s} ({100*(1-DEFAULT_BLOCKSIZE/s):.0f}%)" for s in self.window_sizes])
         layout.addWidget(self.window_size_combo)
 

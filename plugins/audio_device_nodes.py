@@ -369,7 +369,20 @@ class BaseAudioNode(Node):
 
     def refresh_device_list(self):
         logger.info(f"[{self.name}] Logic: Refreshing device list.")
-        stream_was_active = self._stream is not None and self._stream.active
+
+        stream_was_active = False
+        if self._stream is not None:
+            try:
+                # This can fail if the device was disconnected, invalidating the pointer
+                stream_was_active = self._stream.active
+            except sd.PortAudioError as e:
+                logger.warning(
+                    f"[{self.name}] Could not check stream status (it may be invalid): {e}. Assuming inactive."
+                )
+                with self._lock:
+                    self._stream = None  # Discard the invalid stream object
+                stream_was_active = False
+
         if stream_was_active:
             self.stop()
 

@@ -170,6 +170,11 @@ class CompressorNode(Node):
         self._gain_inside = torch.empty(block_size, dtype=DEFAULT_DTYPE)
         self._gain_above = torch.empty(block_size, dtype=DEFAULT_DTYPE)
 
+        # Also resize the delay buffer if the number of channels has changed.
+        if self._delay_buffer.shape[0] != _num_channels:
+            logger.debug(f"[{self.name}] Resizing delay buffer for {_num_channels} channels.")
+            self._delay_buffer = torch.zeros((_num_channels, self._delay_samples), dtype=DEFAULT_DTYPE)
+
         self._last_signal_shape = signal_shape
         logger.debug(f"[{self.name}] Resized internal buffers for shape {signal_shape}")
 
