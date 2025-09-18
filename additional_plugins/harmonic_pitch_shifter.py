@@ -1,6 +1,7 @@
 # additional_plugins/harmonic_pitch_shifter.py
 
 import torch
+import torch.nn.functional as F
 import numpy as np
 import threading
 import logging
@@ -58,7 +59,6 @@ class HarmonicPitchShifterNode(Node):
     def __init__(self, name: str, node_id: Optional[str] = None):
         super().__init__(name, node_id)
         self.emitter = NodeStateEmitter()
-
         self.add_input("spectral_frame_in", data_type=SpectralFrame)
         self.add_input("f0_hz_in", data_type=float)
         self.add_input("pitch_shift_st", data_type=float)
@@ -68,9 +68,20 @@ class HarmonicPitchShifterNode(Node):
         self._lock = threading.Lock()
         self._pitch_shift_st: float = 0.0
         self._formant_shift_st: float = 0.0
+
         self._last_input_phases: Optional[torch.Tensor] = None
         self._last_output_phases: Optional[torch.Tensor] = None
         self._last_frame_params: tuple = (0, 0, 0, 0)
+
+        self._freqs_buf: Optional[torch.Tensor] = None
+        self._input_mags_buf: Optional[torch.Tensor] = None
+        self._current_input_phases_buf: Optional[torch.Tensor] = None
+        self._original_envelope_buf: Optional[torch.Tensor] = None
+        self._source_mags_buf: Optional[torch.Tensor] = None
+        self._shifted_source_mags_buf: Optional[torch.Tensor] = None
+        self._shifted_envelope_buf: Optional[torch.Tensor] = None
+        self._final_mags_buf: Optional[torch.Tensor] = None
+        self._propagated_phases_buf: Optional[torch.Tensor] = None
 
     def _reset_state_locked(self):
         self._last_input_phases = None
@@ -103,104 +114,134 @@ class HarmonicPitchShifterNode(Node):
             self.emitter.stateUpdated.emit(state_to_emit)
 
     def _get_current_state_snapshot_locked(self) -> Dict:
-        return {
-            "pitch_shift_st": self._pitch_shift_st,
-            "formant_shift_st": self._formant_shift_st,
-        }
+        return {"pitch_shift_st": self._pitch_shift_st, "formant_shift_st": self._formant_shift_st}
 
     def get_current_state_snapshot(self) -> Dict:
         with self._lock:
             return self._get_current_state_snapshot_locked()
 
-    def _resample_magnitudes(self, magnitudes: torch.Tensor, ratio: float) -> torch.Tensor:
-        num_channels, num_bins = magnitudes.shape
-        if abs(ratio - 1.0) < 1e-6:
-            return magnitudes
-        original_indices = torch.arange(num_bins, dtype=torch.float32, device=magnitudes.device)
-        resampled_indices = original_indices / ratio
-        lower_indices = torch.floor(resampled_indices).long()
-        upper_indices = lower_indices + 1
-        weights = (resampled_indices - lower_indices).unsqueeze(0)
-        lower_indices.clamp_(0, num_bins - 1)
-        upper_indices.clamp_(0, num_bins - 1)
-        mags_at_lower = torch.gather(magnitudes, 1, lower_indices.expand(num_channels, -1))
-        mags_at_upper = torch.gather(magnitudes, 1, upper_indices.expand(num_channels, -1))
-        return mags_at_lower * (1.0 - weights) + mags_at_upper * weights
+    def _resize_buffers_if_needed(self, frame: SpectralFrame) -> bool:
+        """
+        Checks if frame parameters have changed. If so, resizes all buffers and stateful tensors.
+        Returns True if a reset occurred, False otherwise.
+        """
+        num_channels, num_bins = frame.data.shape
+        current_params = (frame.fft_size, frame.sample_rate, num_channels, num_bins)
+        if self._last_frame_params == current_params:
+            return False
 
-    def _get_spectral_envelope(self, magnitudes: torch.Tensor, kernel_size: int = 31) -> torch.Tensor:
+        logger.info(f"[{self.name}] Frame format changed. Re-allocating buffers and resetting state.")
+        self._freqs_buf = torch.fft.rfftfreq(frame.fft_size, d=1.0 / frame.sample_rate)
+
+        # --- Pre-allocated scratch buffers ---
+        self._input_mags_buf = torch.empty((num_channels, num_bins), dtype=torch.float32)
+        self._current_input_phases_buf = torch.empty((num_channels, num_bins), dtype=torch.float32)
+        self._original_envelope_buf = torch.empty((num_channels, num_bins), dtype=torch.float32)
+        self._source_mags_buf = torch.empty((num_channels, num_bins), dtype=torch.float32)
+        self._shifted_source_mags_buf = torch.empty((num_channels, num_bins), dtype=torch.float32)
+        self._shifted_envelope_buf = torch.empty((num_channels, num_bins), dtype=torch.float32)
+        self._final_mags_buf = torch.empty((num_channels, num_bins), dtype=torch.float32)
+        self._propagated_phases_buf = torch.empty((num_channels, num_bins), dtype=torch.float32)
+
+        # --- Stateful phase accumulators ---
+        self._last_input_phases = torch.empty_like(self._current_input_phases_buf)
+        self._last_output_phases = torch.empty_like(self._current_input_phases_buf)
+
+        self._last_frame_params = current_params
+        return True  # Signal that a reset happened
+
+    def _resample_magnitudes(self, magnitudes: torch.Tensor, ratio: float, out_buf: torch.Tensor) -> torch.Tensor:
+        if abs(ratio - 1.0) < 1e-6:
+            out_buf.copy_(magnitudes)
+            return out_buf
+
+        resampled = F.interpolate(
+            magnitudes.unsqueeze(0), scale_factor=ratio, mode="linear", align_corners=False, recompute_scale_factor=True
+        )
+
+        num_bins = magnitudes.shape[1]
+        diff = num_bins - resampled.shape[2]
+        if diff > 0:
+            resampled = F.pad(resampled, (0, diff))
+        elif diff < 0:
+            resampled = resampled[:, :, :num_bins]
+
+        out_buf.copy_(resampled.squeeze(0))
+        return out_buf
+
+    def _get_spectral_envelope(
+        self, magnitudes: torch.Tensor, frame: SpectralFrame, out_buf: torch.Tensor
+    ) -> torch.Tensor:
+        freq_per_bin = frame.sample_rate / frame.fft_size
+        kernel_size = int(150 / freq_per_bin)
+        if kernel_size < 3:
+            kernel_size = 3
         if kernel_size % 2 == 0:
             kernel_size += 1
-        padded_mags = torch.nn.functional.pad(
-            magnitudes.unsqueeze(1), (kernel_size // 2, kernel_size // 2), mode="reflect"
-        )
-        envelope = torch.nn.functional.avg_pool1d(padded_mags, kernel_size=kernel_size, stride=1, padding=0)
-        return envelope.squeeze(1)
+
+        padded_mags = F.pad(magnitudes.unsqueeze(1), (kernel_size // 2, kernel_size // 2), mode="reflect")
+        envelope = F.avg_pool1d(padded_mags, kernel_size=kernel_size, stride=1, padding=0)
+        out_buf.copy_(envelope.squeeze(1))
+        return out_buf
 
     def _process_frame_harmonic(
         self, frame: SpectralFrame, f0_hz: float, pitch_ratio: float, formant_ratio: float
     ) -> torch.Tensor:
-        freqs = torch.fft.rfftfreq(frame.fft_size, d=1.0 / frame.sample_rate, device=frame.data.device)
-        input_magnitudes = torch.abs(frame.data)
-        current_input_phases = torch.angle(frame.data)
+        torch.abs(frame.data, out=self._input_mags_buf)
+        torch.angle(frame.data, out=self._current_input_phases_buf)
 
-        # --- CORRECTED LOGIC ---
-        # 1. Get the source signal (harmonics) and the filter (envelope) from the ORIGINAL input
-        original_envelope = self._get_spectral_envelope(input_magnitudes)
-        source_magnitudes = input_magnitudes / (original_envelope + EPSILON)
+        self._get_spectral_envelope(self._input_mags_buf, frame, out_buf=self._original_envelope_buf)
+        torch.div(self._input_mags_buf, self._original_envelope_buf + EPSILON, out=self._source_mags_buf)
 
-        # 2. Shift source and filter INDEPENDENTLY
-        shifted_source_magnitudes = self._resample_magnitudes(source_magnitudes, pitch_ratio)
-        shifted_envelope = self._resample_magnitudes(original_envelope, formant_ratio)
+        self._resample_magnitudes(self._source_mags_buf, pitch_ratio, out_buf=self._shifted_source_mags_buf)
+        self._resample_magnitudes(self._original_envelope_buf, formant_ratio, out_buf=self._shifted_envelope_buf)
 
-        # 3. Recombine them to get the final magnitudes
-        final_magnitudes = shifted_source_magnitudes * shifted_envelope
+        torch.mul(self._shifted_source_mags_buf, self._shifted_envelope_buf, out=self._final_mags_buf)
 
-        # 4. Determine phase logic based on F0
+        expected_phase_advance = 2 * torch.pi * frame.hop_size * self._freqs_buf
+        phase_deviation = self._current_input_phases_buf - self._last_input_phases - expected_phase_advance
+        torch.fmod(phase_deviation + torch.pi, 2 * torch.pi, out=phase_deviation)
+        phase_deviation -= torch.pi
+
+        true_freq_hz = (expected_phase_advance + phase_deviation) / (2 * torch.pi * frame.hop_size / frame.sample_rate)
+        shifted_freq_hz = true_freq_hz * pitch_ratio
+        new_phase_advance = shifted_freq_hz * (2 * torch.pi * frame.hop_size / frame.sample_rate)
+
+        torch.add(self._last_output_phases, new_phase_advance, out=self._propagated_phases_buf)
+
         is_voiced = f0_hz is not None and f0_hz > MIN_VOICED_F0
-
         if is_voiced:
-            bin_width_hz = frame.sample_rate / frame.fft_size
-            harmonic_indices = freqs / f0_hz
+            harmonic_indices = self._freqs_buf / f0_hz
             deviation = torch.abs(harmonic_indices - torch.round(harmonic_indices))
-            harmonic_mask = deviation < (bin_width_hz / (f0_hz + EPSILON)) * 2.5
+            harmonic_strength = 1.0 - 2.0 * deviation
+            harmonic_strength.clamp_(0.0, 1.0)
 
-            expected_phase_advance = 2 * np.pi * frame.hop_size * freqs
-            phase_deviation = current_input_phases - self._last_input_phases - expected_phase_advance
-            phase_deviation = torch.fmod(phase_deviation + np.pi, 2 * np.pi) - np.pi
-            true_freq_hz = (expected_phase_advance + phase_deviation) * frame.sample_rate / (2 * np.pi * frame.hop_size)
-            shifted_freq_hz = true_freq_hz * pitch_ratio
-            new_phase_advance = shifted_freq_hz * (2 * np.pi * frame.hop_size / frame.sample_rate)
-            propagated_phases = self._last_output_phases + new_phase_advance
-
-            final_phases = torch.where(harmonic_mask, propagated_phases, current_input_phases)
+            final_phases = torch.lerp(self._current_input_phases_buf, self._propagated_phases_buf, harmonic_strength)
         else:
-            final_phases = current_input_phases
+            final_phases = self._current_input_phases_buf
 
-        self._last_input_phases = current_input_phases
-        self._last_output_phases = torch.fmod(final_phases, 2 * np.pi)
+        self._last_input_phases.copy_(self._current_input_phases_buf)
+        torch.fmod(self._propagated_phases_buf, 2 * torch.pi, out=self._last_output_phases)
 
-        return torch.polar(final_magnitudes, final_phases)
+        return torch.polar(self._final_mags_buf, final_phases)
 
     def process(self, input_data: dict) -> dict:
         frame = input_data.get("spectral_frame_in")
         if not isinstance(frame, SpectralFrame):
             return {"spectral_frame_out": None}
 
-        num_channels, _ = frame.data.shape
-        current_frame_params = (frame.fft_size, frame.hop_size, frame.sample_rate, num_channels)
+        was_reset = self._resize_buffers_if_needed(frame)
+
+        # On the very first frame, or after a resize, prime the state and pass original frame through
+        if self._last_input_phases is None or was_reset:
+            # Angle calculation is cheap, safe to do here.
+            self._last_input_phases.copy_(torch.angle(frame.data))
+            self._last_output_phases.copy_(torch.angle(frame.data))
+            return {"spectral_frame_out": frame}
 
         state_snapshot_to_emit = None
+        effective_pitch, effective_formant = 0.0, 0.0
         with self._lock:
-            if self._last_frame_params != current_frame_params:
-                self._reset_state_locked()
-                self._last_frame_params = current_frame_params
-                logger.info(f"[{self.name}] Frame format changed. State has been reset.")
-
-            if self._last_input_phases is None:
-                self._last_input_phases = torch.angle(frame.data)
-                self._last_output_phases = torch.angle(frame.data)
-                return {"spectral_frame_out": frame}
-
             ui_update_needed = False
             pitch_socket_val = input_data.get("pitch_shift_st")
             formant_socket_val = input_data.get("formant_shift_st")
@@ -211,22 +252,20 @@ class HarmonicPitchShifterNode(Node):
             if self._pitch_shift_st != effective_pitch:
                 self._pitch_shift_st = effective_pitch
                 ui_update_needed = True
-
             if self._formant_shift_st != effective_formant:
                 self._formant_shift_st = effective_formant
                 ui_update_needed = True
-
             if ui_update_needed:
                 state_snapshot_to_emit = self._get_current_state_snapshot_locked()
 
-            pitch_ratio = 2 ** (effective_pitch / 12.0)
-            formant_ratio = 2 ** (effective_formant / 12.0)
-            f0_hz = input_data.get("f0_hz_in")
-
-            shifted_fft_data = self._process_frame_harmonic(frame, f0_hz, pitch_ratio, formant_ratio)
-
         if state_snapshot_to_emit:
             self.emitter.stateUpdated.emit(state_snapshot_to_emit)
+
+        pitch_ratio = 2 ** (effective_pitch / 12.0)
+        formant_ratio = 2 ** (effective_formant / 12.0)
+        f0_hz = input_data.get("f0_hz_in")
+
+        shifted_fft_data = self._process_frame_harmonic(frame, f0_hz, pitch_ratio, formant_ratio)
 
         output_frame = SpectralFrame(
             data=shifted_fft_data.to(DEFAULT_COMPLEX_DTYPE),

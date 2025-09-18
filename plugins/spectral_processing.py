@@ -42,7 +42,7 @@ class STFTNodeItem(NodeItem):
 
         layout.addWidget(QLabel("Window Size (Overlap):"))
         self.window_size_combo = QComboBox()
-        self.window_sizes = [512, 1024, 2048, 4096, 8192]  # Must be >= block_size
+        self.window_sizes = [512, 1024, 2048, 4096]  # Must be >= block_size
         self.window_size_combo.addItems([f"{s} ({100*(1-DEFAULT_BLOCKSIZE/s):.0f}%)" for s in self.window_sizes])
         layout.addWidget(self.window_size_combo)
 
@@ -107,10 +107,15 @@ class STFTNode(Node):
 
     @Slot(int)
     def set_window_size(self, value: int):
+        state_to_emit = None
         with self._lock:
-            self._window_size = value
-            state = {"window_size": self._window_size}
-        self.emitter.stateUpdated.emit(state)
+            if self._window_size != value:
+                self._window_size = value
+                state_to_emit = {"window_size": self._window_size}
+
+        if state_to_emit:
+            self.emitter.stateUpdated.emit(state_to_emit)
+
         self._recalculate_params()
         self.start()
 
@@ -152,6 +157,16 @@ class STFTNode(Node):
                 self._buffer = self._buffer[:, self._hop_size :]
                 return {"spectral_frame_out": output_frame}
         return {"spectral_frame_out": None}
+
+    def serialize_extra(self) -> dict:
+        """Saves the current window size."""
+        with self._lock:
+            return {"window_size": self._window_size}
+
+    def deserialize_extra(self, data: dict):
+        """Loads and applies the window size from saved data."""
+        # Use the public setter to ensure all internal params are recalculated and the UI is updated.
+        self.set_window_size(data.get("window_size", DEFAULT_WINDOW_SIZE))
 
 
 # ==============================================================================
