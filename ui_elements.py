@@ -14,6 +14,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QSlider,
     QLabel,
+    QDial,
+    QComboBox,
 )
 from PySide6.QtGui import QPainter, QPen, QColor, QBrush, QPainterPath, QPainterPathStroker, QAction
 from PySide6.QtCore import Qt, QRectF, QPointF, Signal, Slot, QTimer, QObject, Signal, QSignalBlocker
@@ -478,8 +480,8 @@ EPSILON = 1e-9
 
 class ParameterNodeItem(NodeItem):
     """
-    Generic NodeItem base class that creates slider-based UI controls from a parameter configuration.
-    This handles all the repetitive slider creation, mapping, and state management logic.
+    Generic NodeItem base class that creates UI controls from a parameter configuration.
+    Supports sliders, dials, and combo boxes.
     """
 
     def __init__(self, node_logic, parameters: list[dict], width=200, **kwargs):
@@ -496,9 +498,15 @@ class ParameterNodeItem(NodeItem):
         )
         main_layout.setSpacing(5)
 
-        # Create sliders from parameters list
+        # Create controls from parameters list
         for param in self.parameters:
-            self._create_slider_control(param, main_layout)
+            control_type = param.get("type", "slider")  # default if not specified
+            if control_type == "slider":
+                self._create_slider_control(param, main_layout)
+            elif control_type == "dial":
+                self._create_dial_control(param, main_layout)
+            elif control_type == "combobox":
+                self._create_combobox_control(param, main_layout)
 
         self.setContentWidget(self.container_widget)
 
@@ -507,97 +515,115 @@ class ParameterNodeItem(NodeItem):
         self.updateFromLogic()
 
     def _create_slider_control(self, param: dict, layout: QVBoxLayout):
-        """Creates a slider control and label for a parameter definition."""
-        key = param["key"]
-        name = param["name"]
-        min_val = param["min"]
-        max_val = param["max"]
-        format_str = param["format"]
-        is_log = param.get("is_log", False)
-
-        # Create label
+        """Creates a slider and its label."""
+        key, name = param["key"], param["name"]
         label = QLabel(f"{name}: ...")
-        layout.addWidget(label)
-
-        # Create slider
         slider = QSlider(Qt.Orientation.Horizontal)
         slider.setRange(0, 1000)
+        layout.addWidget(label)
         layout.addWidget(slider)
 
-        # Store control information
-        self._controls[key] = {
-            "slider": slider,
-            "label": label,
-            "format": format_str,
-            "min_val": min_val,
-            "max_val": max_val,
-            "is_log": is_log,
-            "name": name,
-        }
-
-        # Connect slider signal to generic handler
+        self._controls[key] = {**param, "widget": slider, "label": label, "type": "slider"}
         slider.valueChanged.connect(lambda value, k=key: self._on_generic_slider_change(k))
 
+    def _create_dial_control(self, param: dict, layout: QVBoxLayout):
+        """Creates a dial and its label."""
+        key, name = param["key"], param["name"]
+        label = QLabel(f"{name}: ...")
+        dial = QDial()
+        dial.setRange(0, 1000)
+        dial.setNotchesVisible(True)
+        layout.addWidget(label)
+        layout.addWidget(dial)
+
+        self._controls[key] = {**param, "widget": dial, "label": label, "type": "dial"}
+        dial.valueChanged.connect(lambda value, k=key: self._on_generic_slider_change(k))
+
+    def _create_combobox_control(self, param: dict, layout: QVBoxLayout):
+        """Creates a combo box and its label."""
+        key, name = param["key"], param["name"]
+        label = QLabel(f"{name}:")
+        combo = QComboBox()
+        for text, data in param.get("items", []):
+            combo.addItem(text, userData=data)
+        layout.addWidget(label)
+        layout.addWidget(combo)
+
+        self._controls[key] = {**param, "widget": combo, "label": label, "type": "combobox"}
+        combo.currentIndexChanged.connect(lambda idx, k=key: self._on_generic_combobox_change(k))
+
     def _map_slider_to_logical(self, key: str, value: int) -> float:
-        """Maps slider value (0-1000) to logical parameter value."""
+        """Maps slider/dial value (0-1000) to logical parameter value."""
         info = self._controls[key]
         norm = value / 1000.0
-        if info["is_log"]:
-            log_min = np.log10(info["min_val"])
-            log_max = np.log10(info["max_val"])
+        if info.get("is_log", False):
+            log_min = np.log10(info["min"])
+            log_max = np.log10(info["max"])
             return 10 ** (log_min + norm * (log_max - log_min))
         else:
-            return info["min_val"] + norm * (info["max_val"] - info["min_val"])
+            return info["min"] + norm * (info["max"] - info["min"])
 
     def _map_logical_to_slider(self, key: str, value: float) -> int:
-        """Maps logical parameter value to slider value (0-1000)."""
+        """Maps logical parameter value to slider/dial value (0-1000)."""
         info = self._controls[key]
-        if info["is_log"]:
-            log_min = np.log10(info["min_val"])
-            log_max = np.log10(info["max_val"])
+        if info.get("is_log", False):
+            log_min, log_max = np.log10(info["min"]), np.log10(info["max"])
             range_val = log_max - log_min
             if abs(range_val) < EPSILON:
                 return 0
-            safe_val = np.clip(value, info["min_val"], info["max_val"])
+            safe_val = np.clip(value, info["min"], info["max"])
             norm = (np.log10(safe_val) - log_min) / range_val
             return int(round(norm * 1000.0))
         else:
-            range_val = info["max_val"] - info["min_val"]
+            range_val = info["max"] - info["min"]
             if abs(range_val) < EPSILON:
                 return 0
-            norm = (np.clip(value, info["min_val"], info["max_val"]) - info["min_val"]) / range_val
+            norm = (np.clip(value, info["min"], info["max"]) - info["min"]) / range_val
             return int(round(norm * 1000.0))
 
     @Slot(str)
     def _on_generic_slider_change(self, key: str):
-        """Generic handler for slider value changes."""
-        slider = self._controls[key]["slider"]
-        logical_val = self._map_slider_to_logical(key, slider.value())
-
-        # Call the corresponding setter on the logic node
+        """Generic handler for slider/dial value changes."""
+        control = self._controls[key]["widget"]
+        logical_val = self._map_slider_to_logical(key, control.value())
         setter_name = f"set_{key}"
         if hasattr(self.node_logic, setter_name):
-            setter_func = getattr(self.node_logic, setter_name)
-            setter_func(logical_val)
-        else:
-            logger.warning(f"Logic node {self.node_logic.__class__.__name__} has no setter {setter_name}")
+            getattr(self.node_logic, setter_name)(logical_val)
+
+    @Slot(str)
+    def _on_generic_combobox_change(self, key: str):
+        """Generic handler for combobox selection changes."""
+        combo = self._controls[key]["widget"]
+        data = combo.currentData()
+        setter_name = f"set_{key}"
+        if hasattr(self.node_logic, setter_name):
+            getattr(self.node_logic, setter_name)(data)
 
     @Slot(dict)
     def _on_state_updated(self, state: dict):
-        """Updates all sliders and labels based on the incoming state dictionary."""
-        for key, control_info in self._controls.items():
-            value = state.get(key, control_info["min_val"])
+        """Updates all controls based on the incoming state dictionary."""
+        for key, info in self._controls.items():
+            value = state.get(key)
+            widget = info["widget"]
+            label = info["label"]
+            control_type = info["type"]
             is_connected = key in self.node_logic.inputs and self.node_logic.inputs[key].connections
 
-            control_info["slider"].setEnabled(not is_connected)
+            widget.setEnabled(not is_connected)
 
-            with QSignalBlocker(control_info["slider"]):
-                control_info["slider"].setValue(self._map_logical_to_slider(key, value))
+            with QSignalBlocker(widget):
+                if control_type in ("slider", "dial"):
+                    widget.setValue(self._map_logical_to_slider(key, value))
+                    label_text = f"{info['name']}: {info['format'].format(value)}"
+                elif control_type == "combobox":
+                    index = widget.findData(value)
+                    if index != -1:
+                        widget.setCurrentIndex(index)
+                    label_text = f"{info['name']}"
 
-            label_text = f"{control_info['name']}: {control_info['format'].format(value)}"
-            if is_connected:
+            if is_connected and control_type != "combobox":
                 label_text += " (ext)"
-            control_info["label"].setText(label_text)
+            label.setText(label_text)
 
     @Slot()
     def updateFromLogic(self):

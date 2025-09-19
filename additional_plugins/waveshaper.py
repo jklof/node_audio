@@ -10,17 +10,8 @@ from node_system import Node
 from constants import DEFAULT_DTYPE
 
 # --- UI and Qt Imports ---
-from ui_elements import ParameterNodeItem, NodeItem, NodeStateEmitter, NODE_CONTENT_PADDING
-from PySide6.QtWidgets import (
-    QWidget,
-    QLabel,
-    QComboBox,
-    QDial,
-    QVBoxLayout,
-    QHBoxLayout,
-)
-from PySide6.QtCore import Qt, Slot, QSignalBlocker
-from PySide6.QtGui import QFontMetrics
+from ui_elements import ParameterNodeItem, NodeStateEmitter
+from PySide6.QtCore import Slot
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -37,78 +28,52 @@ class ShaperType(Enum):
 
 
 # ==============================================================================
-# UI Class for the WaveShaper Node
+# UI Class for the WaveShaper Node (REFACTORED)
 # ==============================================================================
 class WaveShaperNodeItem(ParameterNodeItem):
-    """Custom NodeItem for the WaveShaperNode using ParameterNodeItem with additional combo box for shaper type."""
+    """
+    Refactored UI for the WaveShaperNode.
+    This class now fully leverages the enhanced ParameterNodeItem by defining its
+    entire UI declaratively, including the new combobox and dial.
+    """
 
     NODE_SPECIFIC_WIDTH = 220
 
     def __init__(self, node_logic: "WaveShaperNode"):
-        # Define the parameters for this node (drive and mix)
+        # Define the parameters and their control types for this node
         parameters = [
+            {
+                "key": "shaper_type",
+                "name": "Shaper Type",
+                "type": "combobox",
+                "items": [(st.value, st) for st in ShaperType],
+            },
             {
                 "key": "drive",
                 "name": "Drive",
+                "type": "dial",  # Use the new dial control
                 "min": 1.0,
                 "max": 100.0,
                 "format": "{:.1f}",
-                "is_log": False,
+                "is_log": True,  # Logarithmic scale feels better for drive
             },
             {
                 "key": "mix",
                 "name": "Mix",
+                "type": "slider",  # Keep mix as a slider
                 "min": 0.0,
                 "max": 1.0,
-                "format": "{:.2f}",
+                "format": "{:.0%}",
                 "is_log": False,
             },
         ]
 
+        # The parent class now handles the creation of all specified controls.
         super().__init__(node_logic, parameters, width=self.NODE_SPECIFIC_WIDTH)
-
-        # Add shaper type combo box above the parameters
-        shaper_type_label = QLabel("Shaper Type:")
-        self.container_widget.layout().insertWidget(0, shaper_type_label)
-
-        self.type_combo = QComboBox()
-        for st in ShaperType:
-            self.type_combo.addItem(st.value, st)
-        self.container_widget.layout().insertWidget(1, self.type_combo)
-
-        # Connect combo box signal
-        self.type_combo.currentTextChanged.connect(self._handle_type_change)
-
-        # Initialize combo box
-        state = self.node_logic.get_current_state_snapshot()
-        shaper_type = state.get("shaper_type")
-        index = self.type_combo.findData(shaper_type)
-        if index != -1:
-            self.type_combo.setCurrentIndex(index)
-
-    @Slot(str)
-    def _handle_type_change(self, type_text: str):
-        selected_enum = self.type_combo.currentData()
-        if isinstance(selected_enum, ShaperType):
-            self.node_logic.set_shaper_type(selected_enum)
-
-    @Slot()
-    def updateFromLogic(self):
-        # Update combo box first
-        if hasattr(self, "type_combo"):
-            state = self.node_logic.get_current_state_snapshot()
-            shaper_type = state.get("shaper_type")
-            with QSignalBlocker(self.type_combo):
-                index = self.type_combo.findData(shaper_type)
-                if index != -1:
-                    self.type_combo.setCurrentIndex(index)
-
-        # Then handle parameter sliders using parent class logic
-        super().updateFromLogic()
 
 
 # ==============================================================================
-# WaveShaper Logic Node
+# WaveShaper Logic Node (Unchanged)
 # ==============================================================================
 class WaveShaperNode(Node):
     NODE_TYPE = "WaveShaper"

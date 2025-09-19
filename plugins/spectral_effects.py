@@ -257,111 +257,50 @@ class SpectralModulatorEmitter(QObject):
 # ==============================================================================
 # 2. Custom UI Class (SpectralModulatorNodeItem)
 # ==============================================================================
-class SpectralModulatorNodeItem(NodeItem):
+class SpectralModulatorNodeItem(ParameterNodeItem):
     NODE_SPECIFIC_WIDTH = 200
 
     def __init__(self, node_logic: "SpectralModulatorNode"):
-        super().__init__(node_logic, width=self.NODE_SPECIFIC_WIDTH)
+        parameters = [
+            {
+                "key": "rate",
+                "name": "Rate",
+                "min": 0.1,
+                "max": 10.0,
+                "format": "{:.2f} Hz",
+            },
+            {
+                "key": "depth",
+                "name": "Depth",
+                "min": 0.0,
+                "max": 20.0,
+                "format": "{:.1f} ms",
+            },
+            {
+                "key": "mix",
+                "name": "Mix",
+                "min": 0.0,
+                "max": 1.0,
+                "format": "{:.0%}",
+            },
+        ]
+        super().__init__(node_logic, parameters, width=self.NODE_SPECIFIC_WIDTH)
 
-        self.container_widget = QWidget()
-        main_layout = QVBoxLayout(self.container_widget)
-        main_layout.setContentsMargins(
-            NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING
-        )
-        main_layout.setSpacing(5)
-
-        # --- Create Slider Controls ---
-        self.rate_slider, self.rate_label = self._create_slider_control("Rate", 0.1, 10.0, "{:.2f} Hz")
-        self.depth_slider, self.depth_label = self._create_slider_control("Depth", 0.0, 20.0, "{:.1f} ms")
-        self.mix_slider, self.mix_label = self._create_slider_control("Mix", 0.0, 1.0, "{:.0%}")
-
-        for label, slider in [
-            (self.rate_label, self.rate_slider),
-            (self.depth_label, self.depth_slider),
-            (self.mix_label, self.mix_slider),
-        ]:
-            main_layout.addWidget(label)
-            main_layout.addWidget(slider)
-
-        self.setContentWidget(self.container_widget)
-
-        # --- Connect Signals ---
-        self.rate_slider.valueChanged.connect(self._on_rate_changed)
-        self.depth_slider.valueChanged.connect(self._on_depth_changed)
-        self.mix_slider.valueChanged.connect(self._on_mix_changed)
-        self.node_logic.emitter.stateUpdated.connect(self._on_state_updated)
-
+        # --- Customization: Disable rate control if mod_in is connected ---
+        # We need to override the default state update handler to add this custom logic.
+        self.node_logic.emitter.stateUpdated.connect(self._custom_on_state_updated)
         self.updateFromLogic()
 
-    def _create_slider_control(self, name: str, min_val: float, max_val: float, fmt: str) -> tuple[QSlider, QLabel]:
-        label = QLabel(f"{name}: ...")
-        slider = QSlider(Qt.Orientation.Horizontal)
-        slider.setRange(0, 1000)
-        slider.setProperty("min_val", min_val)
-        slider.setProperty("max_val", max_val)
-        slider.setProperty("name", name)
-        slider.setProperty("format", fmt)
-        return slider, label
-
-    def _map_slider_to_logical(self, slider: QSlider) -> float:
-        min_val, max_val = slider.property("min_val"), slider.property("max_val")
-        norm = slider.value() / 1000.0
-        return min_val + norm * (max_val - min_val)
-
-    def _map_logical_to_slider(self, slider: QSlider, value: float) -> int:
-        min_val, max_val = slider.property("min_val"), slider.property("max_val")
-        range_val = max_val - min_val
-        if range_val == 0:
-            return 0
-        norm = (value - min_val) / range_val
-        return int(np.clip(norm, 0.0, 1.0) * 1000.0)
-
-    @Slot()
-    def _on_rate_changed(self):
-        self.node_logic.set_rate(self._map_slider_to_logical(self.rate_slider))
-
-    @Slot()
-    def _on_depth_changed(self):
-        self.node_logic.set_depth(self._map_slider_to_logical(self.depth_slider))
-
-    @Slot()
-    def _on_mix_changed(self):
-        self.node_logic.set_mix(self._map_slider_to_logical(self.mix_slider))
-
     @Slot(dict)
-    def _on_state_updated(self, state: dict):
-        sliders_map = {
-            "rate": (self.rate_slider, self.rate_label),
-            "depth": (self.depth_slider, self.depth_label),
-            "mix": (self.mix_slider, self.mix_label),
-        }
-
+    def _custom_on_state_updated(self, state: dict):
+        # First, call the parent's handler to update all the standard widgets
+        super()._on_state_updated(state)
+        # Then, add our custom logic
         is_mod_ext = self.node_logic.inputs["mod_in"].connections
-
-        for key, (slider, label) in sliders_map.items():
-            value = state.get(key, slider.property("min_val"))
-            is_param_ext = key in self.node_logic.inputs and self.node_logic.inputs[key].connections
-
-            if key == "rate":
-                slider.setEnabled(not is_mod_ext)
-            else:
-                slider.setEnabled(not is_param_ext)
-
-            with QSignalBlocker(slider):
-                slider.setValue(self._map_logical_to_slider(slider, value))
-
-            label_text = f"{slider.property('name')}: {slider.property('format').format(value)}"
-
-            if (key == "rate" and is_mod_ext) or is_param_ext:
-                label_text += " (ext)"
-
-            label.setText(label_text)
-
-    @Slot()
-    def updateFromLogic(self):
-        state = self.node_logic.get_current_state_snapshot()
-        self._on_state_updated(state)
-        super().updateFromLogic()
+        self._controls["rate"]["widget"].setEnabled(not is_mod_ext)
+        label_text = self._controls["rate"]["label"].text()
+        if is_mod_ext and "(ext)" not in label_text:
+            self._controls["rate"]["label"].setText(label_text + " (ext)")
 
 
 # ==============================================================================

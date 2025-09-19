@@ -9,9 +9,8 @@ from node_system import Node
 from constants import DEFAULT_DTYPE, DEFAULT_BLOCKSIZE
 
 # --- UI and Qt Imports ---
-from ui_elements import NodeItem, NodeStateEmitter, NODE_CONTENT_PADDING  # MODIFIED
-from PySide6.QtWidgets import QWidget, QSlider, QLabel, QVBoxLayout
-from PySide6.QtCore import Qt, Slot, QSignalBlocker
+from ui_elements import ParameterNodeItem, NodeStateEmitter, NODE_CONTENT_PADDING
+from PySide6.QtCore import Qt, Slot
 
 # --- Configure logging ---
 logger = logging.getLogger(__name__)
@@ -20,43 +19,32 @@ logger = logging.getLogger(__name__)
 MIN_PAN = -1.0  # Hard Left
 MAX_PAN = 1.0  # Hard Right
 
-# ==============================================================================
-# 1. Emitter for UI Communication (REMOVED)
-# The common NodeStateEmitter is now used.
-# ==============================================================================
-
 
 # ==============================================================================
-# 2. UI Class for the Panner Node
+# 1. UI Class for the Panner Node (REFACTORED)
 # ==============================================================================
-class PannerNodeItem(NodeItem):
-    """Custom UI for the PannerNode, featuring a single slider for pan control."""
+class PannerNodeItem(ParameterNodeItem):
+    """
+    Refactored UI for the PannerNode.
+    Inherits from ParameterNodeItem to auto-generate controls and overrides
+    the state update method to provide custom label formatting.
+    """
 
     NODE_SPECIFIC_WIDTH = 180
 
     def __init__(self, node_logic: "PannerNode"):
-        super().__init__(node_logic, width=self.NODE_SPECIFIC_WIDTH)
-
-        self.container_widget = QWidget()
-        main_layout = QVBoxLayout(self.container_widget)
-        main_layout.setContentsMargins(
-            NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING
-        )
-        main_layout.setSpacing(5)
-
-        self.pan_label = QLabel("Pan: Center")
-        self.pan_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.pan_slider = QSlider(Qt.Orientation.Horizontal)
-        self.pan_slider.setRange(int(MIN_PAN * 100), int(MAX_PAN * 100))  # Range -100 to 100
-
-        main_layout.addWidget(self.pan_label)
-        main_layout.addWidget(self.pan_slider)
-
-        self.setContentWidget(self.container_widget)
-
-        self.pan_slider.valueChanged.connect(self._handle_slider_change)
-        self.node_logic.emitter.stateUpdated.connect(self._on_state_updated)
-        # The initial state is set by the graph scene's sync logic.
+        # Define the parameters declaratively. ParameterNodeItem will create the slider.
+        parameters = [
+            {
+                "key": "pan",
+                "name": "Pan",
+                "min": MIN_PAN,
+                "max": MAX_PAN,
+                "format": "{:.2f}",  # A default format, will be overridden by custom label logic
+            }
+        ]
+        # Initialize the parent class, which creates all UI elements
+        super().__init__(node_logic, parameters, width=self.NODE_SPECIFIC_WIDTH)
 
     def _format_pan_label(self, value: float, is_external: bool) -> str:
         """Formats the pan value into a user-friendly string (e.g., L 50%, Center, R 100%)."""
@@ -71,35 +59,29 @@ class PannerNodeItem(NodeItem):
             label += " (ext)"
         return f"Pan: {label}"
 
-    @Slot(int)
-    def _handle_slider_change(self, value: int):
-        logical_val = value / 100.0
-        self.node_logic.set_pan(logical_val)
-
     @Slot(dict)
     def _on_state_updated(self, state: dict):
+        """
+        Overrides the base class method to apply custom text formatting to the label
+        after the base functionality (like updating the slider) has been executed.
+        """
+        # First, let the parent class handle standard updates (slider position, enabled state).
+        super()._on_state_updated(state)
+
+        # Now, apply our custom formatting to the label that the parent class created.
         pan_value = state.get("pan", 0.0)
-
-        # Check if the pan input socket is connected
         is_connected = "pan" in self.node_logic.inputs and self.node_logic.inputs["pan"].connections
-        self.pan_slider.setEnabled(not is_connected)
 
-        # Update slider position
-        with QSignalBlocker(self.pan_slider):
-            self.pan_slider.setValue(int(np.clip(pan_value, MIN_PAN, MAX_PAN) * 100))
-
-        # Update text label
-        self.pan_label.setText(self._format_pan_label(pan_value, is_connected))
-
-    @Slot()
-    def updateFromLogic(self):
-        state = self.node_logic.get_current_state_snapshot()
-        self._on_state_updated(state)
-        super().updateFromLogic()
+        # Access the label widget created by the parent class
+        if "pan" in self._controls and "label" in self._controls["pan"]:
+            label_widget = self._controls["pan"]["label"]
+            label_widget.setText(self._format_pan_label(pan_value, is_connected))
+            # Center the custom label text
+            label_widget.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
 
 # ==============================================================================
-# 3. Logic Class for the Panner Node
+# 2. Logic Class for the Panner Node (Unchanged)
 # ==============================================================================
 class PannerNode(Node):
     NODE_TYPE = "Panner"
@@ -109,7 +91,7 @@ class PannerNode(Node):
 
     def __init__(self, name: str, node_id: str | None = None):
         super().__init__(name, node_id)
-        self.emitter = NodeStateEmitter()  # MODIFIED
+        self.emitter = NodeStateEmitter()
         self.add_input("in", data_type=torch.Tensor)
         self.add_input("pan", data_type=float)
         self.add_output("out", data_type=torch.Tensor)
@@ -188,5 +170,5 @@ class PannerNode(Node):
         return self.get_current_state_snapshot()
 
     def deserialize_extra(self, data: dict):
-        # MODIFIED: Use the public setter to ensure the UI is updated on load
+        # Use the public setter to ensure the UI is updated on load
         self.set_pan(data.get("pan", 0.0))

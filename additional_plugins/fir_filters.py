@@ -9,7 +9,7 @@ from typing import Dict, Optional
 # --- Node System Imports ---
 from node_system import Node
 from constants import DEFAULT_SAMPLERATE, DEFAULT_DTYPE
-from ui_elements import NodeItem, NodeStateEmitter, NODE_CONTENT_PADDING
+from ui_elements import ParameterNodeItem, NodeStateEmitter, NODE_CONTENT_PADDING
 
 # --- UI and Qt Imports ---
 from PySide6.QtWidgets import QWidget, QLabel, QComboBox, QSlider, QVBoxLayout
@@ -24,119 +24,72 @@ FILTER_LATENCY_SAMPLES = (NUM_TAPS - 1) // 2
 
 
 # ==============================================================================
-# 1. UI Class for the Linear Phase EQ Node (Unchanged)
+# 1. UI Class for the Linear Phase EQ Node
 # ==============================================================================
-class LinearPhaseEQNodeItem(NodeItem):
-    """Custom UI for the Linear Phase EQ, with controls for type, frequency, and Q."""
+class LinearPhaseEQNodeItem(ParameterNodeItem):
+    """
+    Refactored UI for the Linear Phase EQ, now using ParameterNodeItem for
+    simpler, declarative UI construction.
+    """
 
     NODE_SPECIFIC_WIDTH = 200
 
     def __init__(self, node_logic: "LinearPhaseEQNode"):
-        super().__init__(node_logic, width=self.NODE_SPECIFIC_WIDTH)
-
-        self.container_widget = QWidget()
-        main_layout = QVBoxLayout(self.container_widget)
-        main_layout.setContentsMargins(
-            NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING
-        )
-        main_layout.setSpacing(5)
-
-        self.type_combo = QComboBox()
-        self.type_combo.addItems(["Low Pass", "High Pass", "Band Pass", "Band Stop (Notch)"])
-        main_layout.addWidget(self.type_combo)
-
-        self.freq_slider, self.freq_label = self._create_slider_control("Freq", 20.0, 20000.0, "{:.0f} Hz", is_log=True)
-        self.q_slider, self.q_label = self._create_slider_control("Q", 0.1, 10.0, "{:.2f}")
-
-        main_layout.addWidget(self.freq_label)
-        main_layout.addWidget(self.freq_slider)
-        main_layout.addWidget(self.q_label)
-        main_layout.addWidget(self.q_slider)
-
-        self.setContentWidget(self.container_widget)
-
-        self.type_combo.currentTextChanged.connect(self.node_logic.set_filter_type)
-        self.freq_slider.valueChanged.connect(self._on_freq_changed)
-        self.q_slider.valueChanged.connect(self._on_q_changed)
-        self.node_logic.emitter.stateUpdated.connect(self._on_state_updated)
-
-        self.updateFromLogic()
-
-    def _create_slider_control(self, name: str, min_val: float, max_val: float, fmt: str, is_log: bool = False):
-        label = QLabel(f"{name}: ...")
-        slider = QSlider(Qt.Orientation.Horizontal)
-        slider.setRange(0, 1000)
-        slider.setProperty("min_val", min_val)
-        slider.setProperty("max_val", max_val)
-        slider.setProperty("name", name)
-        slider.setProperty("format", fmt)
-        slider.setProperty("is_log", is_log)
-        return slider, label
-
-    def _map_slider_to_logical(self, slider: QSlider) -> float:
-        min_val, max_val = slider.property("min_val"), slider.property("max_val")
-        norm = slider.value() / 1000.0
-        if slider.property("is_log"):
-            log_min, log_max = np.log10(min_val), np.log10(max_val)
-            return 10 ** (log_min + norm * (log_max - log_min))
-        else:
-            return min_val + norm * (max_val - min_val)
-
-    def _map_logical_to_slider(self, slider: QSlider, value: float) -> int:
-        min_val, max_val = slider.property("min_val"), slider.property("max_val")
-        safe_value = np.clip(value, min_val, max_val)
-        if slider.property("is_log"):
-            log_min, log_max = np.log10(min_val), np.log10(max_val)
-            norm = (np.log10(safe_value) - log_min) / (log_max - log_min)
-            return int(norm * 1000.0)
-        else:
-            range_val = max_val - min_val
-            norm = (safe_value - min_val) / (range_val or 1.0)
-            return int(np.clip(norm, 0.0, 1.0) * 1000.0)
-
-    @Slot()
-    def _on_freq_changed(self):
-        self.node_logic.set_cutoff_freq(self._map_slider_to_logical(self.freq_slider))
-
-    @Slot()
-    def _on_q_changed(self):
-        self.node_logic.set_q(self._map_slider_to_logical(self.q_slider))
+        # Define the UI controls declaratively
+        parameters = [
+            {
+                "key": "filter_type",
+                "name": "Filter Type",
+                "type": "combobox",
+                "items": [
+                    ("Low Pass", "Low Pass"),
+                    ("High Pass", "High Pass"),
+                    ("Band Pass", "Band Pass"),
+                    ("Band Stop (Notch)", "Band Stop (Notch)"),
+                ],
+            },
+            {
+                "key": "cutoff_freq",
+                "name": "Freq",
+                "min": 20.0,
+                "max": 20000.0,
+                "format": "{:.0f} Hz",
+                "is_log": True,
+            },
+            {
+                "key": "q",
+                "name": "Q",
+                "min": 0.1,
+                "max": 10.0,
+                "format": "{:.2f}",
+            },
+        ]
+        # The parent class constructor handles all the heavy lifting
+        super().__init__(node_logic, parameters, width=self.NODE_SPECIFIC_WIDTH)
 
     @Slot(dict)
     def _on_state_updated(self, state: dict):
+        """
+        Override the parent method to add custom logic after standard updates.
+        """
+        # 1. Let the parent class handle all standard widget updates first
+        super()._on_state_updated(state)
+
+        # 2. Add custom logic: Show/hide the 'Q' control based on filter type
         filter_type = state.get("filter_type", "Low Pass")
-        freq = state.get("freq", 1000.0)
-        q = state.get("q", 1.0)
+        q_control = self._controls.get("q")
 
-        with QSignalBlocker(self.type_combo):
-            self.type_combo.setCurrentText(filter_type)
-
-        for key, slider, label in [("freq", self.freq_slider, self.freq_label), ("q", self.q_slider, self.q_label)]:
-            val = state.get(key)
-            is_ext = state.get(f"is_{key}_ext", False)
-            slider.setEnabled(not is_ext)
-            with QSignalBlocker(slider):
-                slider.setValue(self._map_logical_to_slider(slider, val))
-            label_text = f"{slider.property('name')}: {slider.property('format').format(val)}"
-            if is_ext:
-                label_text += " (ext)"
-            label.setText(label_text)
-
-        q_visible = filter_type in ["Band Pass", "Band Stop (Notch)"]
-        self.q_label.setVisible(q_visible)
-        self.q_slider.setVisible(q_visible)
-        self.container_widget.adjustSize()
-        self.update_geometry()
-
-    @Slot()
-    def updateFromLogic(self):
-        state = self.node_logic.get_current_state_snapshot()
-        self._on_state_updated(state)
-        super().updateFromLogic()
+        if q_control:
+            q_visible = filter_type in ["Band Pass", "Band Stop (Notch)"]
+            q_control["label"].setVisible(q_visible)
+            q_control["widget"].setVisible(q_visible)
+            # Request a geometry update since visibility changed
+            self.container_widget.adjustSize()
+            self.update_geometry()
 
 
 # ==============================================================================
-# 2. Logic Class for the Linear Phase EQ Node (CORRECTED)
+# 2. Logic Class for the Linear Phase EQ Node
 # ==============================================================================
 class LinearPhaseEQNode(Node):
     NODE_TYPE = "Linear Phase EQ"
@@ -220,12 +173,15 @@ class LinearPhaseEQNode(Node):
 
     @Slot(float)
     def set_q(self, q: float):
+        state_snapshot_to_emit = None
         with self._lock:
             new_q = max(0.1, float(q))
             if self._q != new_q:
                 self._q = new_q
                 self._params_dirty = True
-        self.emitter.stateUpdated.emit(self.get_current_state_snapshot())
+                state_snapshot_to_emit = self._get_current_state_snapshot_locked()
+        if state_snapshot_to_emit:
+            self.emitter.stateUpdated.emit(state_snapshot_to_emit)
 
     def get_current_state_snapshot(self) -> Dict:
         with self._lock:
@@ -233,13 +189,14 @@ class LinearPhaseEQNode(Node):
 
     def _get_current_state_snapshot_locked(self) -> Dict:
         """Gathers the current state. ASSUMES THE CALLER HOLDS THE LOCK."""
+        # MODIFIED: Changed "freq" key to "cutoff_freq" to match parameter key
         is_freq_ext = "cutoff_freq" in self.inputs and self.inputs["cutoff_freq"].connections
         is_q_ext = "q" in self.inputs and self.inputs["q"].connections
         return {
             "filter_type": self._filter_type,
-            "freq": self._cutoff_freq,
+            "cutoff_freq": self._cutoff_freq,
             "q": self._q,
-            "is_freq_ext": is_freq_ext,
+            "is_cutoff_freq_ext": is_freq_ext,
             "is_q_ext": is_q_ext,
         }
 

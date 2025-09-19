@@ -4,7 +4,8 @@ import threading
 import logging
 from collections import deque
 from node_system import Node
-from ui_elements import NodeItem, NodeStateEmitter, NODE_CONTENT_PADDING
+
+from ui_elements import NodeItem, NodeStateEmitter, NODE_CONTENT_PADDING, ParameterNodeItem
 from constants import DEFAULT_DTYPE, TICK_DURATION_S
 
 from PySide6.QtWidgets import QDoubleSpinBox, QVBoxLayout, QWidget, QDial, QSizePolicy, QLabel
@@ -398,61 +399,27 @@ class SignalAnalyzer(Node):
 # ==============================================================================
 # UI for the Dial (Hz) Node
 # ==============================================================================
-class DialHzNodeItem(NodeItem):
-    """Custom UI for the DialHzNode, featuring a logarithmic frequency dial."""
+class DialHzNodeItem(ParameterNodeItem):
+    """
+    Refactored UI for the DialHzNode. The logarithmic mapping is now
+    handled declaratively by the base class.
+    """
 
     NODE_SPECIFIC_WIDTH = 160
 
     def __init__(self, node_logic: "DialHzNode"):
-        super().__init__(node_logic, width=self.NODE_SPECIFIC_WIDTH)
-        self.container_widget = QWidget()
-        main_layout = QVBoxLayout(self.container_widget)
-        main_layout.setContentsMargins(
-            NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING
-        )
-        main_layout.setSpacing(6)
-        self.freq_dial = QDial()
-        self.freq_dial.setRange(0, 1000)
-        self.freq_dial.setNotchesVisible(True)
-        self.title_label = QLabel("Frequency")
-        self.title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.value_label = QLabel("...")
-        self.value_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        fm = QFontMetrics(self.value_label.font())
-        min_width = fm.boundingRect("20000.0 Hz").width()
-        self.title_label.setMinimumWidth(min_width)
-        main_layout.addWidget(self.title_label)
-        main_layout.addWidget(self.value_label)
-        main_layout.addWidget(self.freq_dial)
-        self.setContentWidget(self.container_widget)
-        self.freq_dial.valueChanged.connect(self._handle_freq_change)
-        self.node_logic.emitter.stateUpdated.connect(self._on_state_updated)
-
-    @Slot(int)
-    def _handle_freq_change(self, dial_value: int):
-        min_f, max_f = 20.0, 20000.0
-        log_min, log_max = np.log10(min_f), np.log10(max_f)
-        freq = 10 ** (((dial_value / 1000.0) * (log_max - log_min)) + log_min)
-        self.node_logic.set_frequency(freq)
-
-    @Slot(dict)
-    def _on_state_updated(self, state: dict):
-        freq = state.get("frequency", 440.0)
-        with QSignalBlocker(self.freq_dial):
-            min_f, max_f = 20.0, 20000.0
-            log_min, log_max = np.log10(min_f), np.log10(max_f)
-            dial_val = int(1000.0 * (np.log10(freq) - log_min) / (log_max - log_min))
-            self.freq_dial.setValue(dial_val)
-        is_freq_ext = "freq_in" in self.node_logic.inputs and self.node_logic.inputs["freq_in"].connections
-        self.value_label.setText(f"{freq:.1f} Hz{' (ext)' if is_freq_ext else ''}")
-        self.freq_dial.setEnabled(not is_freq_ext)
-
-    @Slot()
-    def updateFromLogic(self):
-        """Pulls the initial state from the logic node to initialize the UI."""
-        state = self.node_logic.get_current_state_snapshot()
-        self._on_state_updated(state)
-        super().updateFromLogic()
+        parameters = [
+            {
+                "key": "frequency",
+                "name": "Frequency",
+                "type": "dial",
+                "min": 20.0,
+                "max": 20000.0,
+                "format": "{:.1f} Hz",
+                "is_log": True,  # This handles the logarithmic mapping
+            },
+        ]
+        super().__init__(node_logic, parameters, width=self.NODE_SPECIFIC_WIDTH)
 
 
 # ==============================================================================
@@ -467,7 +434,7 @@ class DialHzNode(Node):
     def __init__(self, name: str, node_id: str | None = None):
         super().__init__(name, node_id)
         self.emitter = NodeStateEmitter()
-        self.add_input("freq_in", data_type=float)
+        self.add_input("frequency", data_type=float)
         self.add_output("freq_out", data_type=float)
         self._lock = threading.Lock()
         self._frequency = 440.0
@@ -480,17 +447,19 @@ class DialHzNode(Node):
 
     @Slot(float)
     def set_frequency(self, frequency: float):
+        state_to_emit = None
         with self._lock:
             new_freq = np.clip(float(frequency), 20.0, 20000.0)
             if self._frequency != new_freq:
                 self._frequency = new_freq
                 state_to_emit = self.get_current_state_snapshot(locked=True)
-                self.emitter.stateUpdated.emit(state_to_emit)
+        if state_to_emit:
+            self.emitter.stateUpdated.emit(state_to_emit)
 
     def process(self, input_data: dict) -> dict:
         state_snapshot_to_emit = None
         with self._lock:
-            freq_socket = input_data.get("freq_in")
+            freq_socket = input_data.get("frequency")
             if freq_socket is not None:
                 new_freq = np.clip(float(freq_socket), 20.0, 20000.0)
                 if abs(self._frequency - new_freq) > 1e-6:
@@ -507,3 +476,92 @@ class DialHzNode(Node):
 
     def deserialize_extra(self, data: dict):
         self.set_frequency(data.get("frequency", 440.0))
+
+
+# ==============================================================================
+# 1. UI Class for the Gain Node
+# ==============================================================================
+class GainNodeItem(ParameterNodeItem):
+    """
+    Refactored UI for the GainNode using the declarative ParameterNodeItem.
+    """
+
+    NODE_SPECIFIC_WIDTH = 160
+
+    def __init__(self, node_logic: "GainNode"):
+        parameters = [
+            {
+                "key": "gain_db",
+                "name": "Gain",
+                "type": "dial",
+                "min": -60.0,
+                "max": 12.0,
+                "format": "{:.1f} dB",
+                "is_log": False,
+            },
+        ]
+        super().__init__(node_logic, parameters, width=self.NODE_SPECIFIC_WIDTH)
+
+
+# ==============================================================================
+# 2. Logic Class for the Gain Node
+# ==============================================================================
+class GainNode(Node):
+    NODE_TYPE = "Gain"
+    UI_CLASS = GainNodeItem
+    CATEGORY = "Utility"
+    DESCRIPTION = "Applies gain (volume) to an audio signal, controlled in decibels."
+
+    def __init__(self, name, node_id=None):
+        super().__init__(name, node_id)
+        self.emitter = NodeStateEmitter()
+        self._lock = threading.Lock()
+        self.add_input("in", data_type=torch.Tensor)
+        self.add_input("gain_db", data_type=float)
+        self.add_output("out", data_type=torch.Tensor)
+        self._gain_db: float = 0.0
+
+    def get_current_state_snapshot(self, locked: bool = False) -> dict:
+        if locked:
+            return {"gain_db": self._gain_db}
+        with self._lock:
+            return {"gain_db": self._gain_db}
+
+    @Slot(float)
+    def set_gain_db(self, db_value: float):
+        state_to_emit = None
+        with self._lock:
+            new_db_value = float(db_value)
+            if self._gain_db != new_db_value:
+                self._gain_db = new_db_value
+                state_to_emit = self.get_current_state_snapshot(locked=True)
+        if state_to_emit:
+            self.emitter.stateUpdated.emit(state_to_emit)
+
+    def process(self, input_data: dict) -> dict:
+        signal = input_data.get("in")
+        if not isinstance(signal, torch.Tensor):
+            return {"out": None}
+        state_snapshot_to_emit = None
+        with self._lock:
+            gain_db_socket = input_data.get("gain_db")
+            if gain_db_socket is not None:
+                current_gain_db = float(gain_db_socket)
+                if abs(self._gain_db - current_gain_db) > 1e-6:
+                    self._gain_db = current_gain_db
+                    state_snapshot_to_emit = self.get_current_state_snapshot(locked=True)
+            else:
+                current_gain_db = self._gain_db
+        if state_snapshot_to_emit:
+            self.emitter.stateUpdated.emit(state_snapshot_to_emit)
+
+        amplitude_factor = 10.0 ** (np.clip(current_gain_db, -120.0, 60.0) / 20.0)
+        output_signal = signal * amplitude_factor
+        return {"out": output_signal}
+
+    def serialize_extra(self) -> dict:
+        with self._lock:
+            return {"gain_db": self._gain_db}
+
+    def deserialize_extra(self, data: dict):
+        self.set_gain_db(data.get("gain_db", 0.0))

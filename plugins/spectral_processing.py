@@ -6,7 +6,7 @@ from collections import deque
 
 # --- Node System Imports ---
 from node_system import Node
-from ui_elements import NodeItem, NodeStateEmitter, NODE_CONTENT_PADDING
+from ui_elements import NodeItem, NodeStateEmitter, NODE_CONTENT_PADDING, ParameterNodeItem
 from constants import (
     DEFAULT_SAMPLERATE,
     DEFAULT_BLOCKSIZE,
@@ -25,54 +25,22 @@ from PySide6.QtCore import Qt, Slot, QSignalBlocker, Signal, QObject
 logger = logging.getLogger(__name__)
 
 
+# --- REFACTORED: Converted to ParameterNodeItem ---
 # ==============================================================================
 # 2. STFT Node (Time Domain -> Spectral Domain)
 # ==============================================================================
-class STFTNodeItem(NodeItem):
-
+class STFTNodeItem(ParameterNodeItem):
     def __init__(self, node_logic: "STFTNode"):
-        super().__init__(node_logic)
-
-        self.container_widget = QWidget()
-        layout = QVBoxLayout(self.container_widget)
-        layout.setContentsMargins(
-            NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING
-        )
-        layout.setSpacing(5)
-
-        layout.addWidget(QLabel("Window Size (Overlap):"))
-        self.window_size_combo = QComboBox()
-        self.window_sizes = [512, 1024, 2048, 4096]  # Must be >= block_size
-        self.window_size_combo.addItems([f"{s} ({100*(1-DEFAULT_BLOCKSIZE/s):.0f}%)" for s in self.window_sizes])
-        layout.addWidget(self.window_size_combo)
-
-        self.setContentWidget(self.container_widget)
-        self.window_size_combo.activated.connect(self._on_window_size_change)
-        self.node_logic.emitter.stateUpdated.connect(self._on_state_updated)
-
-    @Slot()
-    def updateFromLogic(self):
-        state = {"window_size": self.node_logic.get_window_size()}
-        self._on_state_updated(state)
-        super().updateFromLogic()
-
-    @Slot(int)
-    def _on_window_size_change(self, index: int):
-        new_size = self.window_sizes[index]
-        self.node_logic.set_window_size(new_size)
-
-    @Slot(dict)
-    def _on_state_updated(self, state: dict):
-        window_size = state.get("window_size", DEFAULT_WINDOW_SIZE)
-        try:
-            index = self.window_sizes.index(window_size)
-            with QSignalBlocker(self.window_size_combo):
-                self.window_size_combo.setCurrentIndex(index)
-        except ValueError:
-            closest_size = min(self.window_sizes, key=lambda x: abs(x - window_size))
-            index = self.window_sizes.index(closest_size)
-            with QSignalBlocker(self.window_size_combo):
-                self.window_size_combo.setCurrentIndex(index)
+        self.window_sizes = [512, 1024, 2048, 4096]
+        parameters = [
+            {
+                "key": "window_size",
+                "name": "Window Size (Overlap)",
+                "type": "combobox",
+                "items": [(f"{s} ({100*(1-DEFAULT_BLOCKSIZE/s):.0f}%)", s) for s in self.window_sizes],
+            }
+        ]
+        super().__init__(node_logic, parameters)
 
 
 class STFTNode(Node):
@@ -119,9 +87,10 @@ class STFTNode(Node):
         self._recalculate_params()
         self.start()
 
-    def get_window_size(self):
+    # --- FIXED: Implemented the required method for ParameterNodeItem ---
+    def get_current_state_snapshot(self) -> dict:
         with self._lock:
-            return self._window_size
+            return {"window_size": self._window_size}
 
     def start(self):
         with self._lock:
@@ -234,113 +203,71 @@ class ISTFTNode(Node):
             return {"audio_out": output_block}
 
 
+# --- REFACTORED: Converted to ParameterNodeItem ---
 # ==============================================================================
 # 4. Spectral Filter Node
 # ==============================================================================
-class SpectralFilterNodeItem(NodeItem):
-
+class SpectralFilterNodeItem(ParameterNodeItem):
     def __init__(self, node_logic: "SpectralFilterNode"):
-        super().__init__(node_logic)
+        parameters = [
+            {
+                "key": "filter_type",
+                "name": "Filter Type",
+                "type": "combobox",
+                "items": [("Low Pass", "Low Pass"), ("High Pass", "High Pass"), ("Band Pass", "Band Pass")],
+            },
+            {
+                "key": "cutoff_freq_1",
+                "name": "Cutoff Freq",
+                "min": 20.0,
+                "max": 20000.0,
+                "format": "{:.0f} Hz",
+                "is_log": True,
+            },
+            {
+                "key": "cutoff_freq_2",
+                "name": "Cutoff Freq 2",
+                "min": 20.0,
+                "max": 20000.0,
+                "format": "{:.0f} Hz",
+                "is_log": True,
+            },
+        ]
+        super().__init__(node_logic, parameters)
 
-        self.container_widget = QWidget()
-        layout = QVBoxLayout(self.container_widget)
-        layout.setContentsMargins(
-            NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING
-        )
-        layout.setSpacing(5)
-
-        self.type_combo = QComboBox()
-        self.type_combo.addItems(["Low Pass", "High Pass", "Band Pass"])
-        layout.addWidget(self.type_combo)
-
-        self.fc1_slider, self.fc1_label = self._create_slider("Cutoff Freq")
-        layout.addWidget(self.fc1_label)
-        layout.addWidget(self.fc1_slider)
-
-        self.fc2_widget = QWidget()
-        fc2_layout = QVBoxLayout(self.fc2_widget)
-        fc2_layout.setContentsMargins(0, 0, 0, 0)
-        self.fc2_slider, self.fc2_label = self._create_slider("Cutoff Freq 2")
-        fc2_layout.addWidget(self.fc2_label)
-        fc2_layout.addWidget(self.fc2_slider)
-        layout.addWidget(self.fc2_widget)
-
-        self.setContentWidget(self.container_widget)
-
-        self.type_combo.currentTextChanged.connect(self.node_logic.set_filter_type)
-        self.fc1_slider.valueChanged.connect(lambda v: self._on_slider_change(v, "fc1"))
-        self.fc2_slider.valueChanged.connect(lambda v: self._on_slider_change(v, "fc2"))
-
-        self.node_logic.emitter.stateUpdated.connect(self._on_state_updated)
+        # Connect state updates to a custom handler to manage widget visibility
+        self.node_logic.emitter.stateUpdated.connect(self.custom_on_state_updated)
         self.updateFromLogic()
 
-    def _create_slider(self, name):
-        label = QLabel(f"{name}: ...")
-        slider = QSlider(Qt.Orientation.Horizontal)
-        slider.setRange(0, 1000)
-        return slider, label
-
-    def _map_slider_to_freq(self, value):
-        min_freq_log = np.log10(20)
-        max_freq_log = np.log10(20000)
-        norm = value / 1000.0
-        return 10 ** (min_freq_log + norm * (max_freq_log - min_freq_log))
-
-    def _map_freq_to_slider(self, freq):
-        min_freq_log = np.log10(20)
-        max_freq_log = np.log10(20000)
-        safe_freq = max(20.0, freq)
-        norm = (np.log10(safe_freq) - min_freq_log) / (max_freq_log - min_freq_log)
-        return int(np.clip(norm, 0, 1) * 1000)
-
-    def _on_slider_change(self, value, key):
-        freq = self._map_slider_to_freq(value)
-        if key == "fc1":
-            self.node_logic.set_cutoff_freq_1(freq)
-        else:
-            self.node_logic.set_cutoff_freq_2(freq)
-
     @Slot(dict)
-    def _on_state_updated(self, state):
-        filter_type = state.get("filter_type")
-        fc1 = state.get("fc1")
-        fc2 = state.get("fc2")
+    def custom_on_state_updated(self, state: dict):
+        # First, run the parent's update logic
+        super()._on_state_updated(state)
 
-        with QSignalBlocker(self.type_combo):
-            self.type_combo.setCurrentText(filter_type)
+        # Now, add our custom logic
+        filter_type = state.get("filter_type", "Low Pass")
+        is_bandpass = filter_type == "Band Pass"
 
-        is_fc1_ext = "cutoff_freq_1" in self.node_logic.inputs and self.node_logic.inputs["cutoff_freq_1"].connections
-        is_fc2_ext = "cutoff_freq_2" in self.node_logic.inputs and self.node_logic.inputs["cutoff_freq_2"].connections
+        # Show/hide the second frequency control
+        self._controls["cutoff_freq_2"]["widget"].setVisible(is_bandpass)
+        self._controls["cutoff_freq_2"]["label"].setVisible(is_bandpass)
 
-        self.fc1_slider.setEnabled(not is_fc1_ext)
-        self.fc2_slider.setEnabled(not is_fc2_ext)
+        # Update the label of the first frequency control
+        label_widget = self._controls["cutoff_freq_1"]["label"]
+        current_text = label_widget.text()
+        base_text = "Cutoff Freq 1" if is_bandpass else "Cutoff Freq"
 
-        with QSignalBlocker(self.fc1_slider):
-            self.fc1_slider.setValue(self._map_freq_to_slider(fc1))
+        # Reconstruct the label text to avoid duplicating "(ext)"
+        is_ext = "(ext)" in current_text
+        value_part = current_text.split(":")[1].split(" ")[1] if ":" in current_text else ""
+        new_label = f"{base_text}: {value_part} Hz"
+        if is_ext:
+            new_label += " (ext)"
+        label_widget.setText(new_label)
 
-        with QSignalBlocker(self.fc2_slider):
-            self.fc2_slider.setValue(self._map_freq_to_slider(fc2))
-
-        self.fc2_widget.setVisible(filter_type == "Band Pass")
-
-        fc1_label_base = "Cutoff Freq 1" if filter_type == "Band Pass" else "Cutoff Freq"
-        fc1_label_text = f"{fc1_label_base}: {fc1:.0f} Hz"
-        if is_fc1_ext:
-            fc1_label_text += " (ext)"
-        self.fc1_label.setText(fc1_label_text)
-
-        fc2_label_text = f"Cutoff Freq 2: {fc2:.0f} Hz"
-        if is_fc2_ext:
-            fc2_label_text += " (ext)"
-        self.fc2_label.setText(fc2_label_text)
+        # Request a geometry update for the node
         self.container_widget.adjustSize()
         self.update_geometry()
-
-    @Slot()
-    def updateFromLogic(self):
-        state = self.node_logic.get_state()
-        self._on_state_updated(state)
-        super().updateFromLogic()
 
 
 class SpectralFilterNode(Node):
@@ -362,12 +289,18 @@ class SpectralFilterNode(Node):
         self._cutoff_freq_1 = 1000.0
         self._cutoff_freq_2 = 4000.0
 
-    def _get_state_locked(self):
-        return {"filter_type": self._filter_type, "fc1": self._cutoff_freq_1, "fc2": self._cutoff_freq_2}
+    # --- FIXED: Renamed internal method for consistency ---
+    def _get_current_state_snapshot_locked(self):
+        return {
+            "filter_type": self._filter_type,
+            "cutoff_freq_1": self._cutoff_freq_1,
+            "cutoff_freq_2": self._cutoff_freq_2,
+        }
 
-    def get_state(self):
+    # --- FIXED: Renamed method to match expected interface ---
+    def get_current_state_snapshot(self):
         with self._lock:
-            return self._get_state_locked()
+            return self._get_current_state_snapshot_locked()
 
     @Slot(str)
     def set_filter_type(self, f_type: str):
@@ -375,7 +308,7 @@ class SpectralFilterNode(Node):
         with self._lock:
             if self._filter_type != f_type:
                 self._filter_type = f_type
-                state_to_emit = self._get_state_locked()
+                state_to_emit = self._get_current_state_snapshot_locked()
         if state_to_emit:
             self.emitter.stateUpdated.emit(state_to_emit)
 
@@ -385,7 +318,7 @@ class SpectralFilterNode(Node):
         with self._lock:
             if self._cutoff_freq_1 != freq:
                 self._cutoff_freq_1 = freq
-                state_to_emit = self._get_state_locked()
+                state_to_emit = self._get_current_state_snapshot_locked()
         if state_to_emit:
             self.emitter.stateUpdated.emit(state_to_emit)
 
@@ -395,7 +328,7 @@ class SpectralFilterNode(Node):
         with self._lock:
             if self._cutoff_freq_2 != freq:
                 self._cutoff_freq_2 = freq
-                state_to_emit = self._get_state_locked()
+                state_to_emit = self._get_current_state_snapshot_locked()
         if state_to_emit:
             self.emitter.stateUpdated.emit(state_to_emit)
 
@@ -423,7 +356,7 @@ class SpectralFilterNode(Node):
                     ui_update_needed = True
 
             if ui_update_needed:
-                state_snapshot_to_emit = self._get_state_locked()
+                state_snapshot_to_emit = self._get_current_state_snapshot_locked()
 
             filter_type = self._filter_type
             fc1 = self._cutoff_freq_1
@@ -462,7 +395,8 @@ class SpectralFilterNode(Node):
         return {"spectral_frame_out": output_frame}
 
     def serialize_extra(self) -> dict:
-        return self.get_state()
+        # --- FIXED: Renamed method call ---
+        return self.get_current_state_snapshot()
 
     def deserialize_extra(self, data: dict):
         with self._lock:

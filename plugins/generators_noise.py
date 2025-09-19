@@ -11,10 +11,8 @@ from node_system import Node
 from constants import DEFAULT_DTYPE, DEFAULT_SAMPLERATE, DEFAULT_BLOCKSIZE, DEFAULT_CHANNELS
 
 # --- UI and Qt Imports ---
-from ui_elements import NodeItem, NodeStateEmitter, NODE_CONTENT_PADDING
-from PySide6.QtWidgets import QWidget, QLabel, QComboBox, QDial, QVBoxLayout, QHBoxLayout, QSizePolicy
-from PySide6.QtCore import Qt, Slot, QSignalBlocker, Signal, QObject
-from PySide6.QtGui import QFontMetrics
+from ui_elements import ParameterNodeItem, NodeStateEmitter
+from PySide6.QtCore import Slot  # <-- FIXED: Added the missing import for Slot
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -26,117 +24,52 @@ logger = logging.getLogger(__name__)
 class NoiseType(Enum):
     WHITE = "White"
     PINK = "Pink"
-    BROWN = "Brown"  # Also known as Red Noise
+    BROWN = "Brown"
     BLUE = "Blue"
-    VIOLET = "Violet"  # Also known as Purple Noise
+    VIOLET = "Violet"
 
 
 # ==============================================================================
-# UI Class for Noise Generator
+# REFACTORED: UI Class for Noise Generator
 # ==============================================================================
-class NoiseGeneratorNodeItem(NodeItem):
-    """Custom NodeItem for NoiseGeneratorNode, architected for signal/slot communication."""
+class NoiseGeneratorNodeItem(ParameterNodeItem):
+    """
+    Refactored UI for the NoiseGeneratorNode.
+    This class now fully leverages ParameterNodeItem by defining its entire UI
+    declaratively, which handles widget creation, signal/slot connections,
+    and state updates automatically.
+    """
 
     NODE_SPECIFIC_WIDTH = 160
 
     def __init__(self, node_logic: "NoiseGeneratorNode"):
-        super().__init__(node_logic, width=self.NODE_SPECIFIC_WIDTH)
+        # Define the parameters and their control types for this node.
+        parameters = [
+            {
+                "key": "noise_type",
+                "name": "Noise Type",
+                "type": "combobox",
+                # The items list provides the display text and the data (enum member)
+                # to be sent to the logic node's setter.
+                "items": [(nt.value, nt) for nt in NoiseType],
+            },
+            {
+                "key": "level",
+                "name": "Level",
+                "type": "dial",  # Use a dial for the level control
+                "min": 0.0,
+                "max": 1.0,
+                "format": "{:.2f}",  # Display format for the label
+                "is_log": False,
+            },
+        ]
 
-        self.container_widget = QWidget()
-        main_layout = QVBoxLayout(self.container_widget)
-        main_layout.setContentsMargins(
-            NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING
-        )
-        main_layout.setSpacing(6)
-
-        # --- Noise Type Selection ---
-        self.type_label = QLabel("Noise Type:")
-        self.type_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.type_combo = QComboBox()
-        for nt in NoiseType:
-            self.type_combo.addItem(nt.value, nt)
-        self.type_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        main_layout.addWidget(self.type_label)
-        main_layout.addWidget(self.type_combo)
-
-        # --- Level Control ---
-        level_controls_layout = QHBoxLayout()
-        level_controls_layout.setSpacing(5)
-
-        self.level_dial = QDial()
-        self.level_dial.setRange(0, 100)
-        self.level_dial.setNotchesVisible(True)
-
-        level_label_vbox = QVBoxLayout()
-        level_label_vbox.setSpacing(1)
-        self.level_title_label = QLabel("Level")
-        self.level_title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.level_value_label = QLabel("...")
-        self.level_value_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        fm = QFontMetrics(self.level_value_label.font())
-        min_width = fm.boundingRect("1.00 (ext)").width()
-        self.level_title_label.setMinimumWidth(min_width)
-
-        level_label_vbox.addWidget(self.level_title_label)
-        level_label_vbox.addWidget(self.level_value_label)
-
-        level_controls_layout.addLayout(level_label_vbox)
-        level_controls_layout.addWidget(self.level_dial)
-        main_layout.addLayout(level_controls_layout)
-
-        self.setContentWidget(self.container_widget)
-
-        # --- Connect Signals ---
-        self.type_combo.currentTextChanged.connect(self._handle_type_change)
-        self.level_dial.valueChanged.connect(self._handle_level_change)
-        self.node_logic.emitter.stateUpdated.connect(self._on_state_updated)
-
-    @Slot()
-    def updateFromLogic(self):
-        """
-        Pulls the current state from the logic node to initialize the UI.
-        """
-        state = self.node_logic.get_current_state_snapshot()
-        self._on_state_updated(state)
-        super().updateFromLogic()
-
-    @Slot(str)
-    def _handle_type_change(self, type_text: str):
-        selected_enum_member = self.type_combo.currentData()
-        if isinstance(selected_enum_member, NoiseType):
-            self.node_logic.set_noise_type(selected_enum_member)
-
-    @Slot(int)
-    def _handle_level_change(self, dial_value: int):
-        logical_level = dial_value / 100.0
-        self.node_logic.set_level(logical_level)
-
-    @Slot(dict)
-    def _on_state_updated(self, state: dict):
-        """Central slot to update all UI controls from a state dictionary."""
-        # Update Noise Type
-        noise_type = state.get("noise_type")
-        with QSignalBlocker(self.type_combo):
-            index = self.type_combo.findData(noise_type)
-            if index != -1:
-                self.type_combo.setCurrentIndex(index)
-
-        # Update Level
-        level = state.get("level", 0.0)
-        with QSignalBlocker(self.level_dial):
-            self.level_dial.setValue(int(round(level * 100.0)))
-
-        is_level_socket_connected = "level" in self.node_logic.inputs and self.node_logic.inputs["level"].connections
-        self.level_dial.setEnabled(not is_level_socket_connected)
-
-        label_text = f"{level:.2f}"
-        if is_level_socket_connected:
-            label_text += " (ext)"
-        self.level_value_label.setText(label_text)
+        # The parent class now handles the creation of all specified controls.
+        super().__init__(node_logic, parameters, width=self.NODE_SPECIFIC_WIDTH)
 
 
 # ==============================================================================
-# Noise Generator Logic Node
+# Noise Generator Logic Node (Unchanged logic, only import was missing)
 # ==============================================================================
 class NoiseGeneratorNode(Node):
     NODE_TYPE = "Noise Generator"

@@ -1,5 +1,5 @@
 import torch
-import numpy as np  # Kept for UI-specific logarithmic mapping
+import numpy as np
 import threading
 import logging
 from enum import Enum
@@ -10,17 +10,8 @@ from node_system import Node
 from constants import DEFAULT_DTYPE, DEFAULT_SAMPLERATE, DEFAULT_BLOCKSIZE, DEFAULT_CHANNELS
 
 # --- UI and Qt Imports ---
-from ui_elements import NodeItem, NodeStateEmitter, NODE_CONTENT_PADDING
-from PySide6.QtWidgets import (
-    QWidget,
-    QLabel,
-    QComboBox,
-    QDial,
-    QVBoxLayout,
-    QHBoxLayout,
-)
-from PySide6.QtCore import Qt, Slot, QSignalBlocker, Signal, QObject
-from PySide6.QtGui import QFontMetrics
+from ui_elements import ParameterNodeItem, NodeStateEmitter
+from PySide6.QtCore import Slot
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -37,152 +28,76 @@ class Waveform(Enum):
 
 
 # ==============================================================================
-# UI Class for the Oscillator Node
+# UI Class for the Oscillator Node (REFACTORED)
 # ==============================================================================
-class OscillatorNodeItem(NodeItem):
-    """Custom NodeItem for the OscillatorNode, providing user controls."""
+class OscillatorNodeItem(ParameterNodeItem):
+    """
+    Refactored UI for the OscillatorNode using the declarative ParameterNodeItem base class.
+    """
 
     NODE_SPECIFIC_WIDTH = 200
 
     def __init__(self, node_logic: "OscillatorNode"):
-        super().__init__(node_logic, width=self.NODE_SPECIFIC_WIDTH)
+        # Define the UI controls declaratively
+        parameters = [
+            {
+                "key": "waveform",
+                "name": "Waveform",
+                "type": "combobox",
+                "items": [(wf.value, wf) for wf in Waveform],  # (Display Text, Enum Member)
+            },
+            {
+                "key": "frequency",
+                "name": "Frequency",
+                "type": "dial",
+                "min": 20.0,
+                "max": 20000.0,
+                "format": "{:.1f} Hz",
+                "is_log": True,  # Use a logarithmic scale for frequency
+            },
+            {
+                "key": "pulse_width",
+                "name": "Pulse Width",
+                "type": "dial",
+                "min": 0.01,
+                "max": 0.99,
+                "format": "{:.2f}",
+                "is_log": False,
+            },
+        ]
 
-        self.container_widget = QWidget()
-        main_layout = QVBoxLayout(self.container_widget)
-        main_layout.setContentsMargins(
-            NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING
-        )
-        main_layout.setSpacing(6)
-
-        # --- Waveform Selection ---
-        main_layout.addWidget(QLabel("Waveform:"))
-        self.waveform_combo = QComboBox()
-        for wf in Waveform:
-            self.waveform_combo.addItem(wf.value, wf)
-        main_layout.addWidget(self.waveform_combo)
-
-        # --- Dials Layout ---
-        dials_layout = QHBoxLayout()
-        dials_layout.setSpacing(10)
-
-        # --- Frequency Dial ---
-        self.freq_dial, self.freq_label_vbox = self._create_dial_with_labels("Freq (Hz)", "440.0")
-        dials_layout.addLayout(self.freq_label_vbox, stretch=1)
-        dials_layout.addWidget(self.freq_dial, stretch=2)
-
-        # --- Pulse Width Dial ---
-        self.pw_dial, self.pw_label_vbox = self._create_dial_with_labels("Pulse Width", "0.50")
-        self.pw_widget = QWidget()  # Container to easily show/hide
-        pw_layout = QHBoxLayout(self.pw_widget)
-        pw_layout.setContentsMargins(0, 0, 0, 0)
-        pw_layout.setSpacing(10)
-        pw_layout.addLayout(self.pw_label_vbox, stretch=1)
-        pw_layout.addWidget(self.pw_dial, stretch=2)
-
-        main_layout.addLayout(dials_layout)
-        main_layout.addWidget(self.pw_widget)
-
-        self.setContentWidget(self.container_widget)
-
-        # --- Connect Signals ---
-        self.waveform_combo.currentTextChanged.connect(self._handle_waveform_change)
-        self.freq_dial.valueChanged.connect(self._handle_freq_change)
-        self.pw_dial.valueChanged.connect(self._handle_pw_change)
-        self.node_logic.emitter.stateUpdated.connect(self._on_state_updated)
-
-    @Slot()
-    def updateFromLogic(self):
-        """
-        Pulls the current state from the logic node to initialize the UI.
-        """
-        state = self.node_logic.get_current_state_snapshot()
-        self._on_state_updated(state)
-        super().updateFromLogic()
-
-    def _create_dial_with_labels(self, title: str, initial_value: str) -> tuple[QDial, QVBoxLayout]:
-        """Helper factory to create a dial and its associated labels."""
-        dial = QDial()
-        dial.setRange(0, 1000)  # Use a large integer range for precision
-        dial.setNotchesVisible(True)
-
-        label_vbox = QVBoxLayout()
-        label_vbox.setSpacing(1)
-        title_label = QLabel(title)
-        title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        value_label = QLabel(initial_value)
-        value_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
-        # Ensure minimum width to prevent UI jitter when text changes
-        fm = QFontMetrics(value_label.font())
-        min_width = fm.boundingRect("9999.9 Hz (ext)").width()
-        title_label.setMinimumWidth(min_width)
-
-        label_vbox.addWidget(title_label)
-        label_vbox.addWidget(value_label)
-
-        return (dial, label_vbox)
-
-    @Slot(str)
-    def _handle_waveform_change(self, text: str):
-        selected_enum = self.waveform_combo.currentData()
-        if isinstance(selected_enum, Waveform):
-            self.node_logic.set_waveform(selected_enum)
-
-    @Slot(int)
-    def _handle_freq_change(self, dial_value: int):
-        # Logarithmic mapping for more intuitive frequency control
-        min_f, max_f = 20.0, 20000.0
-        log_min, log_max = np.log10(min_f), np.log10(max_f)
-        freq = 10 ** (((dial_value / 1000.0) * (log_max - log_min)) + log_min)
-        self.node_logic.set_frequency(freq)
-
-    @Slot(int)
-    def _handle_pw_change(self, dial_value: int):
-        pw = dial_value / 1000.0
-        self.node_logic.set_pulse_width(pw)
+        # The superclass constructor creates all the widgets and connects the signals
+        super().__init__(node_logic, parameters, width=self.NODE_SPECIFIC_WIDTH)
 
     @Slot(dict)
     def _on_state_updated(self, state: dict):
-        """Central slot to update all UI controls from a state dictionary."""
+        """
+        Overrides the base class method to add custom UI logic.
+        """
+        # First, call the parent method to handle all standard updates
+        # (e.g., setting values, enabling/disabling based on connections).
+        super()._on_state_updated(state)
+
+        # Add custom logic to show/hide the Pulse Width control
         waveform = state.get("waveform")
-        freq = state.get("frequency", 440.0)
-        pw = state.get("pulse_width", 0.5)
+        pw_control_info = self._controls.get("pulse_width")
 
-        # --- Update Waveform Selector ---
-        with QSignalBlocker(self.waveform_combo):
-            index = self.waveform_combo.findData(waveform)
-            if index != -1:
-                self.waveform_combo.setCurrentIndex(index)
+        if pw_control_info:
+            # The _controls dictionary holds references to the generated widgets
+            pw_widget = pw_control_info["widget"]
+            pw_label = pw_control_info["label"]
+            is_visible = waveform == Waveform.SQUARE
 
-        # --- Update Frequency Dial and Label ---
-        with QSignalBlocker(self.freq_dial):
-            min_f, max_f = 20.0, 20000.0
-            log_min, log_max = np.log10(min_f), np.log10(max_f)
-            dial_val = int(1000.0 * (np.log10(freq) - log_min) / (log_max - log_min))
-            self.freq_dial.setValue(dial_val)
+            pw_widget.setVisible(is_visible)
+            pw_label.setVisible(is_visible)
 
-        freq_label_widget = self.freq_label_vbox.itemAt(1).widget()
-        is_freq_ext = "freq" in self.node_logic.inputs and self.node_logic.inputs["freq"].connections
-        freq_label_widget.setText(f"{freq:.1f} Hz{' (ext)' if is_freq_ext else ''}")
-        self.freq_dial.setEnabled(not is_freq_ext)
-
-        # --- Update Pulse Width Dial and Label ---
-        with QSignalBlocker(self.pw_dial):
-            self.pw_dial.setValue(int(pw * 1000.0))
-
-        pw_label_widget = self.pw_label_vbox.itemAt(1).widget()
-        is_pw_ext = "pulse_width" in self.node_logic.inputs and self.node_logic.inputs["pulse_width"].connections
-        pw_label_widget.setText(f"{pw:.2f}{' (ext)' if is_pw_ext else ''}")
-        self.pw_dial.setEnabled(not is_pw_ext)
-
-        # --- Show/Hide Pulse Width Control ---
-        self.pw_widget.setVisible(waveform == Waveform.SQUARE)
-        self.container_widget.adjustSize()
-        self.update_geometry()  # Request geometry update when visibility changes
+            # This is crucial to make the node resize correctly when controls are hidden/shown.
+            self.container_widget.adjustSize()
+            self.update_geometry()
 
 
 # ==============================================================================
-# Oscillator Logic Node
+# Oscillator Logic Node (Unchanged)
 # ==============================================================================
 class OscillatorNode(Node):
     NODE_TYPE = "Oscillator"
@@ -264,7 +179,9 @@ class OscillatorNode(Node):
                 new_pw = np.clip(float(pw_socket), 0.01, 0.99)
                 if abs(self._pulse_width - new_pw) > 1e-6:
                     self._pulse_width = new_pw
-                    state_snapshot_to_emit = self._get_current_state_snapshot_locked()
+                    # If freq also changed, we don't need to get the snapshot again
+                    if not state_snapshot_to_emit:
+                        state_snapshot_to_emit = self._get_current_state_snapshot_locked()
 
             # Copy state to local variables for processing
             frequency = self._frequency

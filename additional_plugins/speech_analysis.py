@@ -36,7 +36,7 @@ import torchaudio.transforms as T
 
 # --- Node System Imports ---
 from node_system import Node
-from ui_elements import NodeItem, NodeStateEmitter, NODE_CONTENT_PADDING
+from ui_elements import ParameterNodeItem, NodeStateEmitter, NODE_CONTENT_PADDING
 from constants import DEFAULT_SAMPLERATE, DEFAULT_BLOCKSIZE, DEFAULT_DTYPE
 
 # --- Qt Imports ---
@@ -59,88 +59,88 @@ F0_SMOOTHING_ALPHA = 0.3
 # ==============================================================================
 # 1. Custom UI Class (F0EstimatorNodeItem)
 # ==============================================================================
-class F0EstimatorNodeItem(NodeItem):
+
+
+class F0EstimatorNodeItem(ParameterNodeItem):
+    """
+    Refactored UI for the F0EstimatorNode using ParameterNodeItem.
+    The combo box is now created declaratively, and custom labels are added
+    to the layout provided by the base class.
+    """
+
     NODE_SPECIFIC_WIDTH = 200
 
     def __init__(self, node_logic: "F0EstimatorNode"):
-        super().__init__(node_logic, width=self.NODE_SPECIFIC_WIDTH)
 
-        self.container_widget = QWidget()
-        layout = QVBoxLayout(self.container_widget)
-        layout.setContentsMargins(
-            NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING
-        )
-        layout.setSpacing(5)
-
-        layout.addWidget(QLabel("Method:"))
-        self.method_combo = QComboBox()
-        self.method_combo.addItem("PYIN (Accurate)", "pyin")
-        self.method_combo.addItem("YIN (Classic)", "yin")
-        self.method_combo.addItem("SwiftF0 (ML-based)", "swift-f0")
-        self.method_combo.addItem("TorchCrepe (ML-based)", "torchcrepe")
-        self.method_combo.addItem("Autocorrelation (Fast)", "autocorr")
-        layout.addWidget(self.method_combo)
-
+        # --- Step 1 - Define custom widgets BEFORE the super() call ---
+        # This ensures these attributes exist when the parent's __init__ eventually
+        # calls our overridden _on_state_updated method.
         self.f0_label = QLabel("F0: ... Hz")
         self.confidence_label = QLabel("Confidence: ...")
         self.f0_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.confidence_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(self.f0_label)
-        layout.addWidget(self.confidence_label)
 
+        # Define the parameters that ParameterNodeItem will automatically create
+        parameters = [
+            {
+                "key": "method",
+                "name": "Method:",
+                "type": "combobox",
+                "items": [
+                    ("PYIN (Accurate)", "pyin"),
+                    ("YIN (Classic)", "yin"),
+                    ("SwiftF0 (ML-based)", "swift-f0"),
+                    ("TorchCrepe (ML-based)", "torchcrepe"),
+                    ("Autocorrelation (Fast)", "autocorr"),
+                ],
+            }
+        ]
+
+        # --- Step 2 - Call the parent constructor ---
+        # The superclass constructor creates the main_layout, container_widget,
+        # and all the controls defined in the 'parameters' list above.
+        # It will also trigger the initial call to updateFromLogic -> _on_state_updated.
+        super().__init__(node_logic, parameters, width=self.NODE_SPECIFIC_WIDTH)
+
+        # --- Step 3 - Add the pre-made custom widgets to the layout ---
+        # after super().__init__() has been called.
+        main_layout = self.container_widget.layout()
+        main_layout.addWidget(self.f0_label)
+        main_layout.addWidget(self.confidence_label)
+
+        # --- Add dependency warning labels (static) ---
         if not LIBROSA_AVAILABLE:
             error_label = QLabel("Note: 'PYIN' & 'YIN' require\n(pip install librosa)")
             error_label.setStyleSheet("color: orange;")
             error_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             error_label.setWordWrap(True)
-            layout.addWidget(error_label)
+            main_layout.addWidget(error_label)
 
         if not SWIFT_F0_AVAILABLE:
             error_label = QLabel("Note: 'SwiftF0' requires\n(pip install swift-f0)")
             error_label.setStyleSheet("color: orange;")
             error_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             error_label.setWordWrap(True)
-            layout.addWidget(error_label)
+            main_layout.addWidget(error_label)
 
         if not TORCHCREPE_AVAILABLE:
             error_label = QLabel("Note: 'TorchCrepe' requires\n(pip install torchcrepe)")
             error_label.setStyleSheet("color: orange;")
             error_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             error_label.setWordWrap(True)
-            layout.addWidget(error_label)
+            main_layout.addWidget(error_label)
 
-        self.setContentWidget(self.container_widget)
-
-        self.method_combo.currentIndexChanged.connect(self._on_method_change)
-        self.node_logic.emitter.stateUpdated.connect(self._on_state_updated)
-        self.updateFromLogic()
-
-    @Slot(int)
-    def _on_method_change(self, index: int):
-        method_key = self.method_combo.itemData(index)
-        self.node_logic.set_estimation_method(method_key)
+        # No need to call self.updateFromLogic() here, as the parent constructor does it.
 
     @Slot(dict)
     def _on_state_updated(self, state: dict):
-        method = state.get("method", "pyin")
-        with QSignalBlocker(self.method_combo):
-            index = self.method_combo.findData(method)
-            if index != -1:
-                self.method_combo.setCurrentIndex(index)
+        """
+        Overrides the parent method to add custom UI logic.
+        """
+        # Call the parent implementation first to handle the auto-generated controls (the combo box)
+        super()._on_state_updated(state)
 
-        for key in ["pyin", "yin"]:
-            key_index = self.method_combo.findData(key)
-            if key_index != -1:
-                self.method_combo.model().item(key_index).setEnabled(LIBROSA_AVAILABLE)
-
-        swift_index = self.method_combo.findData("swift-f0")
-        if swift_index != -1:
-            self.method_combo.model().item(swift_index).setEnabled(SWIFT_F0_AVAILABLE)
-
-        torchcrepe_index = self.method_combo.findData("torchcrepe")
-        if torchcrepe_index != -1:
-            self.method_combo.model().item(torchcrepe_index).setEnabled(TORCHCREPE_AVAILABLE)
-
+        # --- Handle custom labels ---
         f0 = state.get("f0_hz")
         confidence = state.get("confidence")
         if f0 is not None and f0 > 0:
@@ -152,11 +152,21 @@ class F0EstimatorNodeItem(NodeItem):
         else:
             self.confidence_label.setText("Confidence: ...")
 
-    @Slot()
-    def updateFromLogic(self):
-        state = self.node_logic.get_current_state_snapshot()
-        self._on_state_updated(state)
-        super().updateFromLogic()
+        # --- Handle enabling/disabling combobox items based on dependencies ---
+        method_combo = self._controls["method"]["widget"]
+
+        for key in ["pyin", "yin"]:
+            key_index = method_combo.findData(key)
+            if key_index != -1:
+                method_combo.model().item(key_index).setEnabled(LIBROSA_AVAILABLE)
+
+        swift_index = method_combo.findData("swift-f0")
+        if swift_index != -1:
+            method_combo.model().item(swift_index).setEnabled(SWIFT_F0_AVAILABLE)
+
+        torchcrepe_index = method_combo.findData("torchcrepe")
+        if torchcrepe_index != -1:
+            method_combo.model().item(torchcrepe_index).setEnabled(TORCHCREPE_AVAILABLE)
 
 
 # ==============================================================================
@@ -254,7 +264,8 @@ class F0EstimatorNode(Node):
         self._stop_ui_thread_event = threading.Event()
 
     @Slot(str)
-    def set_estimation_method(self, method: str):
+    def set_method(self, method: str):  # MODIFIED: Renamed from set_estimation_method
+        """Thread-safe setter, automatically called by the ParameterNodeItem UI."""
         state_to_emit = None
         with self._lock:
             if method != self._method:
