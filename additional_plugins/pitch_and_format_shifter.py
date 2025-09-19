@@ -190,8 +190,7 @@ class PitchAndFormantShifterNode(Node):
             final_output_phases = new_output_phases
 
         self._last_input_phases = current_input_phases
-        # --- FIX: Store the FINAL phase (post-jitter) and wrap it ---
-        self._last_output_phases = torch.fmod(final_output_phases, 2 * np.pi)
+        self._last_output_phases = torch.fmod(new_output_phases, 2 * np.pi)
 
         return torch.polar(final_magnitudes, final_output_phases)
 
