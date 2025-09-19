@@ -45,6 +45,9 @@ class Engine:
 
         self._cached_plan: list[tuple[Node, dict[str, Socket], dict[str, Any]]] | None = None
 
+        # -- a thread-safe command queue ---
+        self._command_queue = deque()
+
         self._state = EngineState.STOPPED
         self._stop_event = threading.Event()
         self._tick_semaphore = threading.Semaphore(0)
@@ -86,54 +89,99 @@ class Engine:
         if self._state == EngineState.RUNNING:
             self._tick_semaphore.release()
 
+    # --- Central command processor, called by the processing thread ---
+    def _process_command_queue_locked(self):
+        """
+        Executes all pending commands from the UI thread. This is the ONLY
+        place where the graph structure is mutated. Assumes lock is held.
+        """
+        # Any command invalidates the plan, do this once.
+        self._invalidate_plan_cache()
+
+        while self._command_queue:
+            command, payload = self._command_queue.popleft()
+
+            if command == "add_node":
+                self._add_node_locked(payload["node_object"])
+            elif command == "remove_node":
+                self._remove_node_locked(payload["node_id"])
+            elif command == "add_connection":
+                self._add_connection_locked(payload["start_socket"], payload["end_socket"])
+            elif command == "remove_connection":
+                self._remove_connection_locked(payload["connection_id"])
+            elif command == "rename_node":
+                self._rename_node_locked(payload["node_id"], payload["new_name"])
+
     def _processing_loop(self):
         next_update_time = 0.0
         processing_stats = {}
         while not self._stop_event.is_set():
-            acquired = self._tick_semaphore.acquire(timeout=0.1)
-            if not acquired:
-                continue
-
-            if self._stop_event.is_set():
-                break
-
-            processing_plan = None
-            error_to_emit = None
-
+            # --- Step 1: ALWAYS process command queue at the start of the cycle ---
+            # This makes graph modifications responsive even when processing is stopped.
+            graph_was_changed = False
             with self._lock:
-                # Only execute a tick if the engine is in the RUNNING state.
-                if self._state != EngineState.RUNNING:
+                if self._command_queue:
+                    self._process_command_queue_locked()
+                    graph_was_changed = True
+
+            # Emit signal *after* releasing the lock to notify UI of changes
+            if graph_was_changed:
+                self._emit_graph_changed()
+
+            # --- Step 2: Check if the engine is in the RUNNING state ---
+            with self._lock:
+                is_running = self._state == EngineState.RUNNING
+
+            if is_running:
+                # --- State: RUNNING ---
+                # Wait for a tick from the active clock source.
+                acquired = self._tick_semaphore.acquire(timeout=0.1)
+                if not acquired:
+                    continue  # Timeout, loop again
+
+                if self._stop_event.is_set():
+                    break
+
+                # --- Execute the audio processing logic ---
+                processing_plan = None
+                error_to_emit = None
+                with self._lock:
+                    # Re-check the state in case it changed while waiting for the tick
+                    if self._state != EngineState.RUNNING:
+                        continue
+
+                    processing_plan = self._get_processing_plan()
+                    if processing_plan is None:
+                        error_to_emit = "Cycle detected in graph. Processing halted."
+                        logger.error(error_to_emit)
+                        self._stop_processing_locked()
+
+                if error_to_emit:
+                    self.signals.processingError.emit(error_to_emit)
+                    self.signals.processingStateChanged.emit(False)
                     continue
 
-                processing_plan = self._get_processing_plan()
+                try:
+                    if processing_plan:
+                        self._execute_unlocked_tick(processing_plan, processing_stats)
+                        current_time = time.monotonic()
+                        if current_time >= next_update_time:
+                            next_update_time = current_time + 0.033  # ~30 FPS
+                            self.signals.nodeProcessingStatsUpdated.emit(dict(processing_stats))
+                except Exception as e:
+                    error_msg = f"Unhandled exception in unlocked processing tick: {e}"
+                    logger.error(f"{error_msg}\n{traceback.format_exc()}")
+                    with self._lock:
+                        self._stop_processing_locked()
+                    self.signals.processingError.emit(error_msg)
+                    self.signals.processingStateChanged.emit(False)
 
-                if processing_plan is None:
-                    error_to_emit = "Cycle detected in graph. Processing halted."
-                    logger.error(error_to_emit)
-                    self._stop_processing_locked()
-
-            # emit the signals *after* the lock has been released.
-            if error_to_emit:
-                self.signals.processingError.emit(error_to_emit)
-                self.signals.processingStateChanged.emit(False)
-                continue
-
-            try:
-                if processing_plan:
-                    self._execute_unlocked_tick(processing_plan, processing_stats)
-
-                    current_time = time.monotonic()
-                    if current_time >= next_update_time:
-                        next_update_time = current_time + 0.033  # ~30 FPS
-                        self.signals.nodeProcessingStatsUpdated.emit(dict(processing_stats))
-
-            except Exception as e:
-                error_msg = f"Unhandled exception in unlocked processing tick: {e}"
-                logger.error(f"{error_msg}\n{traceback.format_exc()}")
-                with self._lock:
-                    self._stop_processing_locked()
-                self.signals.processingError.emit(error_msg)
-                self.signals.processingStateChanged.emit(False)
+            else:
+                # --- State: STOPPED, STARTING, or STOPPING ---
+                # The engine is not running, so we don't process audio.
+                # We sleep for a short duration to prevent this loop from
+                # busy-waiting and consuming 100% CPU.
+                time.sleep(0.01)  # 10ms sleep to yield the CPU
 
     def _execute_unlocked_tick(
         self,
@@ -142,7 +190,7 @@ class Engine:
     ):
         """
         Processes one tick of the graph using a pre-computed plan.
-        MODIFIED: Now handles errors on a per-node basis.
+        Handles errors on a per-node basis.
         """
         stats.clear()
         for node, input_sources, input_data in processing_plan:
@@ -182,9 +230,6 @@ class Engine:
 
                 # 3. Emit a signal so the UI can be updated.
                 self.signals.nodeErrorOccurred.emit(node.id, error_msg)
-
-                # This node has failed, but we continue the loop for other nodes.
-                # The original exception is caught and handled, so it doesn't crash the engine.
 
     def _get_processing_plan(self) -> list[tuple[Node, dict[str, Socket], dict[str, Any]]] | None:
         """
@@ -245,17 +290,13 @@ class Engine:
 
     def start_processing(self):
         error_to_emit = None
-
         with self._lock:
             if self._state != EngineState.STOPPED:
                 logger.warning(f"Engine: Cannot start processing. Current state is {self._state.name}.")
                 return
-
             self._state = EngineState.STARTING
             logger.info("Engine: Starting processing...")
-
             self._invalidate_plan_cache()
-
             for node in self.graph.nodes.values():
                 try:
                     node.clear_error_state()
@@ -263,11 +304,9 @@ class Engine:
                 except Exception as e:
                     error_to_emit = f"Error starting node '{node.name}': {e}"
                     break
-
             if not error_to_emit:
                 clock_node_id = self.graph.selected_clock_node_id
                 clock_node = self.graph.nodes.get(clock_node_id)
-
                 if clock_node and isinstance(clock_node, IClockProvider):
                     try:
                         clock_node.start_clock(self.tick)
@@ -277,18 +316,14 @@ class Engine:
                         error_to_emit = f"Failed to activate clock source '{clock_node.name}': {e}"
                 else:
                     logger.warning("Engine: Starting processing without an active clock source.")
-
             if error_to_emit:
                 self._state = EngineState.STOPPED
             else:
                 self._state = EngineState.RUNNING
-
         self._emit_graph_changed()
-
         if error_to_emit:
             self.signals.processingError.emit(error_to_emit)
             return
-
         self.signals.processingStateChanged.emit(True)
         logger.info("Engine: Processing started.")
 
@@ -296,20 +331,16 @@ class Engine:
         """Internal helper to stop processing. Assumes lock is held."""
         self._state = EngineState.STOPPING
         logger.info("Engine: Stopping processing...")
-
         clock_node_id = self.graph.selected_clock_node_id
-
         if clock_node_id and clock_node_id in self.graph.nodes:
             clock_node = self.graph.nodes[clock_node_id]
             if isinstance(clock_node, IClockProvider):
                 clock_node.stop_clock()
-
         for node in self.graph.nodes.values():
             try:
                 node.stop()
             except Exception as e:
                 logger.error(f"Error stopping node '{node.name}': {e}", exc_info=True)
-
         self._state = EngineState.STOPPED
 
     def stop_processing(self):
@@ -317,10 +348,8 @@ class Engine:
             if self._state != EngineState.RUNNING:
                 return
             self._stop_processing_locked()
-
         while self._tick_semaphore.acquire(blocking=False):
             pass
-
         self.signals.nodeProcessingStatsUpdated.emit({})
         self.signals.processingStateChanged.emit(False)
         logger.info("Engine: Processing stopped.")
@@ -339,26 +368,15 @@ class Engine:
             snapshot = self._create_graph_snapshot_locked()
         self.signals.graphChanged.emit(snapshot)
 
-    def rename_node(self, node_id: str, new_name: str):
-        with self._lock:
-            if node_id in self.graph.nodes and new_name:
-                node = self.graph.nodes[node_id]
-                logger.info(f"Engine: Renaming node '{node.name}' to '{new_name}'")
-                node.name = new_name
-        self._emit_graph_changed()
-
     def set_clock_source(self, node_id: str | None):
         was_processing = self._state == EngineState.RUNNING
-
         if was_processing:
             self.stop_processing()
-
         with self._lock:
             if self.graph.selected_clock_node_id == node_id:
                 if was_processing:
                     self.start_processing()
                 return
-
             new_node = self.graph.nodes.get(node_id)
             if new_node and isinstance(new_node, IClockProvider):
                 self.graph.selected_clock_node_id = node_id
@@ -368,55 +386,38 @@ class Engine:
                     logger.warning(f"Node '{new_node.name}' cannot be a clock source.")
                 self.graph.selected_clock_node_id = None
                 logger.info("Engine: Clock source cleared.")
-
         self._emit_graph_changed()
-
         if was_processing:
             self.start_processing()
 
-    def add_node(self, node_class: Type[Node], name: str, pos: tuple[float, float]) -> Node:
+    # --- Centralized Command Queuing ---
+    def _queue_command(self, command_name: str, **payload):
+        """
+        Safely queues a command for the processing thread.
+        This is the single entry point for all graph mutations.
+        """
         with self._lock:
-            self._invalidate_plan_cache()
-            new_node = node_class(name)
-            new_node.pos = pos
-            self.graph.nodes[new_node.id] = new_node
+            self._command_queue.append((command_name, payload))
 
-            if isinstance(new_node, IClockProvider) and self.graph.selected_clock_node_id is None:
-                self.graph.selected_clock_node_id = new_node.id
-
-            if self._state == EngineState.RUNNING:
-                new_node.start()
-
-        self._emit_graph_changed()
+    # --- Public methods now queue commands instead of acting directly ---
+    def add_node(self, node_class: Type[Node], name: str, pos: tuple[float, float]) -> Node:
+        """Creates a node and queues it for addition to the graph."""
+        new_node = node_class(name)
+        new_node.pos = pos
+        self._queue_command("add_node", node_object=new_node)
         return new_node
 
     def remove_node(self, node_id: str):
-        with self._lock:
-            if node_id not in self.graph.nodes:
-                return
-            self._invalidate_plan_cache()
-            node_to_remove = self.graph.nodes[node_id]
+        """Queues a node for deferred deletion from the graph."""
+        self._queue_command("remove_node", node_id=node_id)
 
-            if self.graph.selected_clock_node_id == node_id:
-                if self._state == EngineState.RUNNING and isinstance(node_to_remove, IClockProvider):
-                    node_to_remove.stop_clock()
-                self.graph.selected_clock_node_id = None
-
-            conns_to_remove = [
-                conn
-                for conn in self.graph.connections.values()
-                if conn.start_socket.node == node_to_remove or conn.end_socket.node == node_to_remove
-            ]
-
-            for conn in conns_to_remove:
-                self._remove_connection_internal(conn.id)
-
-            node_to_remove.remove()
-            del self.graph.nodes[node_id]
-
-        self._emit_graph_changed()
+    def rename_node(self, node_id: str, new_name: str):
+        """Queues a node for a deferred rename operation."""
+        if new_name:  # Basic validation
+            self._queue_command("rename_node", node_id=node_id, new_name=new_name)
 
     def add_connection(self, start_socket: Socket, end_socket: Socket):
+        """Queues a connection for deferred addition to the graph."""
         start_type = start_socket.data_type if start_socket.data_type is not None else Any
         end_type = end_socket.data_type if end_socket.data_type is not None else Any
         is_compatible = start_type is Any or end_type is Any or start_type == end_type
@@ -425,15 +426,51 @@ class Engine:
             logger.error(f"Engine rejected incompatible connection: {start_socket} -> {end_socket}")
             return
 
-        with self._lock:
-            self._invalidate_plan_cache()
-            self._add_connection_locked(start_socket, end_socket)
-        self._emit_graph_changed()
+        self._queue_command("add_connection", start_socket=start_socket, end_socket=end_socket)
+
+    def remove_connection(self, connection_id: str):
+        """Queues a connection for deferred deletion from the graph."""
+        self._queue_command("remove_connection", connection_id=connection_id)
+
+    # --- Private methods to perform the actual mutation, called by the command processor ---
+    def _add_node_locked(self, new_node: Node):
+        """Adds a node to the graph. Assumes lock is held."""
+        self.graph.nodes[new_node.id] = new_node
+        if isinstance(new_node, IClockProvider) and self.graph.selected_clock_node_id is None:
+            self.graph.selected_clock_node_id = new_node.id
+        if self._state == EngineState.RUNNING:
+            new_node.start()
+
+    def _remove_node_locked(self, node_id: str):
+        """Removes a node from the graph. Assumes lock is held."""
+        if node_id not in self.graph.nodes:
+            return
+        node_to_remove = self.graph.nodes[node_id]
+        if self.graph.selected_clock_node_id == node_id:
+            if self._state == EngineState.RUNNING and isinstance(node_to_remove, IClockProvider):
+                node_to_remove.stop_clock()
+            self.graph.selected_clock_node_id = None
+        conns_to_remove = [
+            conn
+            for conn in self.graph.connections.values()
+            if conn.start_socket.node == node_to_remove or conn.end_socket.node == node_to_remove
+        ]
+        for conn in conns_to_remove:
+            self._remove_connection_locked(conn.id)
+        node_to_remove.remove()
+        del self.graph.nodes[node_id]
+
+    def _rename_node_locked(self, node_id: str, new_name: str):
+        """Renames a node in the graph. Assumes lock is held."""
+        if node_id in self.graph.nodes and new_name:
+            node = self.graph.nodes[node_id]
+            logger.info(f"Engine: Renaming node '{node.name}' to '{new_name}'")
+            node.name = new_name
 
     def _add_connection_locked(self, start_socket: Socket, end_socket: Socket):
         try:
             if end_socket.connections:
-                self._remove_connection_internal(end_socket.connections[0].id)
+                self._remove_connection_locked(end_socket.connections[0].id)
 
             connection = Connection(start_socket, end_socket)
             self.graph.connections[connection.id] = connection
@@ -442,13 +479,8 @@ class Engine:
         except Exception as e:
             logger.error(f"Engine: Failed to create connection while holding lock: {e}", exc_info=True)
 
-    def remove_connection(self, connection_id: str):
-        with self._lock:
-            self._invalidate_plan_cache()
-            self._remove_connection_internal(connection_id)
-        self._emit_graph_changed()
-
-    def _remove_connection_internal(self, connection_id: str):
+    def _remove_connection_locked(self, connection_id: str):
+        """Removes a connection from the graph. Assumes lock is held."""
         if connection_id in self.graph.connections:
             conn = self.graph.connections[connection_id]
             if conn in conn.start_socket.connections:
@@ -503,7 +535,6 @@ class Engine:
                 new_node.pos = tuple(node_data.get("pos", (0, 0)))
                 new_node.deserialize_extra(node_data)
                 self.graph.nodes[new_node.id] = new_node
-
             for conn_data in graph_data.get("connections", []):
                 start_node = self.graph.nodes.get(conn_data["start_node_id"])
                 end_node = self.graph.nodes.get(conn_data["end_node_id"])
@@ -516,9 +547,7 @@ class Engine:
                     logger.warning("Skipping connection due to missing socket.")
                     continue
                 self._add_connection_locked(start_socket, end_socket)
-
             self.graph.selected_clock_node_id = graph_data.get("clock_source_id")
-
         self._emit_graph_changed()
 
     def reload_plugins_and_graph(self, module_names: list[str]):
@@ -527,50 +556,31 @@ class Engine:
         This is a blocking operation that ensures thread safety.
         """
         logger.info("Engine: Starting plugin reload transaction.")
-
-        # 1. Synchronously stop all processing.
         was_running = self._state == EngineState.RUNNING
         if was_running:
             self.stop_processing()
-
-        # --- FIX: Synchronously stop the entire processing thread ---
-        # This guarantees the audio thread is not accessing any graph data.
         self._synchronous_stop_processing_thread()
-
-        # 2. Serialize the graph state to an in-memory dictionary.
         with self._lock:
             graph_data = {
                 "nodes": [node.to_dict() for node in self.graph.nodes.values()],
                 "connections": [conn.to_dict() for conn in self.graph.connections.values()],
                 "clock_source_id": self.graph.selected_clock_node_id,
             }
-
-        # 3. Clear the graph completely.
         with self._lock:
             self._clear_graph_locked()
         self._emit_graph_changed()
-
-        # 4. Reload the python plugin modules.
         reload_plugin_modules(module_names)
-
-        # 5. Re-load the graph from the dictionary.
         try:
             self.load_graph_from_dict(graph_data)
         except Exception as e:
             error_msg = f"Failed to reload graph from memory: {e}"
             logger.error(error_msg, exc_info=True)
             self.signals.processingError.emit(error_msg)
-            # --- FIX: Restart the thread even on failure to restore a working state ---
             self._start_processing_thread()
             return
-
-        # --- FIX: Restart the processing thread ---
         self._start_processing_thread()
-
-        # 6. Restart processing if it was running before.
         if was_running:
             self.start_processing()
-
         logger.info("Engine: Plugin reload transaction complete.")
 
     def shutdown(self):
@@ -579,25 +589,15 @@ class Engine:
         to prevent race conditions and segmentation faults on exit.
         """
         logger.info("Engine: Shutting down...")
-
-        # 1. Stop the clock source (e.g., audio device) synchronously.
         if self._state == EngineState.RUNNING:
             self.stop_processing()
-
-        # 2. Stop the engine's own processing thread. This is the most critical step.
         self._synchronous_stop_processing_thread()
-
         logger.info("Engine: Processing thread stopped. Cleaning up nodes...")
-
-        # 3. Now that all processing is guaranteed to be stopped,
-        # clean up each node's individual resources.
         with self._lock:
             nodes_to_remove = list(self.graph.nodes.values())
-
         for node in nodes_to_remove:
             try:
                 node.remove()
             except Exception as e:
                 logger.error(f"Error during shutdown while removing node '{node.name}': {e}", exc_info=True)
-
         logger.info("Engine: Shutdown complete.")

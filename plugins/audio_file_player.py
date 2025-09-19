@@ -313,6 +313,10 @@ class AudioFilePlayerNode(Node):
 
                 with self._lock:
                     self._output_channels = file_info["channels"]
+                    # Update the silence block to match the new channel count
+                    self._silence = {
+                        "out": torch.zeros((self._output_channels, DEFAULT_BLOCKSIZE), dtype=DEFAULT_DTYPE)
+                    }
                     self._playback_state = PlaybackState.PLAYING
                     self._user_intended_state = PlaybackState.PLAYING
                     initial_seek_seconds = self._initial_seek_seconds
