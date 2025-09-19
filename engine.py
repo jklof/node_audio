@@ -3,6 +3,7 @@ import traceback
 import logging
 import json
 import time
+import gc
 from collections import deque
 from typing import Type, Any
 from enum import Enum, auto
@@ -10,8 +11,7 @@ from enum import Enum, auto
 from PySide6.QtCore import QObject, Signal
 
 from node_system import NodeGraph, Node, Socket, Connection, IClockProvider
-from plugin_loader import registry
-from plugin_loader import reload_plugin_modules
+from plugin_loader import registry, scan_and_load_plugins
 from constants import TICK_DURATION_NS
 
 logger = logging.getLogger(__name__)
@@ -550,7 +550,7 @@ class Engine:
             self.graph.selected_clock_node_id = graph_data.get("clock_source_id")
         self._emit_graph_changed()
 
-    def reload_plugins_and_graph(self, module_names: list[str]):
+    def reload_plugins_and_graph(self, plugin_dirs: list[str]):
         """
         Performs a full, transactional reload of plugins and the graph.
         This is a blocking operation that ensures thread safety.
@@ -559,18 +559,27 @@ class Engine:
         was_running = self._state == EngineState.RUNNING
         if was_running:
             self.stop_processing()
+
         self._synchronous_stop_processing_thread()
+
+        # Serialize the current graph state
         with self._lock:
             graph_data = {
                 "nodes": [node.to_dict() for node in self.graph.nodes.values()],
                 "connections": [conn.to_dict() for conn in self.graph.connections.values()],
                 "clock_source_id": self.graph.selected_clock_node_id,
             }
+
+        # Clear the graph logic
         with self._lock:
             self._clear_graph_locked()
         self._emit_graph_changed()
-        reload_plugin_modules(module_names)
+
+        # Rescan all plugin directories to find new and existing plugins and reload them.
+        scan_and_load_plugins(plugin_dirs, clear_registry=True)
+
         try:
+            # Reload the graph using the newly loaded/reloaded node classes
             self.load_graph_from_dict(graph_data)
         except Exception as e:
             error_msg = f"Failed to reload graph from memory: {e}"
@@ -578,9 +587,11 @@ class Engine:
             self.signals.processingError.emit(error_msg)
             self._start_processing_thread()
             return
+
         self._start_processing_thread()
         if was_running:
             self.start_processing()
+
         logger.info("Engine: Plugin reload transaction complete.")
 
     def shutdown(self):
@@ -600,4 +611,7 @@ class Engine:
                 node.remove()
             except Exception as e:
                 logger.error(f"Error during shutdown while removing node '{node.name}': {e}", exc_info=True)
+
+        gc.collect()
+
         logger.info("Engine: Shutdown complete.")

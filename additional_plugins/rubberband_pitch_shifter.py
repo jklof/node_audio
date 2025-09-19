@@ -144,6 +144,7 @@ class RubberBandPitchShiftNode(Node):
 
     @Slot(str)
     def set_formant_mode(self, value: str):
+        state_to_emit = None  # Initialize the variable to None
         with self._lock:
             if self._formant_mode != value:
                 self._formant_mode = value

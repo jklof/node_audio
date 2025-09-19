@@ -38,16 +38,15 @@ class AppController(QObject):
         self.graph_widget.connectionDeletionRequested.connect(self.on_connection_deletion_requested)
 
     @Slot(list)
-    def reload_all_plugins(self, module_names: list[str]):
+    def reload_all_plugins(self, plugin_dirs: list[str]):
         """
         Orchestrates the plugin reload process by delegating the entire
         transactional operation to the engine.
         """
         logger.info("Controller: Requesting engine to perform transactional plugin reload.")
 
-        # Delegate the entire complex operation to the engine.
-        # This call will block until the reload is complete.
-        self.engine.reload_plugins_and_graph(module_names)
+        # Pass the plugin directories to the engine for a full rescan and reload.
+        self.engine.reload_plugins_and_graph(plugin_dirs)
 
     @Slot(type, str, tuple)
     def on_node_creation_requested(self, node_class, name, pos):
