@@ -14,6 +14,7 @@ from PySide6.QtCore import Slot
 
 logger = logging.getLogger(__name__)
 
+
 # --- UI Class ---
 class RubberBandPitchShiftNodeItem(ParameterNodeItem):
     """Modern UI for the RubberBand Pitch Shifter using ParameterNodeItem."""
@@ -25,7 +26,7 @@ class RubberBandPitchShiftNodeItem(ParameterNodeItem):
             {
                 "key": "pitch_shift_st",
                 "name": "Pitch Shift",
-                "type": "dial",
+                "type": "slider",
                 "min": -24.0,
                 "max": 24.0,
                 "format": "{:+.1f} st",
@@ -39,7 +40,7 @@ class RubberBandPitchShiftNodeItem(ParameterNodeItem):
             {
                 "key": "formant_shift_st",
                 "name": "Formant Shift",
-                "type": "dial",
+                "type": "slider",
                 "min": -12.0,
                 "max": 12.0,
                 "format": "{:+.1f} st",
@@ -55,8 +56,8 @@ class RubberBandPitchShiftNodeItem(ParameterNodeItem):
 
         # Custom logic: only enable the formant shift dial when mode is "Shifted"
         formant_mode = state.get("formant_mode")
-        is_shift_mode = (formant_mode == "Shifted")
-        
+        is_shift_mode = formant_mode == "Shifted"
+
         formant_shift_control = self._controls.get("formant_shift_st")
         if formant_shift_control:
             formant_shift_control["widget"].setEnabled(is_shift_mode)
@@ -99,7 +100,7 @@ class RubberBandPitchShiftNode(Node):
         with self._lock:
             self._cleanup_stretcher_locked()
         logger.debug(f"[{self.name}] Stopped and cleaned up.")
-        
+
     def remove(self):
         self.stop()
         super().remove()
@@ -118,14 +119,14 @@ class RubberBandPitchShiftNode(Node):
         options = Option.PROCESS_REALTIME | Option.ENGINE_FINER | Option.WINDOW_SHORT | Option.SMOOTHING_ON
         if self._formant_mode == "Preserve":
             options |= Option.FORMANT_PRESERVED
-        
+
         try:
             self._stretcher = RubberBandStretcher(
                 sample_rate=DEFAULT_SAMPLERATE,
                 channels=num_channels,
                 options=options,
                 initial_time_ratio=1.0,
-                initial_pitch_scale=2.0 ** (self._pitch_shift_st / 12.0)
+                initial_pitch_scale=2.0 ** (self._pitch_shift_st / 12.0),
             )
             self._current_channels = num_channels
             self._output_buffer = torch.empty((num_channels, 0), dtype=DEFAULT_DTYPE)
@@ -135,11 +136,11 @@ class RubberBandPitchShiftNode(Node):
 
     @Slot(float)
     def set_pitch_shift_st(self, value: float):
-        self._update_parameter('_pitch_shift_st', value)
+        self._update_parameter("_pitch_shift_st", value)
 
     @Slot(float)
     def set_formant_shift_st(self, value: float):
-        self._update_parameter('_formant_shift_st', value)
+        self._update_parameter("_formant_shift_st", value)
 
     @Slot(str)
     def set_formant_mode(self, value: str):
@@ -151,7 +152,7 @@ class RubberBandPitchShiftNode(Node):
                 state_to_emit = self._get_current_state_snapshot_locked()
         if state_to_emit:
             self.emitter.stateUpdated.emit(state_to_emit)
-    
+
     def _update_parameter(self, attr_name: str, value):
         state_to_emit = None
         with self._lock:
@@ -160,7 +161,7 @@ class RubberBandPitchShiftNode(Node):
                 state_to_emit = self._get_current_state_snapshot_locked()
         if state_to_emit:
             self.emitter.stateUpdated.emit(state_to_emit)
-            
+
     def _get_current_state_snapshot_locked(self) -> Dict:
         return {
             "pitch_shift_st": self._pitch_shift_st,
@@ -174,11 +175,11 @@ class RubberBandPitchShiftNode(Node):
 
     def process(self, input_data: dict) -> dict:
         audio_in = input_data.get("audio_in")
-        
+
         with self._lock:
             state_to_emit = None
             ui_update_needed = False
-            
+
             # --- Update parameters from sockets ---
             pitch_socket = input_data.get("pitch_shift_st")
             effective_pitch = float(pitch_socket) if pitch_socket is not None else self._pitch_shift_st
@@ -204,12 +205,12 @@ class RubberBandPitchShiftNode(Node):
                 if self._stretcher:
                     # Convert torch tensor to numpy for pylibrb
                     numpy_in = audio_in.numpy().astype(np.float32)
-                    
+
                     # Set stretcher parameters
                     self._stretcher.pitch_scale = 2.0 ** (self._pitch_shift_st / 12.0)
                     if self._formant_mode == "Shifted":
                         self._stretcher.formant_scale = 2.0 ** (self._formant_shift_st / 12.0)
-                    
+
                     # Process and retrieve
                     self._stretcher.process(numpy_in, final=False)
                     available_samples = self._stretcher.available()
@@ -230,7 +231,7 @@ class RubberBandPitchShiftNode(Node):
 
         if state_to_emit:
             self.emitter.stateUpdated.emit(state_to_emit)
-            
+
         return {"audio_out": output_block}
 
     def serialize_extra(self) -> dict:
