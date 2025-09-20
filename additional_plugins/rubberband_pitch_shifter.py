@@ -4,7 +4,7 @@ import torch
 import numpy as np
 import threading
 import logging
-from pylibrb import RubberBandStretcher, Option
+from pylibrb import RubberBandStretcher, Option, AUTO_FORMANT_SCALE
 from typing import Dict, Optional
 
 from node_system import Node
@@ -117,7 +117,9 @@ class RubberBandPitchShiftNode(Node):
         self._cleanup_stretcher_locked()
 
         options = Option.PROCESS_REALTIME | Option.ENGINE_FINER | Option.WINDOW_SHORT | Option.SMOOTHING_ON
-        if self._formant_mode == "Preserve":
+        # Enable the formant processing system for both "Preserve" and "Shifted" modes.
+        # It is disabled for "Off (Classic)" mode.
+        if self._formant_mode in ("Preserve", "Shifted"):
             options |= Option.FORMANT_PRESERVED
 
         try:
@@ -207,10 +209,23 @@ class RubberBandPitchShiftNode(Node):
                     # Convert torch tensor to numpy for pylibrb
                     numpy_in = audio_in.numpy().astype(np.float32)
 
-                    # Set stretcher parameters
-                    self._stretcher.pitch_scale = 2.0 ** (self._pitch_shift_st / 12.0)
+                    pitch_scale_ratio = 2.0 ** (self._pitch_shift_st / 12.0)
+                    self._stretcher.pitch_scale = pitch_scale_ratio
+
                     if self._formant_mode == "Shifted":
-                        self._stretcher.formant_scale = 2.0 ** (self._formant_shift_st / 12.0)
+                        # To get an absolute shift, we must set the formant_scale relative to the pitch_scale.
+                        # The total shift is pitch_scale * formant_scale, so we solve for formant_scale.
+                        desired_formant_ratio = 2.0 ** (self._formant_shift_st / 12.0)
+
+                        # Avoid division by zero if pitch shift is extremely low
+                        if abs(pitch_scale_ratio) < 1e-9:
+                            self._stretcher.formant_scale = desired_formant_ratio
+                        else:
+                            self._stretcher.formant_scale = desired_formant_ratio / pitch_scale_ratio
+
+                    elif self._formant_mode == "Preserve":
+                        # Let the library handle preservation automatically.
+                        self._stretcher.formant_scale = AUTO_FORMANT_SCALE
 
                     # Process and retrieve
                     self._stretcher.process(numpy_in, final=False)
