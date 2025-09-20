@@ -47,7 +47,7 @@ TYPE_MAP = {
 }
 
 DEFAULT_CODE = """# Define inputs and outputs as dictionaries.
-# Click "Apply & Re-Init" to update the node's sockets.
+# Click "Apply" to update the node's sockets.
 inputs = {
     'value_in': 'float'
 }
@@ -171,7 +171,7 @@ class CodeNodeItem(NodeItem):
 
         self.highlighter = PythonSyntaxHighlighter(self.code_editor.document())
 
-        self.apply_button = QPushButton("Apply & Re-Init")
+        self.apply_button = QPushButton("Apply")
         main_layout.addWidget(self.apply_button)
 
         self.status_label = QLabel("Status: OK")
@@ -296,6 +296,32 @@ class CodeNodeItem(NodeItem):
 
     @Slot(dict)
     def _on_state_updated(self, state: dict):
+
+        # 1. First, check if the sockets have changed. If so, reconcile them.
+        if state.get("sockets_changed", False):
+            # Get the current set of UI sockets and the desired set from the logic
+            current_ui_sockets = set(self._socket_items.keys())
+            desired_logic_sockets = set(self.node_logic.inputs.values()) | set(self.node_logic.outputs.values())
+
+            sockets_to_remove = current_ui_sockets - desired_logic_sockets
+            sockets_to_add = desired_logic_sockets - current_ui_sockets
+
+            # Remove UI items for sockets that no longer exist in the logic
+            for logic_socket in sockets_to_remove:
+                socket_item = self._socket_items.pop(logic_socket, None)
+                label_item = self._socket_labels.pop(logic_socket, None)
+                if socket_item and socket_item.scene():
+                    self.scene().removeItem(socket_item)
+                if label_item and label_item.scene():
+                    self.scene().removeItem(label_item)
+
+            # Create new UI items for sockets that were added to the logic
+            for logic_socket in sockets_to_add:
+                self._socket_items[logic_socket] = SocketItem(logic_socket, self)
+                label = QGraphicsTextItem(logic_socket.name, self)
+                label.setDefaultTextColor(Qt.GlobalColor.lightGray)
+                self._socket_labels[logic_socket] = label
+
         status, error = state.get("status", "OK"), state.get("error", "")
         error_lineno = state.get("error_lineno", -1)
 
@@ -328,6 +354,11 @@ class CodeNodeItem(NodeItem):
             if view:
                 for conn_id in conn_ids_to_delete:
                     view.connectionDeletionRequested.emit(conn_id)
+
+        # If sockets were changed, we MUST refresh the geometry now that the
+        # child items have been updated.
+        if state.get("sockets_changed", False):
+            self.update_geometry()
 
     @Slot()
     def updateFromLogic(self):
@@ -385,21 +416,23 @@ class CodeNode(Node):
 
                 current_input_names = set(self.inputs.keys())
                 desired_input_names = set(parsed_inputs.keys())
-                inputs_to_remove = current_input_names - desired_input_names
-                for name in inputs_to_remove:
-                    for conn in self.inputs[name].connections:
-                        connections_to_delete_ids.append(conn.id)
-                    self.inputs.pop(name)
+                if current_input_names != desired_input_names:
                     sockets_changed = True
+                    inputs_to_remove = current_input_names - desired_input_names
+                    for name in inputs_to_remove:
+                        for conn in self.inputs[name].connections:
+                            connections_to_delete_ids.append(conn.id)
+                        self.inputs.pop(name)
 
                 current_output_names = set(self.outputs.keys())
                 desired_output_names = set(parsed_outputs.keys())
-                outputs_to_remove = current_output_names - desired_output_names
-                for name in outputs_to_remove:
-                    for conn in self.outputs[name].connections:
-                        connections_to_delete_ids.append(conn.id)
-                    self.outputs.pop(name)
+                if current_output_names != desired_output_names:
                     sockets_changed = True
+                    outputs_to_remove = current_output_names - desired_output_names
+                    for name in outputs_to_remove:
+                        for conn in self.outputs[name].connections:
+                            connections_to_delete_ids.append(conn.id)
+                        self.outputs.pop(name)
 
                 for name, type_str in parsed_inputs.items():
                     dtype = self._str_to_type(type_str)
