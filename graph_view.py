@@ -1,5 +1,4 @@
 import logging
-import threading
 import math
 from PySide6.QtWidgets import QGraphicsView, QGraphicsLineItem, QGraphicsProxyWidget
 from PySide6.QtCore import Qt, QPointF, QRectF, Signal, Slot, QLineF
@@ -190,7 +189,7 @@ class NodeGraphWidget(QGraphicsView):
             start_logic = start_item.socket_logic
             end_logic = end_item.socket_logic
 
-            # --- NEW: UI-Level Type Validation Logic ---
+            # --- UI-Level Type Validation Logic ---
             start_type = start_logic.data_type if start_logic.data_type is not None else Any
             end_type = end_logic.data_type if end_logic.data_type is not None else Any
 
@@ -201,7 +200,6 @@ class NodeGraphWidget(QGraphicsView):
                     f"Connection rejected: Type mismatch between {start_logic} ({start_type.__name__}) and {end_logic} ({end_type.__name__})."
                 )
                 return  # Abort the connection attempt
-            # --- END NEW ---
 
             if start_logic.is_input and not end_logic.is_input:
                 self.connectionRequested.emit(end_logic, start_logic)
@@ -211,8 +209,21 @@ class NodeGraphWidget(QGraphicsView):
                 logger.warning("Connection must be between an input and an output.")
 
     def wheelEvent(self, event):
-        zoom_factor = 1.15 if event.angleDelta().y() > 0 else 1 / 1.15
-        self.scale(zoom_factor, zoom_factor)
+        """
+        This is the new, correct implementation. It checks if the mouse is over
+        an embedded UI widget. If so, it lets the base QGraphicsView handle
+        the event, which correctly forwards it. Otherwise, it performs the
+        custom graph zoom.
+        """
+        item_under_mouse = self.itemAt(event.position().toPoint())
+
+        if isinstance(item_under_mouse, QGraphicsProxyWidget):
+            # Let the default implementation handle event propagation to the widget.
+            super().wheelEvent(event)
+        else:
+            # Perform custom graph-wide zoom.
+            zoom_factor = 1.15 if event.angleDelta().y() > 0 else 1 / 1.15
+            self.scale(zoom_factor, zoom_factor)
 
     # --- Public Slots for Toolbar ---
     @Slot()

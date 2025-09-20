@@ -4,7 +4,7 @@ from PySide6.QtGui import QColor
 from typing import Any
 
 # ==============================================================================
-# Core Data Structure for Spectral Processing
+# Core Data Structures
 # ==============================================================================
 
 
@@ -18,6 +18,13 @@ class SpectralFrame:
     window_size: int
     sample_rate: int
     analysis_window: torch.Tensor
+
+
+@dataclass
+class MIDIPacket:
+    """A data object holding a list of MIDI messages for a single processing block."""
+
+    messages: list
 
 
 # --- Configuration Defaults ---
@@ -37,13 +44,14 @@ DEFAULT_COMPLEX_DTYPE = torch.complex64
 TICK_DURATION_S = DEFAULT_BLOCKSIZE / DEFAULT_SAMPLERATE
 TICK_DURATION_NS = int(TICK_DURATION_S * 1_000_000_000)
 
-# --- NEW: Central dictionary for socket type colors ---
+# --- Central dictionary for socket type colors ---
 SOCKET_TYPE_COLORS = {
     torch.Tensor: QColor("#2274A5"),  # Muted Blue for Audio/Tensors
     float: QColor("#57A773"),  # Green for Floats
     bool: QColor("#F45B69"),  # Red for Bools/Triggers
     int: QColor("#F45B69"),  # Also red for ints (often used as triggers)
     SpectralFrame: QColor("#9A44B2"),  # Purple for Spectral Data
+    MIDIPacket: QColor("#E17C05"),  # Amber/Orange for the MIDI Packet type
     Any: QColor("#E6E6E6"),  # White/Light Gray for Universal
     None: QColor("#E6E6E6"),  # Treat None as universal as well
     "default": QColor("#888888"),  # A default gray for unregistered types
