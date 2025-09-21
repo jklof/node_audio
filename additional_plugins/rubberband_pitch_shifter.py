@@ -71,7 +71,7 @@ class RubberBandPitchShiftNodeItem(ParameterNodeItem):
 class RubberBandPitchShiftNode(Node):
     NODE_TYPE = "RubberBand Pitch Shifter"
     UI_CLASS = RubberBandPitchShiftNodeItem
-    CATEGORY = "Audio Effects"
+    CATEGORY = "Effects"
     DESCRIPTION = "High-quality pitch/formant shifter using the RubberBand time-stretching library."
 
     def __init__(self, name: str, node_id: Optional[str] = None):

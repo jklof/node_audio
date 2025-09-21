@@ -214,7 +214,7 @@ class RunningAverageNodeItem(NodeItem):
 
 
 # ============================================================
-# Logic for the RunningAverageNode
+# Logic for the RunningAverageNode (CORRECTED)
 # ============================================================
 class RunningAverageNode(Node):
     NODE_TYPE = "Running Average"
@@ -231,7 +231,8 @@ class RunningAverageNode(Node):
 
         self._lock = threading.Lock()
         self._time_s = 1.0  # Default averaging time
-        self._history = deque(maxlen=int(self._time_s / (TICK_DURATION_S + EPSILON)))
+
+        self._current_average = 0.0
 
     def get_current_state_snapshot(self) -> dict:
         """Returns the current state for UI updates."""
@@ -257,40 +258,38 @@ class RunningAverageNode(Node):
 
     def process(self, input_data: dict) -> dict:
         state_snapshot_to_emit = None
-        output_value = None
+        input_value = input_data.get("in")
+
+        # If there's no input, hold the last average
+        if input_value is None:
+            return {"out": self._current_average}
 
         with self._lock:
             # Prioritize the external socket input for time
             time_socket = input_data.get("time")
             if time_socket is not None:
                 current_time_s = max(0.01, float(time_socket))
-                # If external control changes our state, we need to update the UI
                 if abs(self._time_s - current_time_s) > 1e-6:
                     self._time_s = current_time_s
                     state_snapshot_to_emit = self.get_current_state_snapshot()
             else:
                 current_time_s = self._time_s
 
-            # Recalculate buffer size if needed
-            new_maxlen = int(current_time_s / (TICK_DURATION_S + EPSILON))
-            if new_maxlen < 1:
-                new_maxlen = 1
+            # 1. Calculate the smoothing factor 'alpha' based on the averaging time.
+            # This formula correctly derives the coefficient for a one-pole filter
+            # to reach ~63% of its target value in the specified time.
+            alpha = 1.0 - np.exp(-TICK_DURATION_S / (current_time_s + EPSILON))
 
-            if self._history.maxlen != new_maxlen:
-                # Create a new deque with the new maxlen, preserving existing data
-                self._history = deque(self._history, maxlen=new_maxlen)
+            # 2. Apply the EMA formula.
+            # This is a numerically stable way to write:
+            # self._current_average = alpha * input_value + (1 - alpha) * self._current_average
+            try:
+                self._current_average += alpha * (float(input_value) - self._current_average)
+            except (ValueError, TypeError):
+                # If input is invalid, just hold the last value
+                pass
 
-            # Add new value to history
-            input_value = input_data.get("in")
-            if input_value is not None:
-                try:
-                    self._history.append(float(input_value))
-                except (ValueError, TypeError):
-                    pass  # Ignore invalid inputs
-
-            # Calculate average
-            if self._history:
-                output_value = sum(self._history) / len(self._history)
+            output_value = self._current_average
 
         # Emit UI update after releasing lock
         if state_snapshot_to_emit:
@@ -299,9 +298,9 @@ class RunningAverageNode(Node):
         return {"out": output_value}
 
     def start(self):
-        """Clear history when processing starts to avoid stale data."""
+        """Reset average when processing starts."""
         with self._lock:
-            self._history.clear()
+            self._current_average = 0.0
         super().start()
 
     def serialize_extra(self) -> dict:

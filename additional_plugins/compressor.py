@@ -29,7 +29,7 @@ MAX_RELEASE_MS = 2000.0
 MIN_KNEE_DB = 0.0
 MAX_KNEE_DB = 24.0
 EPSILON = 1e-9
-SIDECHAIN_DOWNSAMPLE_FACTOR = 8
+SIDECHAIN_DOWNSAMPLE_FACTOR = 16
 
 
 # ==============================================================================
@@ -104,6 +104,7 @@ class CompressorNode(Node):
         self.add_input("attack_ms", data_type=float)
         self.add_input("release_ms", data_type=float)
         self.add_input("knee_db", data_type=float)
+        self.add_input("sidechain_in", data_type=torch.Tensor)  # Can be None if not connected
         self.add_output("out", data_type=torch.Tensor)
 
         self._lock = threading.Lock()
@@ -259,6 +260,8 @@ class CompressorNode(Node):
         if not isinstance(signal, torch.Tensor):
             return {"out": None}
 
+        sidechain_signal = input_data.get("sidechain_in")
+
         with torch.no_grad():
             # --- State update logic ---
             with self._lock:
@@ -318,8 +321,12 @@ class CompressorNode(Node):
 
             # --- DSP Processing ---
 
+            # Determine which signal to use for level detection.
+            # If a valid sidechain signal is connected, use it. Otherwise, fall back to the main input.
+            detection_signal = sidechain_signal if isinstance(sidechain_signal, torch.Tensor) else signal
+
             # 1. Level Detection using squared amplitude (power) into a pre-allocated buffer.
-            torch.square(signal, out=self._power_buffer)
+            torch.square(detection_signal, out=self._power_buffer)
             # --- Provide the pre-allocated indices buffer to the out= argument ---
             torch.max(self._power_buffer, dim=0, out=(self._sidechain_power, self._indices_buffer))
 
