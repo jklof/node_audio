@@ -17,7 +17,16 @@ from PySide6.QtWidgets import (
     QDial,
     QComboBox,
 )
-from PySide6.QtGui import QPainter, QPen, QColor, QBrush, QPainterPath, QPainterPathStroker, QAction
+from PySide6.QtGui import (
+    QPainter,
+    QPen,
+    QColor,
+    QBrush,
+    QPainterPath,
+    QPainterPathStroker,
+    QAction,
+    QLinearGradient,
+)
 from PySide6.QtCore import Qt, QRectF, QPointF, Signal, Slot, QTimer, QObject, Signal, QSignalBlocker
 from typing import Any
 
@@ -404,14 +413,27 @@ class ConnectionItem(QGraphicsPathItem):
         self.connection_logic = conn_logic
         self.start_socket = start_socket
         self.end_socket = end_socket
-        self._pen = QPen(QColor("white"), 2)
-        self._pen_hover = QPen(QColor("cyan"), 2.5)
+
+        # Helper to get color from data type
+        def get_color_for_type(data_type):
+            lookup_type = data_type
+            if lookup_type is None:
+                lookup_type = Any
+            return SOCKET_TYPE_COLORS.get(lookup_type, SOCKET_TYPE_COLORS["default"])
+
+        # Store base colors for the gradient
+        self._start_color = get_color_for_type(self.start_socket.socket_logic.data_type)
+        self._end_color = get_color_for_type(self.end_socket.socket_logic.data_type)
+
+        # Store a separate, solid pen for selection highlight
         self._pen_selected = QPen(QColor("orange"), 2.5)
+
         self._is_hovered = False
-        self.setPen(self._pen)
         self.setZValue(-1)
         self.setAcceptHoverEvents(True)
         self.setFlag(QGraphicsPathItem.GraphicsItemFlag.ItemIsSelectable)
+
+        # Connect signals and perform initial path update
         self.start_socket.positionChanged.connect(self.update_path)
         self.end_socket.positionChanged.connect(self.update_path)
         self.update_path()
@@ -443,13 +465,33 @@ class ConnectionItem(QGraphicsPathItem):
         self.setPath(path)
 
     def paint(self, painter: QPainter, option, widget=None):
+        # Use a distinct solid color for selected items
         if self.isSelected():
             painter.setPen(self._pen_selected)
-        elif self._is_hovered:
-            painter.setPen(self._pen_hover)
-        else:
-            painter.setPen(self._pen)
-        painter.drawPath(self.path())
+            painter.drawPath(self.path())
+            return
+
+        # Determine start and end colors for the gradient, brightening on hover
+        start_c = self._start_color.lighter(140) if self._is_hovered else self._start_color
+        end_c = self._end_color.lighter(140) if self._is_hovered else self._end_color
+        width = 2.5 if self._is_hovered else 2.0
+
+        # Apply the rule: if originating socket is 'Any', use the endpoint color for the whole line
+        #start_type = self.start_socket.socket_logic.data_type
+        #if start_type is Any or start_type is None:
+        #    start_c = end_c  # This makes the gradient a solid color
+
+        # Create the gradient along the path's start and end points
+        path = self.path()
+        gradient = QLinearGradient(path.pointAtPercent(0), path.pointAtPercent(1))
+        gradient.setColorAt(0, start_c)
+        gradient.setColorAt(1, end_c)
+
+        # Create and set a pen using the gradient
+        pen = QPen(gradient, width)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen)
+        painter.drawPath(path)
 
     def shape(self) -> QPainterPath:
         stroker = QPainterPathStroker()
