@@ -1,5 +1,3 @@
-# additional_plugins/harmonic_pitch_shifter.py
-
 import torch
 import torch.nn.functional as F
 import numpy as np
@@ -122,7 +120,8 @@ class HarmonicPitchShifterNode(Node):
 
     def _resize_buffers_if_needed(self, frame: SpectralFrame) -> bool:
         """
-        Checks if frame parameters have changed. If so, resizes all buffers and stateful tensors.
+        Checks if frame parameters have changed. If so, resizes all buffers
+        and stateful tensors.
         Returns True if a reset occurred, False otherwise.
         """
         num_channels, num_bins = frame.data.shape
@@ -131,7 +130,8 @@ class HarmonicPitchShifterNode(Node):
             return False
 
         logger.info(f"[{self.name}] Frame format changed. Re-allocating buffers and resetting state.")
-        self._freqs_buf = torch.fft.rfftfreq(frame.fft_size, d=1.0 / frame.sample_rate)
+
+        self._freqs_buf = torch.linspace(0.0, frame.sample_rate / 2.0, steps=num_bins, dtype=torch.float32)
 
         # --- Pre-allocated scratch buffers ---
         self._input_mags_buf = torch.empty((num_channels, num_bins), dtype=torch.float32)
@@ -143,7 +143,7 @@ class HarmonicPitchShifterNode(Node):
         self._final_mags_buf = torch.empty((num_channels, num_bins), dtype=torch.float32)
         self._propagated_phases_buf = torch.empty((num_channels, num_bins), dtype=torch.float32)
 
-        # --- Stateful phase accumulators ---
+        # --- Stateful phase accumulators (use torch.empty_like for convenience) ---
         self._last_input_phases = torch.empty_like(self._current_input_phases_buf)
         self._last_output_phases = torch.empty_like(self._current_input_phases_buf)
 
@@ -155,6 +155,9 @@ class HarmonicPitchShifterNode(Node):
             out_buf.copy_(magnitudes)
             return out_buf
 
+        # Use F.interpolate for efficient, vectorized resampling
+        # NOTE: This operation allocates temporary tensors and is not strictly real-time safe.
+        # For a future update, this should be replaced with an allocation-free resampling kernel.
         resampled = F.interpolate(
             magnitudes.unsqueeze(0), scale_factor=ratio, mode="linear", align_corners=False, recompute_scale_factor=True
         )
@@ -162,8 +165,10 @@ class HarmonicPitchShifterNode(Node):
         num_bins = magnitudes.shape[1]
         diff = num_bins - resampled.shape[2]
         if diff > 0:
+            # Pad if the resampled version is smaller
             resampled = F.pad(resampled, (0, diff))
         elif diff < 0:
+            # Truncate if it's larger
             resampled = resampled[:, :, :num_bins]
 
         out_buf.copy_(resampled.squeeze(0))
@@ -173,12 +178,21 @@ class HarmonicPitchShifterNode(Node):
         self, magnitudes: torch.Tensor, frame: SpectralFrame, out_buf: torch.Tensor
     ) -> torch.Tensor:
         freq_per_bin = frame.sample_rate / frame.fft_size
-        kernel_size = int(150 / freq_per_bin)
-        if kernel_size < 3:
-            kernel_size = 3
-        if kernel_size % 2 == 0:
-            kernel_size += 1
+        num_bins = magnitudes.shape[1]
 
+        # Added robust clamping and validation for kernel_size to prevent crashes.
+        kernel_size = int(150 / freq_per_bin)
+        kernel_size = max(3, kernel_size)
+        kernel_size = min(kernel_size, num_bins)
+
+        if kernel_size % 2 == 0:
+            kernel_size -= 1
+
+        if kernel_size < 3:
+            out_buf.copy_(magnitudes)
+            return out_buf
+
+        # NOTE: This operation allocates temporary tensors and is not strictly real-time safe.
         padded_mags = F.pad(magnitudes.unsqueeze(1), (kernel_size // 2, kernel_size // 2), mode="reflect")
         envelope = F.avg_pool1d(padded_mags, kernel_size=kernel_size, stride=1, padding=0)
         out_buf.copy_(envelope.squeeze(1))
@@ -198,14 +212,22 @@ class HarmonicPitchShifterNode(Node):
 
         torch.mul(self._shifted_source_mags_buf, self._shifted_envelope_buf, out=self._final_mags_buf)
 
-        expected_phase_advance = 2 * torch.pi * frame.hop_size * self._freqs_buf
-        phase_deviation = self._current_input_phases_buf - self._last_input_phases - expected_phase_advance
-        torch.fmod(phase_deviation + torch.pi, 2 * torch.pi, out=phase_deviation)
-        phase_deviation -= torch.pi
+        # Create dtype- and device-aware constants to avoid implicit type promotion.
+        phase_dtype = self._current_input_phases_buf.dtype
+        pi = torch.tensor(torch.pi, dtype=phase_dtype)
+        two_pi = torch.tensor(2.0 * torch.pi, dtype=phase_dtype)
 
-        true_freq_hz = (expected_phase_advance + phase_deviation) / (2 * torch.pi * frame.hop_size / frame.sample_rate)
+        # --- phase advance calculation ---
+        expected_phase_advance = two_pi * self._freqs_buf * (frame.hop_size / frame.sample_rate)
+
+        phase_deviation = self._current_input_phases_buf - self._last_input_phases - expected_phase_advance
+
+        # --- Use torch.remainder for robust phase wrapping with correct dtypes ---
+        phase_deviation = torch.remainder(phase_deviation + pi, two_pi) - pi
+
+        true_freq_hz = (expected_phase_advance + phase_deviation) / (two_pi * frame.hop_size / frame.sample_rate)
         shifted_freq_hz = true_freq_hz * pitch_ratio
-        new_phase_advance = shifted_freq_hz * (2 * torch.pi * frame.hop_size / frame.sample_rate)
+        new_phase_advance = shifted_freq_hz * (two_pi * frame.hop_size / frame.sample_rate)
 
         torch.add(self._last_output_phases, new_phase_advance, out=self._propagated_phases_buf)
 
@@ -221,7 +243,9 @@ class HarmonicPitchShifterNode(Node):
             final_phases = self._current_input_phases_buf
 
         self._last_input_phases.copy_(self._current_input_phases_buf)
-        torch.fmod(self._propagated_phases_buf, 2 * torch.pi, out=self._last_output_phases)
+
+        # Replaced fmod with remainder for correctness and used the dtype-aware constant.
+        torch.remainder(self._propagated_phases_buf, two_pi, out=self._last_output_phases)
 
         return torch.polar(self._final_mags_buf, final_phases)
 
