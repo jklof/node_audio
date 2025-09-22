@@ -9,7 +9,7 @@ from typing import Any
 from node_system import NodeGraph, Socket
 from ui_elements import NodeItem, SocketItem, ConnectionItem
 from graph_scene import NodeGraphScene
-from ui_icons import LOGO_SVG_DATA
+from ui_icons import create_colored_logo
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +43,7 @@ class NodeGraphWidget(QGraphicsView):
 
     def _load_logo(self):
         """Loads the SVG logo from an inline string for rendering."""
-        svg_bytes = QByteArray(LOGO_SVG_DATA.encode("utf-8"))
+        svg_bytes = create_colored_logo("black")
         self._logo_renderer = QSvgRenderer(svg_bytes)
         if not self._logo_renderer.isValid():
             logger.error("Failed to load SVG logo for background.")

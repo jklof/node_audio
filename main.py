@@ -4,14 +4,14 @@ import os
 import argparse
 import atexit
 from PySide6.QtWidgets import QApplication, QMainWindow, QMessageBox, QToolBar, QWidget, QSizePolicy, QLabel
-from PySide6.QtGui import QAction
-from PySide6.QtCore import Slot, QTimer, Qt, QSettings
+from PySide6.QtGui import QAction, QIcon, QPixmap
+from PySide6.QtCore import Slot, QTimer, Qt, QSettings, QByteArray
 
 from plugin_loader import scan_and_load_plugins, finalize_plugins
 from engine import Engine
 from app_controller import AppController
 from graph_view import NodeGraphWidget
-from ui_icons import create_icon_from_svg, ICONS
+from ui_icons import create_icon, create_colored_logo
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 class MainWindow(QMainWindow):
     def __init__(self, clean_start: bool = False):
         super().__init__()
-        self.setWindowTitle("Re Node Processor")
+        self.setWindowTitle("Audio Node Processor")
 
         if clean_start:
             logger.info("Clean startup requested. Clearing all saved settings.")
@@ -92,48 +92,38 @@ class MainWindow(QMainWindow):
         toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
 
         # File Operations
-        new_action = QAction(
-            create_icon_from_svg(ICONS["new_file"]), "New", self, triggered=self.controller.clear_graph
-        )
+        new_action = QAction(create_icon("new_file"), "New", self, triggered=self.controller.clear_graph)
         new_action.setShortcut("Ctrl+N")
         toolbar.addAction(new_action)
 
-        load_action = QAction(
-            create_icon_from_svg(ICONS["open_folder"]), "Open", self, triggered=self.controller.load_graph
-        )
+        load_action = QAction(create_icon("open_folder"), "Open", self, triggered=self.controller.load_graph)
         load_action.setShortcut("Ctrl+O")
         toolbar.addAction(load_action)
 
-        save_action = QAction(create_icon_from_svg(ICONS["save"]), "Save", self, triggered=self.controller.save_graph)
+        save_action = QAction(create_icon("save"), "Save", self, triggered=self.controller.save_graph)
         save_action.setShortcut("Ctrl+S")
         toolbar.addAction(save_action)
 
         toolbar.addSeparator()
 
         # Processing Control (reusing actions from menu)
-        self.start_action.setIcon(create_icon_from_svg(ICONS["play"]))
-        self.stop_action.setIcon(create_icon_from_svg(ICONS["stop"]))
+        self.start_action.setIcon(create_icon("play"))
+        self.stop_action.setIcon(create_icon("stop"))
         toolbar.addAction(self.start_action)
         toolbar.addAction(self.stop_action)
 
         toolbar.addSeparator()
 
         # View Control
-        zoom_in_action = QAction(
-            create_icon_from_svg(ICONS["zoom_in"]), "Zoom In", self, triggered=self.graph_widget.zoom_in
-        )
+        zoom_in_action = QAction(create_icon("zoom_in"), "Zoom In", self, triggered=self.graph_widget.zoom_in)
         zoom_in_action.setShortcut("Ctrl+=")
         toolbar.addAction(zoom_in_action)
 
-        zoom_out_action = QAction(
-            create_icon_from_svg(ICONS["zoom_out"]), "Zoom Out", self, triggered=self.graph_widget.zoom_out
-        )
+        zoom_out_action = QAction(create_icon("zoom_out"), "Zoom Out", self, triggered=self.graph_widget.zoom_out)
         zoom_out_action.setShortcut("Ctrl+-")
         toolbar.addAction(zoom_out_action)
 
-        zoom_fit_action = QAction(
-            create_icon_from_svg(ICONS["zoom_fit"]), "Fit View", self, triggered=self.graph_widget.zoom_to_fit
-        )
+        zoom_fit_action = QAction(create_icon("zoom_fit"), "Fit View", self, triggered=self.graph_widget.zoom_to_fit)
         zoom_fit_action.setShortcut("Ctrl+0")
         toolbar.addAction(zoom_fit_action)
 
@@ -238,6 +228,12 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     app = QApplication(sys.argv)
+
+    # Set application icon
+    svg_bytes = create_colored_logo("white")
+    pixmap = QPixmap()
+    pixmap.loadFromData(svg_bytes, "svg")
+    app.setWindowIcon(QIcon(pixmap))
 
     # Register the encapsulated cleanup function from the plugin_loader.
     atexit.register(finalize_plugins)
