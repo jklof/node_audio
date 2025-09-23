@@ -200,7 +200,6 @@ class RVCContentEncoderNode(Node):
         # --- MODIFIED: Use torch.Tensor ---
         self.add_input("in", data_type=torch.Tensor)
         self.add_output("features", data_type=torch.Tensor)
-        self._lock = threading.Lock()
         self._device: int = -1
         self._rvc_version: str = "v1"
         self._encoder_instance: Optional[RVCContentEncoder] = None

@@ -85,7 +85,6 @@ class SampleNodeItem(NodeItem):
         self.setContentWidget(self.container_widget)
 
         self.load_button.clicked.connect(self._on_load_clicked)
-        # TODO FIX THIS PROPERLY!# Initial state emission will be triggered by graph_scene.py
 
     @Slot()
     def _on_load_clicked(self):
@@ -96,6 +95,7 @@ class SampleNodeItem(NodeItem):
 
     @Slot(dict)
     def _on_state_updated_from_logic(self, state: dict):
+        super()._on_state_updated_from_logic(state)
         status = state.get("status", "Unknown")
         filepath = state.get("filepath")
 
@@ -109,11 +109,6 @@ class SampleNodeItem(NodeItem):
             self.status_label.setStyleSheet("color: orange;")
         else:
             self.status_label.setStyleSheet("color: lightgreen;")
-
-    def updateFromLogic(self):
-        state = self.node_logic.get_current_state_snapshot()
-        self._on_state_updated_from_logic(state)
-        super().updateFromLogic()
 
 
 # ==============================================================================
@@ -137,7 +132,6 @@ class SampleNode(Node):
         self.add_output("out", data_type=torch.Tensor)
         self.add_output("on_end", data_type=bool)
 
-        self._lock = threading.Lock()
         self._filepath: Optional[str] = None
         self._status: str = "No Sample"
         self._is_loading: bool = False
@@ -165,7 +159,7 @@ class SampleNode(Node):
             self._is_loading = True
             self._filepath = file_path
             self._status = "Loading..."
-            state_to_emit = self._get_current_state_snapshot_locked()
+            state_to_emit = self._get_state_snapshot_locked()
 
         if state_to_emit:
             self.ui_update_callback(state_to_emit)
@@ -189,17 +183,13 @@ class SampleNode(Node):
             else:
                 self._audio_data = None
                 self._status = f"Error: {data}"
-            state_to_emit = self._get_current_state_snapshot_locked()
+            state_to_emit = self._get_state_snapshot_locked()
 
         if state_to_emit:
             self.ui_update_callback(state_to_emit)
 
-    def _get_current_state_snapshot_locked(self) -> Dict:
+    def _get_state_snapshot_locked(self) -> Dict:
         return {"status": self._status, "filepath": self._filepath}
-
-    def get_current_state_snapshot(self) -> Dict:
-        with self._lock:
-            return self._get_current_state_snapshot_locked()
 
     def process(self, input_data: dict) -> dict:
         trigger_in = input_data.get("trigger")

@@ -106,7 +106,6 @@ class CompressorNode(Node):
         self.add_input("sidechain_in", data_type=torch.Tensor)  # Can be None if not connected
         self.add_output("out", data_type=torch.Tensor)
 
-        self._lock = threading.Lock()
         self._threshold_db = -20.0
         self._ratio = 4.0
         self._attack_ms = 5.0
@@ -216,18 +215,14 @@ class CompressorNode(Node):
                 self._knee_db = clipped_value
         self.ui_update_callback(self.get_current_state_snapshot())
 
-    def get_current_state_snapshot(self, locked: bool = False) -> Dict:
-        state = {
+    def _get_state_snapshot_locked(self) -> Dict:
+        return {
             "threshold_db": self._threshold_db,
             "ratio": self._ratio,
             "attack_ms": self._attack_ms,
             "release_ms": self._release_ms,
             "knee_db": self._knee_db,
         }
-        if locked:
-            return state
-        with self._lock:
-            return state
 
     def start(self):
         with self._lock:
@@ -301,7 +296,7 @@ class CompressorNode(Node):
 
                 # If any socket caused a change, emit the new state to the UI
                 if ui_update_needed:
-                    self.ui_update_callback(self.get_current_state_snapshot(locked=True))
+                    self.ui_update_callback(self._get_state_snapshot_locked())
 
                 # Copy locked parameters to local variables for this tick's processing
                 threshold_db, ratio, knee_db, initial_envelope = (
@@ -390,7 +385,8 @@ class CompressorNode(Node):
             return {"out": output_signal}
 
     def serialize_extra(self) -> dict:
-        return self.get_current_state_snapshot()
+        with self._lock:
+            return self._get_state_snapshot_locked()
 
     def deserialize_extra(self, data: dict):
         with self._lock:

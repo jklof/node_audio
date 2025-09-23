@@ -181,16 +181,6 @@ class AudioDeviceNodeItem(NodeItem):
 
         self._populate_device_combobox()
 
-    @Slot()
-    def updateFromLogic(self):
-        """
-        Pulls the current state from the logic node and updates the UI.
-        This is essential for initializing the UI when the node is first created.
-        """
-        state = self.node_logic.get_current_state_snapshot()
-        self._on_state_updated_from_logic(state)
-        super().updateFromLogic()
-
     def _populate_device_combobox(self):
         is_input_node = self.node_logic._get_is_input_node()
         logger.debug(f"[{self.node_logic.name}] UI: Populating device combobox (is_input: {is_input_node}).")
@@ -238,9 +228,8 @@ class AudioDeviceNodeItem(NodeItem):
 
     @Slot(dict)
     def _on_state_updated_from_logic(self, state: dict):
-        """Single point of UI updates from comprehensive state dictionary."""
-        if not self.node_logic:
-            return
+
+        super()._on_state_updated_from_logic(state)
 
         with QSignalBlocker(self.device_combobox):
             user_selected_id = state.get("user_selected_device_identifier")
@@ -303,7 +292,6 @@ class BaseAudioNode(Node):
         self.channels = DEFAULT_CHANNELS
 
         self._buffer = deque(maxlen=DEFAULT_BUFFER_SIZE_BLOCKS)
-        self._lock = threading.Lock()
         self._stream: Optional[sd.Stream] = None
         self._stream_error_count = 0
         self._user_selected_device_identifier: Optional[int] = None

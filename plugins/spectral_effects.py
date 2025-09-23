@@ -85,8 +85,6 @@ class SpectralShimmerNode(Node):
         self.add_input("mix", data_type=float)
         self.add_output("spectral_frame_out", data_type=SpectralFrame)
 
-        self._lock = threading.Lock()
-
         # --- Internal State ---
         self._pitch_shift_st: float = 12.0
         self._feedback: float = 0.75
@@ -301,7 +299,6 @@ class SpectralModulatorNode(Node):
 
     def __init__(self, name: str, node_id: Optional[str] = None):
         super().__init__(name, node_id)
-        self.emitter = SpectralModulatorEmitter()
 
         # --- Setup Sockets ---
         self.add_input("spectral_frame_in", data_type=SpectralFrame)
@@ -310,8 +307,6 @@ class SpectralModulatorNode(Node):
         self.add_input("depth", data_type=float)
         self.add_input("mix", data_type=float)
         self.add_output("spectral_frame_out", data_type=SpectralFrame)
-
-        self._lock = threading.Lock()
 
         # --- Internal State ---
         self._rate_hz: float = 1.5
@@ -445,13 +440,6 @@ class SpectralModulatorNode(Node):
 
 
 # ==============================================================================
-# 1. State Emitter for UI Communication
-# ==============================================================================
-class SpectralReverbEmitter(QObject):
-    stateUpdated = Signal(dict)
-
-
-# ==============================================================================
 # 2. Custom UI Class (SpectralReverbNodeItem)
 # ==============================================================================
 class SpectralReverbNodeItem(ParameterNodeItem):
@@ -534,7 +522,6 @@ class SpectralReverbNode(Node):
 
     def __init__(self, name: str, node_id: Optional[str] = None):
         super().__init__(name, node_id)
-        self.emitter = SpectralReverbEmitter()
 
         # --- Setup Sockets ---
         self.add_input("spectral_frame_in", data_type=SpectralFrame)
@@ -546,8 +533,6 @@ class SpectralReverbNode(Node):
         self.add_input("width", data_type=float)
         self.add_input("mix", data_type=float)
         self.add_output("spectral_frame_out", data_type=SpectralFrame)
-
-        self._lock = threading.Lock()
 
         # --- Internal State ---
         self._pre_delay_ms: float = 20.0

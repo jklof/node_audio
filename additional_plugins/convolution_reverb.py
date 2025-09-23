@@ -137,6 +137,7 @@ class ConvolutionReverbNodeItem(ParameterNodeItem):
         """
         Handles state updates from the logic node for both custom and parent widgets.
         """
+        super()._on_state_updated_from_logic(state)
         # --- Handle custom widget logic ---
         status = state.get("status", "Unknown")
         self.status_label.setText(f"Status: {status}")
@@ -156,9 +157,6 @@ class ConvolutionReverbNodeItem(ParameterNodeItem):
         else:
             self.status_label.setStyleSheet("color: lightgreen;")
 
-        # --- Call parent to handle the sliders, labels, and external control state ---
-        super()._on_state_updated(state)
-
 
 # ==============================================================================
 # 3. Node Logic Class (ConvolutionReverbNode) (Unchanged)
@@ -176,7 +174,6 @@ class ConvolutionReverbNode(Node):
         self.add_input("mix", data_type=float)
         self.add_input("output_gain_db", data_type=float)
         self.add_output("out", data_type=torch.Tensor)
-        self._lock = threading.Lock()
         self._ir_filepath: Optional[str] = None
         self._input_gain_db: float = 0.0
         self._output_gain_db: float = 0.0
@@ -206,7 +203,7 @@ class ConvolutionReverbNode(Node):
             self._is_loading = True
             self._ir_filepath = file_path
             self._status = "Loading..."
-        self.ui_update_callback(self._get_current_state_snapshot_locked())
+        self.ui_update_callback(self._get_state_snapshot_locked())
         runnable = IRLoadRunnable(weakref.ref(self), file_path, DEFAULT_SAMPLERATE, self.ir_loader_signaller)
         QThreadPool.globalInstance().start(runnable)
 
@@ -228,7 +225,7 @@ class ConvolutionReverbNode(Node):
                 self._ir_partitions_fft = None
                 self._status = f"Error: {data}"
                 logger.error(f"[{self.name}] IR load failed: {data}")
-        self.ui_update_callback(self._get_current_state_snapshot_locked())
+        self.ui_update_callback(self._get_state_snapshot_locked())
 
     @Slot(float)
     def set_input_gain_db(self, value: float):
@@ -248,7 +245,7 @@ class ConvolutionReverbNode(Node):
             self._mix = np.clip(value, 0.0, 1.0)
         self.ui_update_callback(self.get_current_state_snapshot())
 
-    def _get_current_state_snapshot_locked(self) -> Dict:
+    def _get_state_snapshot_locked(self) -> Dict:
         return {
             "status": self._status,
             "ir_filepath": self._ir_filepath,
@@ -256,10 +253,6 @@ class ConvolutionReverbNode(Node):
             "output_gain_db": self._output_gain_db,
             "mix": self._mix,
         }
-
-    def get_current_state_snapshot(self) -> Dict:
-        with self._lock:
-            return self._get_current_state_snapshot_locked()
 
     def _reset_dsp_state_locked(self, num_channels: int):
         self._expected_channels = num_channels
@@ -372,4 +365,4 @@ class ConvolutionReverbNode(Node):
             with self._lock:
                 self._status = "Error: File not found"
                 self._ir_filepath = filepath
-            self.ui_update_callback(self._get_current_state_snapshot_locked())
+            self.ui_update_callback(self._get_state_snapshot_locked())

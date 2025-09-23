@@ -76,7 +76,7 @@ class OscillatorNodeItem(ParameterNodeItem):
         """
         # First, call the parent method to handle all standard updates
         # (e.g., setting values, enabling/disabling based on connections).
-        super()._on_state_updated(state)
+        super()._on_state_updated_from_logic(state)
 
         # Add custom logic to show/hide the Pulse Width control
         waveform = state.get("waveform")
@@ -97,7 +97,7 @@ class OscillatorNodeItem(ParameterNodeItem):
 
 
 # ==============================================================================
-# Oscillator Logic Node (Unchanged)
+# Oscillator Logic Node
 # ==============================================================================
 class OscillatorNode(Node):
     NODE_TYPE = "Oscillator"
@@ -111,7 +111,6 @@ class OscillatorNode(Node):
         self.add_input("pulse_width", data_type=float)
         self.add_output("out", data_type=torch.Tensor)
 
-        self._lock = threading.Lock()
         self.samplerate = DEFAULT_SAMPLERATE
         self.blocksize = DEFAULT_BLOCKSIZE
         self.channels = DEFAULT_CHANNELS
@@ -122,13 +121,12 @@ class OscillatorNode(Node):
         self._frequency: float = 440.0
         self._pulse_width: float = 0.5
 
-    def _get_current_state_snapshot_locked(self) -> Dict:
+        # -- Pre-calculate the phase ramp to avoid allocation in process() ---
+        self._phase_ramp = torch.arange(self.blocksize, dtype=DEFAULT_DTYPE)
+
+    def _get_state_snapshot_locked(self) -> Dict:
         """Returns a copy of the current parameters for UI synchronization. Assumes lock is held."""
         return {"waveform": self._waveform, "frequency": self._frequency, "pulse_width": self._pulse_width}
-
-    def get_current_state_snapshot(self) -> Dict:
-        with self._lock:
-            return self._get_current_state_snapshot_locked()
 
     @Slot(Waveform)
     def set_waveform(self, waveform: Waveform):
@@ -136,7 +134,7 @@ class OscillatorNode(Node):
         with self._lock:
             if self._waveform != waveform:
                 self._waveform = waveform
-                state_to_emit = self._get_current_state_snapshot_locked()
+                state_to_emit = self._get_state_snapshot_locked()
         if state_to_emit:
             self.ui_update_callback(state_to_emit)
 
@@ -147,7 +145,7 @@ class OscillatorNode(Node):
             new_freq = np.clip(float(frequency), 20.0, 20000.0)
             if self._frequency != new_freq:
                 self._frequency = new_freq
-                state_to_emit = self._get_current_state_snapshot_locked()
+                state_to_emit = self._get_state_snapshot_locked()
         if state_to_emit:
             self.ui_update_callback(state_to_emit)
 
@@ -158,7 +156,7 @@ class OscillatorNode(Node):
             new_pw = np.clip(float(pulse_width), 0.01, 0.99)  # Avoid extremes
             if self._pulse_width != new_pw:
                 self._pulse_width = new_pw
-                state_to_emit = self._get_current_state_snapshot_locked()
+                state_to_emit = self._get_state_snapshot_locked()
         if state_to_emit:
             self.ui_update_callback(state_to_emit)
 
@@ -171,7 +169,7 @@ class OscillatorNode(Node):
                 new_freq = np.clip(float(freq_socket), 20.0, 20000.0)
                 if abs(self._frequency - new_freq) > 1e-6:
                     self._frequency = new_freq
-                    state_snapshot_to_emit = self._get_current_state_snapshot_locked()
+                    state_snapshot_to_emit = self._get_state_snapshot_locked()
 
             pw_socket = input_data.get("pulse_width")
             if pw_socket is not None:
@@ -180,7 +178,7 @@ class OscillatorNode(Node):
                     self._pulse_width = new_pw
                     # If freq also changed, we don't need to get the snapshot again
                     if not state_snapshot_to_emit:
-                        state_snapshot_to_emit = self._get_current_state_snapshot_locked()
+                        state_snapshot_to_emit = self._get_state_snapshot_locked()
 
             # Copy state to local variables for processing
             frequency = self._frequency
@@ -193,7 +191,9 @@ class OscillatorNode(Node):
 
         # --- Generate Waveform using PyTorch ---
         phase_increment = (2 * torch.pi * frequency) / self.samplerate
-        phases = self._phase + torch.arange(self.blocksize, dtype=DEFAULT_DTYPE) * phase_increment
+
+        # Use the pre-calculated phase ramp ---
+        phases = self._phase + self._phase_ramp * phase_increment
 
         output_1d = None
         # Normalize phase to [0, 2*pi) for periodic functions

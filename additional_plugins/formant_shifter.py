@@ -55,7 +55,6 @@ class FormantShifterNode(Node):
         self.add_input("formant_shift_st", data_type=float)
         self.add_output("spectral_frame_out", data_type=SpectralFrame)
 
-        self._lock = threading.Lock()
         self._formant_shift_st: float = 0.0
         # --- IMPROVEMENT 2: State for parameter smoothing ---
         self._last_formant_ratio: float = 1.0
@@ -72,16 +71,12 @@ class FormantShifterNode(Node):
         with self._lock:
             if self._formant_shift_st != value:
                 self._formant_shift_st = float(value)
-                state_to_emit = self._get_current_state_snapshot_locked()
+                state_to_emit = self._get_state_snapshot_locked()
         if state_to_emit:
             self.ui_update_callback(state_to_emit)
 
-    def _get_current_state_snapshot_locked(self) -> Dict:
+    def _get_state_snapshot_locked(self) -> Dict:
         return {"formant_shift_st": self._formant_shift_st}
-
-    def get_current_state_snapshot(self) -> Dict:
-        with self._lock:
-            return self._get_current_state_snapshot_locked()
 
     def _resample_magnitudes(self, magnitudes: torch.Tensor, ratio: float) -> torch.Tensor:
         num_channels, num_bins = magnitudes.shape
@@ -146,7 +141,7 @@ class FormantShifterNode(Node):
                 ui_update_needed = True
 
             if ui_update_needed:
-                state_snapshot_to_emit = self._get_current_state_snapshot_locked()
+                state_snapshot_to_emit = self._get_state_snapshot_locked()
 
             formant_ratio = 2 ** (effective_formant_shift / 12.0)
 
@@ -193,7 +188,8 @@ class FormantShifterNode(Node):
         return {"spectral_frame_out": output_frame}
 
     def serialize_extra(self) -> dict:
-        return self.get_current_state_snapshot()
+        with self._lock:
+            return self._get_state_snapshot_locked()
 
     def deserialize_extra(self, data: dict):
         self.set_formant_shift_st(data.get("formant_shift_st", 0.0))

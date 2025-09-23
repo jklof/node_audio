@@ -165,7 +165,6 @@ class AudioFilePlayerNode(Node):
     def __init__(self, name, node_id=None):
         super().__init__(name, node_id)
         self.add_output("out", data_type=torch.Tensor)
-        self._lock = threading.Lock()
         self._worker_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
         self._state_snapshot: Dict = {
@@ -229,9 +228,8 @@ class AudioFilePlayerNode(Node):
                 self._seek_request_proportion = proportion
                 logger.info(f"[{self.name}] Seek requested to {proportion*100:.1f}%")
 
-    def get_current_state_snapshot(self) -> Dict:
-        with self._lock:
-            return self._state_snapshot.copy()
+    def _get_state_snapshot_locked(self) -> Dict:
+        return self._state_snapshot.copy()
 
     def emit_initial_state(self):
         """Emits the current state for UI initialization."""

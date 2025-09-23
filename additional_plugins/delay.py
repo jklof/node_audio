@@ -88,7 +88,6 @@ class DelayNode(Node):
         self.add_input("mix", data_type=float)
         self.add_output("out", data_type=torch.Tensor)
 
-        self._lock = threading.Lock()
         self._delay_time_ms = 100.0
         self._feedback = 0.5
         self._mix = 0.5
@@ -116,7 +115,7 @@ class DelayNode(Node):
             clipped_value = np.clip(float(value), MIN_DELAY_MS, MAX_DELAY_MS).item()
             if self._delay_time_ms != clipped_value:
                 self._delay_time_ms = clipped_value
-                state_to_emit = self.get_current_state_snapshot(locked=True)
+                state_to_emit = self._get_state_snapshot_locked()
         if state_to_emit:
             self.ui_update_callback(state_to_emit)
 
@@ -126,7 +125,7 @@ class DelayNode(Node):
             clipped_value = np.clip(float(value), MIN_FEEDBACK, MAX_FEEDBACK).item()
             if self._feedback != clipped_value:
                 self._feedback = clipped_value
-                state_to_emit = self.get_current_state_snapshot(locked=True)
+                state_to_emit = self._get_state_snapshot_locked()
         if state_to_emit:
             self.ui_update_callback(state_to_emit)
 
@@ -136,21 +135,17 @@ class DelayNode(Node):
             clipped_value = np.clip(float(value), MIN_MIX, MAX_MIX).item()
             if self._mix != clipped_value:
                 self._mix = clipped_value
-                state_to_emit = self.get_current_state_snapshot(locked=True)
+                state_to_emit = self._get_state_snapshot_locked()
         if state_to_emit:
             self.ui_update_callback(state_to_emit)
 
-    def get_current_state_snapshot(self, locked: bool = False) -> Dict:
+    def _get_state_snapshot_locked(self) -> Dict:
         """Returns a copy of the current parameters for UI or serialization."""
-        state = {
+        return {
             "delay_time_ms": self._delay_time_ms,
             "feedback": self._feedback,
             "mix": self._mix,
         }
-        if locked:
-            return state
-        with self._lock:
-            return state
 
     def start(self):
         """Called when processing starts. Resets the delay buffer."""
@@ -207,7 +202,7 @@ class DelayNode(Node):
 
             # If a value changed, get a state snapshot to emit after releasing the lock
             if ui_update_needed:
-                state_to_emit = self.get_current_state_snapshot(locked=True)
+                state_to_emit = self._get_state_snapshot_locked()
 
         # Emit signal to UI AFTER the lock is released
         if state_to_emit:
@@ -252,7 +247,8 @@ class DelayNode(Node):
         return {"out": output_signal}
 
     def serialize_extra(self) -> dict:
-        return self.get_current_state_snapshot()
+        with self._lock:
+            return self._get_state_snapshot_locked()
 
     def deserialize_extra(self, data: dict):
         with self._lock:

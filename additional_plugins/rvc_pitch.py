@@ -38,13 +38,6 @@ UI_UPDATE_INTERVAL_MS = 100
 
 
 # ==============================================================================
-# 1. State Emitter for UI Communication (No changes needed)
-# ==============================================================================
-class RmvpeEmitter(QObject):
-    stateUpdated = Signal(dict)
-
-
-# ==============================================================================
 # 2. Custom UI Class (RMVPEF0EstimatorNodeItem) (No changes needed)
 # ==============================================================================
 class RMVPEF0EstimatorNodeItem(NodeItem):
@@ -168,7 +161,6 @@ class RMVPEF0EstimatorNode(Node):
         self.add_output("f0_coarse", data_type=torch.Tensor)
         self.add_output("pitchf", data_type=torch.Tensor)
 
-        self._lock = threading.Lock()
         self._model_path: Optional[str] = None
         self._device: int = -1
         self._onnx_session: Optional[onnxruntime.InferenceSession] = None
@@ -271,15 +263,14 @@ class RMVPEF0EstimatorNode(Node):
             self._device = device_id
         self._load_model()
 
-    def get_current_state_snapshot(self) -> Dict:
-        with self._lock:
-            return {
-                "model_path": self._model_path,
-                "device": self._device,
-                "f0_hz": self._last_f0_hz,
-                "is_processing": self._is_processing,
-                "buffer_size_ms": (len(self._audio_buffer) / DEFAULT_SAMPLERATE) * 1000,
-            }
+    def _get_current_state_snapshot(self) -> Dict:
+        return {
+            "model_path": self._model_path,
+            "device": self._device,
+            "f0_hz": self._last_f0_hz,
+            "is_processing": self._is_processing,
+            "buffer_size_ms": (len(self._audio_buffer) / DEFAULT_SAMPLERATE) * 1000,
+        }
 
     def process(self, input_data: dict) -> dict:
         audio_in = input_data.get("in")

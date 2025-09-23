@@ -79,8 +79,6 @@ class AutoGainNode(Node):
         self.add_input("gain_smoothing_ms", data_type=float)
         self.add_output("gain_out", data_type=float)
 
-        self._lock = threading.Lock()
-
         # --- Internal state parameters ---
         self._target_db: float = -14.0
         self._averaging_time_s: float = 3.0
@@ -98,16 +96,12 @@ class AutoGainNode(Node):
         if self._rms_history.maxlen != new_maxlen:
             self._rms_history = deque(self._rms_history, maxlen=new_maxlen)
 
-    def _get_current_state_snapshot_locked(self) -> Dict:
+    def _get_state_snapshot_locked(self) -> Dict:
         return {
             "target_db": self._target_db,
             "averaging_time_s": self._averaging_time_s,
             "gain_smoothing_ms": self._gain_smoothing_ms,
         }
-
-    def get_current_state_snapshot(self) -> Dict:
-        with self._lock:
-            return self._get_current_state_snapshot_locked()
 
     # --- Thread-safe setters ---
     @Slot(float)
@@ -116,7 +110,7 @@ class AutoGainNode(Node):
         with self._lock:
             if self._target_db != value:
                 self._target_db = value
-                state_to_emit = self._get_current_state_snapshot_locked()
+                state_to_emit = self._get_state_snapshot_locked()
         if state_to_emit:
             self.ui_update_callback(state_to_emit)
 
@@ -127,7 +121,7 @@ class AutoGainNode(Node):
             if self._averaging_time_s != value:
                 self._averaging_time_s = value
                 self._recalculate_deque_size()
-                state_to_emit = self._get_current_state_snapshot_locked()
+                state_to_emit = self._get_state_snapshot_locked()
         if state_to_emit:
             self.ui_update_callback(state_to_emit)
 
@@ -137,7 +131,7 @@ class AutoGainNode(Node):
         with self._lock:
             if self._gain_smoothing_ms != value:
                 self._gain_smoothing_ms = value
-                state_to_emit = self._get_current_state_snapshot_locked()
+                state_to_emit = self._get_state_snapshot_locked()
         if state_to_emit:
             self.ui_update_callback(state_to_emit)
 
@@ -166,7 +160,7 @@ class AutoGainNode(Node):
                 ui_update_needed = True
 
             if ui_update_needed:
-                state_snapshot_to_emit = self._get_current_state_snapshot_locked()
+                state_snapshot_to_emit = self._get_state_snapshot_locked()
 
             target_db = self._target_db
             gain_smoothing_ms = self._gain_smoothing_ms
@@ -207,7 +201,8 @@ class AutoGainNode(Node):
         super().start()
 
     def serialize_extra(self) -> dict:
-        return self.get_current_state_snapshot()
+        with self._lock:
+            return self._get_state_snapshot_locked()
 
     def deserialize_extra(self, data: dict):
         self.set_target_db(data.get("target_db", -14.0))

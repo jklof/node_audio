@@ -127,7 +127,6 @@ class DataDisplayNode(Node):
         self._update_interval = 0.5
         self._next_update_time = 0
         self._latest_stats = None
-        self._lock = threading.Lock()
 
     def update_latest_stats(self, new_stats):
         with self._lock:

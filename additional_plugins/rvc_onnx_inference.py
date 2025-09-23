@@ -152,7 +152,6 @@ class RVCOnnxInferenceNode(Node):
         self.add_input("f0_coarse", data_type=torch.Tensor)
         self.add_input("pitchf", data_type=torch.Tensor)
         self.add_output("audio_out", data_type=torch.Tensor)
-        self._lock = threading.Lock()
         self._model_path: Optional[str] = None
         self._device: int = -1
         self._speaker_id: int = 0
@@ -242,20 +241,19 @@ class RVCOnnxInferenceNode(Node):
     def set_speaker_id(self, sid: int):
         self._speaker_id = sid
 
-    def get_current_state_snapshot(self) -> Dict:
-        with self._lock:
-            info = {"sr": self._metadata.get("samplingRate"), "f0": self._metadata.get("f0"), "is_half": self._is_half}
-            return {
-                "model_path": self._model_path,
-                "device": self._device,
-                "speaker_id": self._speaker_id,
-                "is_processing": self._is_processing,
-                "is_strained": self._is_strained,
-                "status": self._status,
-                "info": info if self._session else None,
-                "task_queue_size": len(self._tasks_deque),
-                "output_buffer_size_ms": (len(self._output_buffer) / DEFAULT_SAMPLERATE) * 1000,
-            }
+    def _get_current_state_snapshot(self) -> Dict:
+        info = {"sr": self._metadata.get("samplingRate"), "f0": self._metadata.get("f0"), "is_half": self._is_half}
+        return {
+            "model_path": self._model_path,
+            "device": self._device,
+            "speaker_id": self._speaker_id,
+            "is_processing": self._is_processing,
+            "is_strained": self._is_strained,
+            "status": self._status,
+            "info": info if self._session else None,
+            "task_queue_size": len(self._tasks_deque),
+            "output_buffer_size_ms": (len(self._output_buffer) / DEFAULT_SAMPLERATE) * 1000,
+        }
 
     def process(self, input_data: dict) -> dict:
         features, f0_coarse, pitchf = (input_data.get(k) for k in ["features", "f0_coarse", "pitchf"])

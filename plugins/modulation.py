@@ -91,7 +91,6 @@ class ADSRNode(Node):
         self.add_output("out", data_type=float)
 
         # --- Internal State ---
-        self._lock = threading.Lock()
 
         # User-configurable parameters (defaults)
         self._attack_s: float = 0.01
@@ -110,7 +109,7 @@ class ADSRNode(Node):
         state_to_emit = None
         with self._lock:
             self._attack_s = float(value)
-            state_to_emit = self._get_current_state_snapshot_locked()
+            state_to_emit = self._get_state_snapshot_locked()
         if state_to_emit:
             self.ui_update_callback(state_to_emit)
 
@@ -119,7 +118,7 @@ class ADSRNode(Node):
         state_to_emit = None
         with self._lock:
             self._decay_s = float(value)
-            state_to_emit = self._get_current_state_snapshot_locked()
+            state_to_emit = self._get_state_snapshot_locked()
         if state_to_emit:
             self.ui_update_callback(state_to_emit)
 
@@ -128,7 +127,7 @@ class ADSRNode(Node):
         state_to_emit = None
         with self._lock:
             self._sustain_level = float(value)
-            state_to_emit = self._get_current_state_snapshot_locked()
+            state_to_emit = self._get_state_snapshot_locked()
         if state_to_emit:
             self.ui_update_callback(state_to_emit)
 
@@ -137,21 +136,17 @@ class ADSRNode(Node):
         state_to_emit = None
         with self._lock:
             self._release_s = float(value)
-            state_to_emit = self._get_current_state_snapshot_locked()
+            state_to_emit = self._get_state_snapshot_locked()
         if state_to_emit:
             self.ui_update_callback(state_to_emit)
 
-    def _get_current_state_snapshot_locked(self) -> Dict:
+    def _get_state_snapshot_locked(self) -> Dict:
         return {
             "attack": self._attack_s,
             "decay": self._decay_s,
             "sustain": self._sustain_level,
             "release": self._release_s,
         }
-
-    def get_current_state_snapshot(self) -> Dict:
-        with self._lock:
-            return self._get_current_state_snapshot_locked()
 
     def process(self, input_data: dict) -> dict:
         state_snapshot_to_emit = None
@@ -186,7 +181,7 @@ class ADSRNode(Node):
                 ui_update_needed = True
 
             if ui_update_needed:
-                state_snapshot_to_emit = self._get_current_state_snapshot_locked()
+                state_snapshot_to_emit = self._get_state_snapshot_locked()
 
             gate = bool(input_data.get("gate", False))
 
@@ -319,17 +314,19 @@ class GateButtonNode(Node):
         super().__init__(name, node_id)
         self.add_output("out", data_type=bool)
 
-        self._lock = threading.Lock()
         self._gate_state = False
 
         # Initial state emission is handled by graph_scene
+
+    def _get_state_snapshot_locked(self) -> Dict:
+        return {"gate_state": self._gate_state}
 
     @Slot()
     def set_gate_true(self):
         """Called by the UI when the button is pressed."""
         with self._lock:
             self._gate_state = True
-            state = {"gate_state": self._gate_state}
+            state = self._get_state_snapshot_locked()
         self.ui_update_callback(state)
 
     @Slot()
@@ -337,7 +334,7 @@ class GateButtonNode(Node):
         """Called by the UI when the button is released."""
         with self._lock:
             self._gate_state = False
-            state = {"gate_state": self._gate_state}
+            state = self._get_state_snapshot_locked()
         self.ui_update_callback(state)
 
     def process(self, input_data: dict) -> dict:
@@ -395,7 +392,6 @@ class LFONode(Node):
 
         self.samplerate = DEFAULT_SAMPLERATE
         self.blocksize = DEFAULT_BLOCKSIZE
-        self.lock = threading.Lock()
 
         self._frequency_hz = 1.0
         self._phase = 0.0  # [0, 1) range
@@ -408,7 +404,7 @@ class LFONode(Node):
     @Slot(float)
     def set_frequency(self, freq: float):
         state_to_emit = None
-        with self.lock:
+        with self._lock:
             new_freq = max(0.001, float(freq))  # Avoid 0 Hz
             if self._frequency_hz != new_freq:
                 self._frequency_hz = new_freq
@@ -416,20 +412,15 @@ class LFONode(Node):
         if state_to_emit:
             self.ui_update_callback(state_to_emit)
 
-    def get_frequency_hz(self) -> float:
-        with self.lock:
-            return self._frequency_hz
-
-    def get_current_state_snapshot(self) -> Dict:
-        with self.lock:
-            return {"frequency": self._frequency_hz}
+    def _get_state_snapshot_locked(self) -> Dict:
+        return {"frequency": self._frequency_hz}
 
     # -----------------
     # Worker thread method
     # -----------------
     def process(self, input_data: dict) -> dict:
         state_snapshot_to_emit = None
-        with self.lock:
+        with self._lock:
             ui_update_needed = False
 
             # --- Prioritize socket inputs over internal state ---
@@ -469,10 +460,10 @@ class LFONode(Node):
         return {"sine_out": sine_val, "square_out": square_val, "saw_out": saw_val}
 
     def serialize_extra(self):
-        with self.lock:
+        with self._lock:
             return {"frequency": self._frequency_hz, "phase": self._phase}
 
     def deserialize_extra(self, data):
-        with self.lock:
+        with self._lock:
             self._frequency_hz = float(data.get("frequency", 1.0))
             self._phase = float(data.get("phase", 0.0))

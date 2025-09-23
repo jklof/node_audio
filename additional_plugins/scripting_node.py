@@ -294,6 +294,7 @@ class CodeNodeItem(NodeItem):
 
     @Slot(dict)
     def _on_state_updated_from_logic(self, state: dict):
+        super()._on_state_updated_from_logic(state)
 
         # 1. First, check if the sockets have changed. If so, reconcile them.
         if state.get("sockets_changed", False):
@@ -379,7 +380,6 @@ class CodeNode(Node):
 
     def __init__(self, name, node_id=None):
         super().__init__(name, node_id)
-        self._lock = threading.Lock()
         self._code: str = DEFAULT_CODE
         self._compiled_code: Optional[CodeType] = None
         self._state: Dict[str, Any] = {}

@@ -42,6 +42,7 @@ NODE_WIDTH = 120  # Default minimum width
 HEADER_HEIGHT = 20
 SOCKET_Y_SPACING = 25
 NODE_CONTENT_PADDING = 5
+EPSILON = 1e-9
 
 
 class SocketItem(QGraphicsObject):
@@ -357,15 +358,9 @@ class NodeItem(QGraphicsObject):
 
     @Slot()
     def updateFromLogic(self):
-        # Explicitly check and update the title text from the logic object
-        if self.title_item.toPlainText() != self.node_logic.name:
-            self.title_item.setPlainText(self.node_logic.name)
-
-        # Update the UI's error state from the logic's state
-        self.set_error_display_state(self.node_logic.error_state)
-
-        self.update_geometry()
-        self.update()
+        # pull state from logic Node (get_current_state_snapshot is thread safe), then update the UI
+        state = self.node_logic.get_current_state_snapshot()
+        self._on_state_updated_from_logic(state)
 
     @Slot(dict)
     def _on_state_updated_from_logic(self, state_dict):
@@ -523,10 +518,6 @@ class ConnectionItem(QGraphicsPathItem):
         event.accept()
 
 
-# --- Constants ---
-EPSILON = 1e-9
-
-
 class ParameterNodeItem(NodeItem):
     """
     Generic NodeItem base class that creates UI controls from a parameter configuration.
@@ -559,7 +550,7 @@ class ParameterNodeItem(NodeItem):
 
         self.setContentWidget(self.container_widget)
 
-        # The callback is now set up in the base NodeItem.__init__
+        # initial uppdate, pull state from logic Node
         self.updateFromLogic()
 
     def _create_slider_control(self, param: dict, layout: QVBoxLayout):
@@ -650,6 +641,10 @@ class ParameterNodeItem(NodeItem):
     @Slot(dict)
     def _on_state_updated_from_logic(self, state: dict):
         """Updates all controls based on the incoming state dictionary."""
+
+        # Call parent to handle title, error state, and geometry
+        super()._on_state_updated_from_logic(state)
+
         for key, info in self._controls.items():
             value = state.get(key)
             widget = info["widget"]
@@ -672,9 +667,3 @@ class ParameterNodeItem(NodeItem):
             if is_connected and control_type != "combobox":
                 label_text += " (ext)"
             label.setText(label_text)
-
-    @Slot()
-    def updateFromLogic(self):
-        state = self.node_logic.get_current_state_snapshot()
-        self._on_state_updated_from_logic(state)
-        super().updateFromLogic()

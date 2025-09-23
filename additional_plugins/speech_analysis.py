@@ -138,7 +138,7 @@ class F0EstimatorNodeItem(ParameterNodeItem):
         Overrides the parent method to add custom UI logic.
         """
         # Call the parent implementation first to handle the auto-generated controls (the combo box)
-        super()._on_state_updated(state)
+        super()._on_state_updated_from_logic(state)
 
         # --- Handle custom labels ---
         f0 = state.get("f0_hz")
@@ -236,7 +236,6 @@ class F0EstimatorNode(Node):
         self.add_output("f0_hz", data_type=float)
         self.add_output("confidence", data_type=float)
 
-        self._lock = threading.Lock()
         self._method = "pyin" if LIBROSA_AVAILABLE else "autocorr"
 
         self._buffer = torch.tensor([], dtype=torch.float32)
@@ -272,15 +271,11 @@ class F0EstimatorNode(Node):
                 self._smoothed_f0 = 0.0
                 self._latest_f0_hz = 0.0
                 self._latest_confidence = 0.0
-                state_to_emit = self._get_current_state_snapshot_unlocked()
+                state_to_emit = self._get_state_snapshot_locked()
         if state_to_emit:
             self.ui_update_callback(state_to_emit)
 
-    def get_current_state_snapshot(self) -> Dict:
-        with self._lock:
-            return self._get_current_state_snapshot_unlocked()
-
-    def _get_current_state_snapshot_unlocked(self) -> Dict:
+    def _get_state_snapshot_locked(self) -> Dict:
         return {
             "method": self._method,
             "f0_hz": self._latest_f0_hz,

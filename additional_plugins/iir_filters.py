@@ -78,7 +78,7 @@ class BiquadFilterNodeItem(ParameterNodeItem):
         Overrides the parent method to add custom logic for showing/hiding controls.
         """
         # First, let the parent class handle all standard UI updates.
-        super()._on_state_updated(state)
+        super()._on_state_updated_from_logic(state)
 
         # Now, add the custom logic.
         filter_type = state.get("filter_type", "Low Pass")
@@ -109,7 +109,6 @@ class BiquadFilterNode(Node):
 
     def __init__(self, name: str, node_id: Optional[str] = None):
         super().__init__(name, node_id)
-        self._lock = threading.Lock()
         self.add_input("in", data_type=torch.Tensor)
         self.add_input("cutoff_freq", data_type=float)
         self.add_input("q", data_type=float)
@@ -226,11 +225,7 @@ class BiquadFilterNode(Node):
                 self._params_dirty = True
         self.ui_update_callback(self.get_current_state_snapshot())
 
-    def get_current_state_snapshot(self) -> Dict:
-        with self._lock:
-            return self._get_current_state_snapshot_locked()
-
-    def _get_current_state_snapshot_locked(self) -> Dict:
+    def _get_state_snapshot_locked(self) -> Dict:
         """Updated to use keys that match the ParameterNodeItem."""
         return {
             "filter_type": self._filter_type,
@@ -274,7 +269,7 @@ class BiquadFilterNode(Node):
             if self._params_dirty:
                 self._recalculate_coeffs()
                 self._zi = None
-                state_snapshot_to_emit = self._get_current_state_snapshot_locked()
+                state_snapshot_to_emit = self._get_state_snapshot_locked()
 
             if self._expected_channels != num_channels:
                 self._expected_channels = num_channels

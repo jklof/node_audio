@@ -149,6 +149,7 @@ class YouTubePlayerNodeItem(NodeItem):
 
     @Slot(dict)
     def _on_state_updated_from_logic(self, state: Dict):
+        super()._on_state_updated_from_logic(state)
         playback_state = state.get("state")
         stream_info = state.get("stream_info", {})
         error_message = state.get("error_message", "")
@@ -186,12 +187,6 @@ class YouTubePlayerNodeItem(NodeItem):
         elif total_duration == 0:
             self.seek_slider.setValue(0)
 
-    @Slot()
-    def updateFromLogic(self):
-        state = self.node_logic.get_current_state_snapshot()
-        self._on_state_updated_from_logic(state)
-        super().updateFromLogic()
-
 
 class YouTubePlayerNode(Node):
     NODE_TYPE = "YouTube Player"
@@ -204,7 +199,6 @@ class YouTubePlayerNode(Node):
         self.add_output("out", data_type=torch.Tensor)
         self.emitter = ()
         self.video_emitter = VideoSignalEmitter()
-        self._lock = threading.Lock()
 
         self._worker_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
@@ -220,9 +214,12 @@ class YouTubePlayerNode(Node):
         self._duration_s: float = 0.0
         self._seek_request_s: float = -1.0
 
-    def get_current_state_snapshot(self, locked: bool = False) -> Dict:
-        """Constructs a state dictionary from internal variables."""
-        state = {
+    def _get_state_snapshot_locked(self) -> Dict:
+        """
+        Constructs a consistent state dictionary from internal variables
+        while the lock is held.
+        """
+        return {
             "state": self._playback_state,
             "url": self._url,
             "stream_info": self._stream_info,
@@ -230,10 +227,6 @@ class YouTubePlayerNode(Node):
             "position_s": self._position_s,
             "duration_s": self._duration_s,
         }
-        if locked:
-            return state
-        with self._lock:
-            return state
 
     def load_url_if_present(self):
         with self._lock:
@@ -253,7 +246,7 @@ class YouTubePlayerNode(Node):
             self._playback_state = PlaybackState.LOADING
             self._url, self._stream_info, self._error_message = url, {}, ""
             self._position_s, self._duration_s = 0.0, 0.0
-            state_to_emit = self.get_current_state_snapshot(locked=True)
+            state_to_emit = self._get_state_snapshot_locked()
         if state_to_emit:
             self.ui_update_callback(state_to_emit)
 
@@ -272,7 +265,7 @@ class YouTubePlayerNode(Node):
                 self._playback_state = PlaybackState.PLAYING
             else:
                 self._playback_state = PlaybackState.PAUSED
-            state_to_emit = self.get_current_state_snapshot(locked=True)
+            state_to_emit = self._get_state_snapshot_locked()
         if state_to_emit:
             self.ui_update_callback(state_to_emit)
 
@@ -284,7 +277,7 @@ class YouTubePlayerNode(Node):
             self._seek_request_s = max(0.0, min(self._duration_s, proportion * self._duration_s))
             self._position_s = self._seek_request_s
             self._playback_state = PlaybackState.BUFFERING
-            state_to_emit = self.get_current_state_snapshot(locked=True)
+            state_to_emit = self._get_state_snapshot_locked()
         if state_to_emit:
             self.ui_update_callback(state_to_emit)
 
@@ -296,11 +289,11 @@ class YouTubePlayerNode(Node):
                 output_block = self._audio_buffer.popleft()
                 if self._playback_state == PlaybackState.BUFFERING:
                     self._playback_state = PlaybackState.PLAYING
-                    state_to_emit = self.get_current_state_snapshot(locked=True)
+                    state_to_emit = self._get_state_snapshot_locked()
             else:
                 if self._playback_state == PlaybackState.PLAYING:
                     self._playback_state = PlaybackState.BUFFERING
-                    state_to_emit = self.get_current_state_snapshot(locked=True)
+                    state_to_emit = self._get_state_snapshot_locked()
                 output_block = torch.zeros((2, DEFAULT_BLOCKSIZE), dtype=DEFAULT_DTYPE)
         if state_to_emit:
             self.ui_update_callback(state_to_emit)
@@ -377,7 +370,7 @@ class YouTubePlayerNode(Node):
             if now - last_ui_update > UI_UPDATE_INTERVAL_MS / 1000.0:
                 with self._lock:
                     self._position_s = start_time_s + (frames_read / DEFAULT_SAMPLERATE)
-                    state_to_emit = self.get_current_state_snapshot(locked=True)
+                    state_to_emit = self._get_state_snapshot_locked()
                 self.ui_update_callback(state_to_emit)
                 last_ui_update = now
 
@@ -408,7 +401,7 @@ class YouTubePlayerNode(Node):
                 self._playback_state, self._position_s = PlaybackState.STOPPED, final_playback_time_s
             else:
                 self._playback_state = PlaybackState.STOPPED
-            state_to_emit = self.get_current_state_snapshot(locked=True)
+            state_to_emit = self._get_state_snapshot_locked()
         if state_to_emit:
             self.ui_update_callback(state_to_emit)
 
@@ -418,14 +411,14 @@ class YouTubePlayerNode(Node):
         info = self._get_youtube_info(url)
         if not info:
             with self._lock:
-                state_to_emit = self.get_current_state_snapshot(locked=True)
+                state_to_emit = self._get_state_snapshot_locked()
             self.ui_update_callback(state_to_emit)
             return
 
         title, duration_s, stream_url, _ = info
         with self._lock:
             self._stream_info, self._duration_s = {"title": title, "length": duration_s}, duration_s
-            state_to_emit = self.get_current_state_snapshot(locked=True)
+            state_to_emit = self._get_state_snapshot_locked()
         self.ui_update_callback(state_to_emit)
 
         while not self._stop_event.is_set():
@@ -440,7 +433,7 @@ class YouTubePlayerNode(Node):
                         start_time = 0.0
                 if self._playback_state != PlaybackState.PAUSED:
                     self._playback_state = PlaybackState.BUFFERING
-                    state_to_emit = self.get_current_state_snapshot(locked=True)
+                    state_to_emit = self._get_state_snapshot_locked()
             self.ui_update_callback(state_to_emit)
 
             ffmpeg_cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error"]
@@ -517,7 +510,7 @@ class YouTubePlayerNode(Node):
         with self._lock:
             if self._playback_state != PlaybackState.ERROR:
                 self._playback_state = PlaybackState.STOPPED
-            state_to_emit = self.get_current_state_snapshot(locked=True)
+            state_to_emit = self._get_state_snapshot_locked()
         self.ui_update_callback(state_to_emit)
 
     def serialize_extra(self) -> dict:

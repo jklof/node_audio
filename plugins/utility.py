@@ -45,16 +45,10 @@ class ValueNodeItem(NodeItem):
     @Slot(dict)
     def _on_state_updated_from_logic(self, state: dict):
         """Updates the UI from a state dictionary."""
+        super()._on_state_updated_from_logic(state)
         value = state.get("value", 0.0)
         with QSignalBlocker(self.spin_box):
             self.spin_box.setValue(value)
-
-    @Slot()
-    def updateFromLogic(self):
-        """Pulls the initial state from the logic node to initialize the UI."""
-        state = self.node_logic.get_current_state_snapshot()
-        self._on_state_updated_from_logic(state)
-        super().updateFromLogic()
 
 
 # ============================================================
@@ -83,17 +77,11 @@ class DialNodeItem(NodeItem):
     @Slot(dict)
     def _on_state_updated_from_logic(self, state: dict):
         """Updates the UI from a state dictionary."""
+        super()._on_state_updated_from_logic(state)
         value = state.get("value", 0.0)
         dial_int_value = int(round(value * self.DIAL_MAX))
         with QSignalBlocker(self.dial):
             self.dial.setValue(dial_int_value)
-
-    @Slot()
-    def updateFromLogic(self):
-        """Pulls the initial state from the logic node to initialize the UI."""
-        state = self.node_logic.get_current_state_snapshot()
-        self._on_state_updated_from_logic(state)
-        super().updateFromLogic()
 
 
 # ============================================================
@@ -108,13 +96,11 @@ class ValueNode(Node):
     def __init__(self, name: str, node_id: str | None = None):
         super().__init__(name, node_id)
         self.add_output("out", data_type=float)
-        self._lock = threading.Lock()
         self._value = 0.0
 
-    def get_current_state_snapshot(self) -> dict:
+    def _get_state_snapshot_locked(self) -> dict:
         """Returns the current state for UI updates."""
-        with self._lock:
-            return {"value": self._value}
+        return {"value": self._value}
 
     @Slot(float)
     def set_value(self, value: float):
@@ -192,6 +178,7 @@ class RunningAverageNodeItem(NodeItem):
     @Slot(dict)
     def _on_state_updated_from_logic(self, state: dict):
         """Updates the UI from a state dictionary."""
+        super()._on_state_updated_from_logic(state)
         time_s = state.get("time_s", 1.0)
         is_ext_controlled = "time" in self.node_logic.inputs and self.node_logic.inputs["time"].connections
 
@@ -200,13 +187,6 @@ class RunningAverageNodeItem(NodeItem):
 
         self.spin_box.setEnabled(not is_ext_controlled)
         self.time_label.setText(f"Avg. Time (s){' (ext)' if is_ext_controlled else ''}")
-
-    @Slot()
-    def updateFromLogic(self):
-        """Pulls the initial state from the logic node to initialize the UI."""
-        state = self.node_logic.get_current_state_snapshot()
-        self._on_state_updated_from_logic(state)
-        super().updateFromLogic()
 
 
 # ============================================================
@@ -224,15 +204,13 @@ class RunningAverageNode(Node):
         self.add_input("time", data_type=float)  # Time in seconds
         self.add_output("out", data_type=float)
 
-        self._lock = threading.Lock()
         self._time_s = 1.0  # Default averaging time
 
         self._current_average = 0.0
 
-    def get_current_state_snapshot(self) -> dict:
+    def _get_state_snapshot_locked(self) -> dict:
         """Returns the current state for UI updates."""
-        with self._lock:
-            return {"time_s": self._time_s}
+        return {"time_s": self._time_s}
 
     @Slot(float)
     def set_time(self, time_s: float):
@@ -266,7 +244,7 @@ class RunningAverageNode(Node):
                 current_time_s = max(0.01, float(time_socket))
                 if abs(self._time_s - current_time_s) > 1e-6:
                     self._time_s = current_time_s
-                    state_snapshot_to_emit = self.get_current_state_snapshot()
+                    state_snapshot_to_emit = self._get_state_snapshot_locked()
             else:
                 current_time_s = self._time_s
 
@@ -429,14 +407,10 @@ class DialHzNode(Node):
         super().__init__(name, node_id)
         self.add_input("frequency", data_type=float)
         self.add_output("freq_out", data_type=float)
-        self._lock = threading.Lock()
         self._frequency = 440.0
 
-    def get_current_state_snapshot(self, locked: bool = False):
-        if locked:
-            return {"frequency": self._frequency}
-        with self._lock:
-            return {"frequency": self._frequency}
+    def _get_state_snapshot_locked(self):
+        return {"frequency": self._frequency}
 
     @Slot(float)
     def set_frequency(self, frequency: float):
@@ -445,7 +419,7 @@ class DialHzNode(Node):
             new_freq = np.clip(float(frequency), 20.0, 20000.0)
             if self._frequency != new_freq:
                 self._frequency = new_freq
-                state_to_emit = self.get_current_state_snapshot(locked=True)
+                state_to_emit = self._get_state_snapshot_locked()
         if state_to_emit:
             self.ui_update_callback(state_to_emit)
 
@@ -457,7 +431,7 @@ class DialHzNode(Node):
                 new_freq = np.clip(float(freq_socket), 20.0, 20000.0)
                 if abs(self._frequency - new_freq) > 1e-6:
                     self._frequency = new_freq
-                    state_snapshot_to_emit = self.get_current_state_snapshot(locked=True)
+                    state_snapshot_to_emit = self._get_state_snapshot_locked()
             output_freq = self._frequency
         if state_snapshot_to_emit:
             self.ui_update_callback(state_snapshot_to_emit)
@@ -507,17 +481,13 @@ class GainNode(Node):
 
     def __init__(self, name, node_id=None):
         super().__init__(name, node_id)
-        self._lock = threading.Lock()
         self.add_input("in", data_type=torch.Tensor)
         self.add_input("gain_db", data_type=float)
         self.add_output("out", data_type=torch.Tensor)
         self._gain_db: float = 0.0
 
-    def get_current_state_snapshot(self, locked: bool = False) -> dict:
-        if locked:
-            return {"gain_db": self._gain_db}
-        with self._lock:
-            return {"gain_db": self._gain_db}
+    def _get_state_snapshot_locked(self) -> dict:
+        return {"gain_db": self._gain_db}
 
     @Slot(float)
     def set_gain_db(self, db_value: float):
@@ -526,7 +496,7 @@ class GainNode(Node):
             new_db_value = float(db_value)
             if self._gain_db != new_db_value:
                 self._gain_db = new_db_value
-                state_to_emit = self.get_current_state_snapshot(locked=True)
+                state_to_emit = self._get_state_snapshot_locked()
         if state_to_emit:
             self.ui_update_callback(state_to_emit)
 
@@ -541,11 +511,11 @@ class GainNode(Node):
                 current_gain_db = float(gain_db_socket)
                 if abs(self._gain_db - current_gain_db) > 1e-6:
                     self._gain_db = current_gain_db
-                    state_snapshot_to_emit = self.get_current_state_snapshot(locked=True)
+                    state_snapshot_to_emit = self._get_state_snapshot_locked()
             else:
                 current_gain_db = self._gain_db
         if state_snapshot_to_emit:
-            self.ui_update_callback(state_snapshot_to_emit)
+            self.ui_update_callback(state_to_emit)
 
         amplitude_factor = 10.0 ** (np.clip(current_gain_db, -120.0, 60.0) / 20.0)
         output_signal = signal * amplitude_factor

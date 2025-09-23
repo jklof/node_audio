@@ -73,7 +73,7 @@ class LinearPhaseEQNodeItem(ParameterNodeItem):
         Override the parent method to add custom logic after standard updates.
         """
         # 1. Let the parent class handle all standard widget updates first
-        super()._on_state_updated(state)
+        super()._on_state_updated_from_logic(state)
 
         # 2. Add custom logic: Show/hide the 'Q' control based on filter type
         filter_type = state.get("filter_type", "Low Pass")
@@ -99,7 +99,6 @@ class LinearPhaseEQNode(Node):
 
     def __init__(self, name: str, node_id: Optional[str] = None):
         super().__init__(name, node_id)
-        self._lock = threading.Lock()
         self.add_input("in", data_type=torch.Tensor)
         self.add_input("cutoff_freq", data_type=float)
         self.add_input("q", data_type=float)
@@ -154,7 +153,7 @@ class LinearPhaseEQNode(Node):
             if self._filter_type != f_type:
                 self._filter_type = f_type
                 self._params_dirty = True
-                state_snapshot_to_emit = self._get_current_state_snapshot_locked()
+                state_snapshot_to_emit = self._get_state_snapshot_locked()
         if state_snapshot_to_emit:
             self.ui_update_callback(state_snapshot_to_emit)
 
@@ -166,7 +165,7 @@ class LinearPhaseEQNode(Node):
             if self._cutoff_freq != new_freq:
                 self._cutoff_freq = new_freq
                 self._params_dirty = True
-                state_snapshot_to_emit = self._get_current_state_snapshot_locked()
+                state_snapshot_to_emit = self._get_state_snapshot_locked()
         if state_snapshot_to_emit:
             self.ui_update_callback(state_snapshot_to_emit)
 
@@ -178,15 +177,11 @@ class LinearPhaseEQNode(Node):
             if self._q != new_q:
                 self._q = new_q
                 self._params_dirty = True
-                state_snapshot_to_emit = self._get_current_state_snapshot_locked()
+                state_snapshot_to_emit = self._get_state_snapshot_locked()
         if state_snapshot_to_emit:
             self.ui_update_callback(state_snapshot_to_emit)
 
-    def get_current_state_snapshot(self) -> Dict:
-        with self._lock:
-            return self._get_current_state_snapshot_locked()
-
-    def _get_current_state_snapshot_locked(self) -> Dict:
+    def _get_state_snapshot_locked(self) -> Dict:
         """Gathers the current state. ASSUMES THE CALLER HOLDS THE LOCK."""
         # MODIFIED: Changed "freq" key to "cutoff_freq" to match parameter key
         is_freq_ext = "cutoff_freq" in self.inputs and self.inputs["cutoff_freq"].connections
@@ -231,7 +226,7 @@ class LinearPhaseEQNode(Node):
 
             if self._params_dirty:
                 self._recalculate_coeffs()
-                state_snapshot_to_emit = self._get_current_state_snapshot_locked()
+                state_snapshot_to_emit = self._get_state_snapshot_locked()
 
             if self._coeffs is None or self._history_buffer is None:
                 return {"out": signal}

@@ -3,6 +3,7 @@ import logging
 from collections import OrderedDict
 import torch
 import abc
+import threading
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +92,7 @@ class Node:
         self.pos = (0.0, 0.0)
         self.error_state: str | None = None  # Attribute to hold error messages
         self.ui_update_callback = lambda state_dict: None  # No-op callback by default
+        self._lock = threading.Lock()
 
     def clear_error_state(self):
         """Resets the node's error state."""
@@ -148,6 +150,22 @@ class Node:
 
     def __repr__(self):
         return f"<Node {self.name} ({self.NODE_TYPE} - {self.id[:4]})>"
+
+    def _get_state_snapshot_locked(self) -> dict:
+        """
+        [Override in subclass]
+        Return a dictionary of the node's state to be saved or sent to the UI.
+        This method is called by the base class while the lock is held.
+        """
+        return {}
+
+    def get_current_state_snapshot(self) -> dict:
+        """
+        Public, thread-safe method to get the current state.
+        This base implementation handles the locking. Subclasses should not override this.
+        """
+        with self._lock:
+            return self._get_state_snapshot_locked()
 
 
 class NodeGraph:

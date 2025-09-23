@@ -45,7 +45,6 @@ class FormantShifterAdvancedNode(Node):
         self.add_input("cepstral_cutoff", data_type=float)
         self.add_output("spectral_frame_out", data_type=SpectralFrame)
 
-        self._lock = threading.Lock()
         self._formant_shift_st: float = 0.0
         self._cepstral_cutoff: int = 40
         self._last_formant_ratio: float = 1.0
@@ -161,7 +160,7 @@ class FormantShifterAdvancedNode(Node):
             old_value = getattr(self, attr_name)
             if old_value != value:
                 setattr(self, attr_name, value)
-                state_to_emit = self._get_current_state_snapshot_locked()
+                state_to_emit = self._get_state_snapshot_locked()
 
                 # Invalidate cutoff cache if needed
                 if attr_name == "_cepstral_cutoff":
@@ -170,12 +169,8 @@ class FormantShifterAdvancedNode(Node):
         if state_to_emit:
             self.ui_update_callback(state_to_emit)
 
-    def _get_current_state_snapshot_locked(self) -> Dict:
+    def _get_state_snapshot_locked(self) -> Dict:
         return {"formant_shift_st": self._formant_shift_st, "cepstral_cutoff": self._cepstral_cutoff}
-
-    def get_current_state_snapshot(self) -> Dict:
-        with self._lock:
-            return self._get_current_state_snapshot_locked()
 
     def _get_spectral_envelope_cepstral(self, magnitudes: torch.Tensor, cutoff: int):
         """Ultra-optimized cepstral envelope extraction with caching."""

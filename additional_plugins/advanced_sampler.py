@@ -370,6 +370,7 @@ class AdvancedSamplePlayerNodeItem(NodeItem):
 
     @Slot(dict)
     def _on_state_updated_from_logic(self, state: dict):
+        super()._on_state_updated_from_logic(state)
         if "waveform_data" in state and state["waveform_data"] is not None:
             self.waveform_widget.set_waveform(state["waveform_data"])
         filepath = state.get("filepath")
@@ -381,11 +382,6 @@ class AdvancedSamplePlayerNodeItem(NodeItem):
         root_pitch = state.get("root_pitch_hz", 261.63)
         with QSignalBlocker(self.root_pitch_spinbox):
             self.root_pitch_spinbox.setValue(root_pitch)
-
-    def updateFromLogic(self):
-        state = self.node_logic.get_current_state_snapshot()
-        self._on_state_updated_from_logic(state)
-        super().updateFromLogic()
 
 
 class AdvancedSamplePlayerNode(Node):
@@ -400,7 +396,6 @@ class AdvancedSamplePlayerNode(Node):
         self.add_input("pitch", data_type=float)
         self.add_output("out", data_type=torch.Tensor)
         self.add_output("on_end", data_type=bool)
-        self._lock = threading.Lock()
         self._filepath: Optional[str] = None
         self._status: str = "No Sample"
         self._audio_data: Optional[torch.Tensor] = None
@@ -416,7 +411,7 @@ class AdvancedSamplePlayerNode(Node):
         self.loader_signaller = SampleLoadSignaller()
         self.loader_signaller.load_finished.connect(self._on_load_finished)
 
-    def _get_current_state_snapshot_locked(self) -> Dict:
+    def _get_state_snapshot_locked(self) -> Dict:
         playhead_norm = None
         if self._is_playing and self._audio_data is not None and self._audio_data.shape[1] > 0:
             playhead_norm = self._play_pos / self._audio_data.shape[1]
@@ -429,10 +424,6 @@ class AdvancedSamplePlayerNode(Node):
             "playhead_norm": playhead_norm,
         }
 
-    def get_current_state_snapshot(self) -> Dict:
-        with self._lock:
-            return self._get_current_state_snapshot_locked()
-
     def load_new_file_and_reset(self, file_path: str):
         with self._lock:
             self._start_pos_norm, self._end_pos_norm = 0.0, 1.0
@@ -442,7 +433,7 @@ class AdvancedSamplePlayerNode(Node):
         state_to_emit = None
         with self._lock:
             self._status, self._filepath = "Loading...", file_path
-            state_to_emit = self._get_current_state_snapshot_locked()
+            state_to_emit = self._get_state_snapshot_locked()
         if state_to_emit:
             self.ui_update_callback(state_to_emit)
         runnable = SampleLoadRunnable(file_path, DEFAULT_SAMPLERATE, self.loader_signaller)
@@ -459,11 +450,11 @@ class AdvancedSamplePlayerNode(Node):
                 self._audio_data, self._status = data, "Ready"
                 self._is_playing, self._play_pos = False, 0.0
                 self._silence_block = torch.zeros((data.shape[0], DEFAULT_BLOCKSIZE), dtype=DEFAULT_DTYPE)
-                state_to_emit = self._get_current_state_snapshot_locked()
+                state_to_emit = self._get_state_snapshot_locked()
                 state_to_emit["waveform_data"] = self._audio_data.clone()
             else:
                 self._audio_data, self._status = None, f"Error: {data}"
-                state_to_emit = self._get_current_state_snapshot_locked()
+                state_to_emit = self._get_state_snapshot_locked()
         if state_to_emit:
             self.ui_update_callback(state_to_emit)
 
@@ -472,7 +463,7 @@ class AdvancedSamplePlayerNode(Node):
         state_to_emit = None
         with self._lock:
             self._start_pos_norm, self._end_pos_norm = start_norm, end_norm
-            state_to_emit = self._get_current_state_snapshot_locked()
+            state_to_emit = self._get_state_snapshot_locked()
         if state_to_emit:
             self.ui_update_callback(state_to_emit)
 
@@ -482,7 +473,7 @@ class AdvancedSamplePlayerNode(Node):
         with self._lock:
             self._root_pitch_hz = pitch_hz
             self._last_known_pitch_hz = pitch_hz
-            state_to_emit = self._get_current_state_snapshot_locked()
+            state_to_emit = self._get_state_snapshot_locked()
         if state_to_emit:
             self.ui_update_callback(state_to_emit)
 
@@ -535,7 +526,7 @@ class AdvancedSamplePlayerNode(Node):
         now = time.monotonic()
         if now > self._last_playhead_update_time + 0.05:
             self._last_playhead_update_time = now
-            state_to_emit = self.get_current_state_snapshot()
+            state_to_emit = self._get_state_snapshot_locked()
             if state_to_emit:
                 self.ui_update_callback(state_to_emit)
         return {"out": output_block, "on_end": on_end_signal}
@@ -559,6 +550,6 @@ class AdvancedSamplePlayerNode(Node):
             self._last_known_pitch_hz = self._root_pitch_hz
             self._start_pos_norm = data.get("start_pos_norm", 0.0)
             self._end_pos_norm = data.get("end_pos_norm", 1.0)
-            state_to_emit = self._get_current_state_snapshot_locked()
+            state_to_emit = self._get_state_snapshot_locked()
         if state_to_emit:
             self.ui_update_callback(state_to_emit)

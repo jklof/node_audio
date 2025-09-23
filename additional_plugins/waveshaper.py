@@ -88,18 +88,13 @@ class WaveShaperNode(Node):
         self.add_input("mix", data_type=float)
         self.add_output("out", data_type=torch.Tensor)
 
-        self._lock = threading.Lock()
         self._shaper_type: ShaperType = ShaperType.SOFT_CLIP
         self._drive: float = 1.0
         self._mix: float = 1.0
 
-    def get_current_state_snapshot(self, locked: bool = False) -> Dict:
+    def _get_state_snapshot_locked(self) -> Dict:
         """Returns a copy of the current parameters for UI or serialization."""
-        state = {"shaper_type": self._shaper_type, "drive": self._drive, "mix": self._mix}
-        if locked:
-            return state
-        with self._lock:
-            return state
+        return {"shaper_type": self._shaper_type, "drive": self._drive, "mix": self._mix}
 
     @Slot(ShaperType)
     def set_shaper_type(self, shaper_type: ShaperType):
@@ -107,7 +102,7 @@ class WaveShaperNode(Node):
         with self._lock:
             if self._shaper_type != shaper_type:
                 self._shaper_type = shaper_type
-                state_to_emit = self.get_current_state_snapshot(locked=True)
+                state_to_emit = self._get_state_snapshot_locked()
         if state_to_emit:
             self.ui_update_callback(state_to_emit)
 
@@ -118,7 +113,7 @@ class WaveShaperNode(Node):
             new_drive = np.clip(float(drive), 1.0, 100.0).item()
             if self._drive != new_drive:
                 self._drive = new_drive
-                state_to_emit = self.get_current_state_snapshot(locked=True)
+                state_to_emit = self._get_state_snapshot_locked()
         if state_to_emit:
             self.ui_update_callback(state_to_emit)
 
@@ -129,7 +124,7 @@ class WaveShaperNode(Node):
             new_mix = np.clip(float(mix), 0.0, 1.0).item()
             if self._mix != new_mix:
                 self._mix = new_mix
-                state_to_emit = self.get_current_state_snapshot(locked=True)
+                state_to_emit = self._get_state_snapshot_locked()
         if state_to_emit:
             self.ui_update_callback(state_to_emit)
 
@@ -164,7 +159,7 @@ class WaveShaperNode(Node):
 
             # If a value changed, get a state snapshot to emit after releasing the lock
             if ui_update_needed:
-                state_to_emit = self.get_current_state_snapshot(locked=True)
+                state_to_emit = self._get_state_snapshot_locked()
 
         # Emit signal to UI AFTER the lock is released
         if state_to_emit:

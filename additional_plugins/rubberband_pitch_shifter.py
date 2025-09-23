@@ -52,7 +52,7 @@ class RubberBandPitchShiftNodeItem(ParameterNodeItem):
     def _on_state_updated_from_logic(self, state: dict):
         """Overrides base method to add custom UI logic."""
         # First, call the parent method to handle standard updates.
-        super()._on_state_updated(state)
+        super()._on_state_updated_from_logic(state)
 
         # Custom logic: only enable the formant shift dial when mode is "Shifted"
         formant_mode = state.get("formant_mode")
@@ -81,7 +81,6 @@ class RubberBandPitchShiftNode(Node):
         self.add_input("formant_shift_st", data_type=float)
         self.add_output("audio_out", data_type=torch.Tensor)
 
-        self._lock = threading.Lock()
         self._pitch_shift_st: float = 0.0
         self._formant_shift_st: float = 0.0
         self._formant_mode: str = "Preserve"
@@ -151,7 +150,7 @@ class RubberBandPitchShiftNode(Node):
                 self._formant_mode = value
                 # Formant mode change requires full recreation of the stretcher
                 self._cleanup_stretcher_locked()
-                state_to_emit = self._get_current_state_snapshot_locked()
+                state_to_emit = self._get_state_snapshot_locked()
         if state_to_emit:
             self.ui_update_callback(state_to_emit)
 
@@ -160,20 +159,16 @@ class RubberBandPitchShiftNode(Node):
         with self._lock:
             if getattr(self, attr_name) != value:
                 setattr(self, attr_name, value)
-                state_to_emit = self._get_current_state_snapshot_locked()
+                state_to_emit = self._get_state_snapshot_locked()
         if state_to_emit:
             self.ui_update_callback(state_to_emit)
 
-    def _get_current_state_snapshot_locked(self) -> Dict:
+    def _get_state_snapshot_locked(self) -> Dict:
         return {
             "pitch_shift_st": self._pitch_shift_st,
             "formant_shift_st": self._formant_shift_st,
             "formant_mode": self._formant_mode,
         }
-
-    def get_current_state_snapshot(self) -> Dict:
-        with self._lock:
-            return self._get_current_state_snapshot_locked()
 
     def process(self, input_data: dict) -> dict:
         audio_in = input_data.get("audio_in")
@@ -196,7 +191,7 @@ class RubberBandPitchShiftNode(Node):
                 ui_update_needed = True
 
             if ui_update_needed:
-                state_to_emit = self._get_current_state_snapshot_locked()
+                state_to_emit = self._get_state_snapshot_locked()
 
             # --- Handle input and stretcher state ---
             if audio_in is not None and isinstance(audio_in, torch.Tensor):
@@ -250,7 +245,8 @@ class RubberBandPitchShiftNode(Node):
         return {"audio_out": output_block}
 
     def serialize_extra(self) -> dict:
-        return self.get_current_state_snapshot()
+        with self._lock:
+            return self._get_state_snapshot_locked()
 
     def deserialize_extra(self, data: dict):
         self.set_pitch_shift_st(data.get("pitch_shift_st", 0.0))

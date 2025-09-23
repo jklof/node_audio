@@ -66,7 +66,7 @@ class PannerNodeItem(ParameterNodeItem):
         after the base functionality (like updating the slider) has been executed.
         """
         # First, let the parent class handle standard updates (slider position, enabled state).
-        super()._on_state_updated(state)
+        super()._on_state_updated_from_logic(state)
 
         # Now, apply our custom formatting to the label that the parent class created.
         pan_value = state.get("pan", 0.0)
@@ -95,7 +95,6 @@ class PannerNode(Node):
         self.add_input("pan", data_type=float)
         self.add_output("out", data_type=torch.Tensor)
 
-        self._lock = threading.Lock()
         self._pan = 0.0  # -1.0 (L) to 1.0 (R)
 
     @Slot(float)
@@ -106,17 +105,13 @@ class PannerNode(Node):
             clipped_value = np.clip(float(value), MIN_PAN, MAX_PAN).item()
             if self._pan != clipped_value:
                 self._pan = clipped_value
-                state_to_emit = self.get_current_state_snapshot(locked=True)
+                state_to_emit = self._get_state_snapshot_locked()
         if state_to_emit:
             self.ui_update_callback(state_to_emit)
 
-    def get_current_state_snapshot(self, locked: bool = False) -> Dict:
+    def _get_state_snapshot_locked(self) -> Dict:
         """Returns a copy of the current parameters for UI or serialization."""
-        state = {"pan": self._pan}
-        if locked:
-            return state
-        with self._lock:
-            return state
+        return {"pan": self._pan}
 
     def process(self, input_data: dict) -> dict:
         in_signal = input_data.get("in")
@@ -132,7 +127,7 @@ class PannerNode(Node):
                 new_pan = np.clip(float(pan_socket_val), MIN_PAN, MAX_PAN).item()
                 if self._pan != new_pan:
                     self._pan = new_pan
-                    state_snapshot_to_emit = self.get_current_state_snapshot(locked=True)
+                    state_snapshot_to_emit = self._get_state_snapshot_locked()
 
             pan_value = self._pan
 
@@ -166,7 +161,8 @@ class PannerNode(Node):
         return {"out": stereo_out}
 
     def serialize_extra(self) -> dict:
-        return self.get_current_state_snapshot()
+        with self._lock:
+            return self._get_state_snapshot_locked()
 
     def deserialize_extra(self, data: dict):
         # Use the public setter to ensure the UI is updated on load

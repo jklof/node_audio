@@ -53,7 +53,6 @@ class STFTNode(Node):
         super().__init__(name, node_id)
         self.add_input("audio_in", data_type=torch.Tensor)
         self.add_output("spectral_frame_out", data_type=SpectralFrame)
-        self._lock = threading.Lock()
         self._hop_size = DEFAULT_BLOCKSIZE
         self._window_size = DEFAULT_WINDOW_SIZE
         self._fft_size = DEFAULT_FFT_SIZE
@@ -86,10 +85,8 @@ class STFTNode(Node):
         self._recalculate_params()
         self.start()
 
-    # --- FIXED: Implemented the required method for ParameterNodeItem ---
-    def get_current_state_snapshot(self) -> dict:
-        with self._lock:
-            return {"window_size": self._window_size}
+    def _get_state_snapshot_locked(self) -> dict:
+        return {"window_size": self._window_size}
 
     def start(self):
         with self._lock:
@@ -149,7 +146,6 @@ class ISTFTNode(Node):
         super().__init__(name, node_id)
         self.add_input("spectral_frame_in", data_type=SpectralFrame)
         self.add_output("audio_out", data_type=torch.Tensor)
-        self._lock = threading.Lock()
         self._ola_buffer = None
         self._expected_channels = None
         self._synthesis_window = None
@@ -277,24 +273,18 @@ class SpectralFilterNode(Node):
         self.add_input("cutoff_freq_1", data_type=float)
         self.add_input("cutoff_freq_2", data_type=float)
         self.add_output("spectral_frame_out", data_type=SpectralFrame)
-        self._lock = threading.Lock()
 
         self._filter_type = "Low Pass"
         self._cutoff_freq_1 = 1000.0
         self._cutoff_freq_2 = 4000.0
 
     # --- FIXED: Renamed internal method for consistency ---
-    def _get_current_state_snapshot_locked(self):
+    def _get_state_snapshot_locked(self):
         return {
             "filter_type": self._filter_type,
             "cutoff_freq_1": self._cutoff_freq_1,
             "cutoff_freq_2": self._cutoff_freq_2,
         }
-
-    # --- FIXED: Renamed method to match expected interface ---
-    def get_current_state_snapshot(self):
-        with self._lock:
-            return self._get_current_state_snapshot_locked()
 
     @Slot(str)
     def set_filter_type(self, f_type: str):
@@ -302,7 +292,7 @@ class SpectralFilterNode(Node):
         with self._lock:
             if self._filter_type != f_type:
                 self._filter_type = f_type
-                state_to_emit = self._get_current_state_snapshot_locked()
+                state_to_emit = self._get_state_snapshot_locked()
         if state_to_emit:
             self.ui_update_callback(state_to_emit)
 
@@ -312,7 +302,7 @@ class SpectralFilterNode(Node):
         with self._lock:
             if self._cutoff_freq_1 != freq:
                 self._cutoff_freq_1 = freq
-                state_to_emit = self._get_current_state_snapshot_locked()
+                state_to_emit = self._get_state_snapshot_locked()
         if state_to_emit:
             self.ui_update_callback(state_to_emit)
 
@@ -322,7 +312,7 @@ class SpectralFilterNode(Node):
         with self._lock:
             if self._cutoff_freq_2 != freq:
                 self._cutoff_freq_2 = freq
-                state_to_emit = self._get_current_state_snapshot_locked()
+                state_to_emit = self._get_state_snapshot_locked()
         if state_to_emit:
             self.ui_update_callback(state_to_emit)
 
@@ -350,7 +340,7 @@ class SpectralFilterNode(Node):
                     ui_update_needed = True
 
             if ui_update_needed:
-                state_snapshot_to_emit = self._get_current_state_snapshot_locked()
+                state_snapshot_to_emit = self._get_state_snapshot_locked()
 
             filter_type = self._filter_type
             fc1 = self._cutoff_freq_1
@@ -389,8 +379,8 @@ class SpectralFilterNode(Node):
         return {"spectral_frame_out": output_frame}
 
     def serialize_extra(self) -> dict:
-        # --- FIXED: Renamed method call ---
-        return self.get_current_state_snapshot()
+        with self._lock:
+            return self._get_state_snapshot_locked()
 
     def deserialize_extra(self, data: dict):
         with self._lock:

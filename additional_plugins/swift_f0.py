@@ -102,6 +102,7 @@ class SwiftF0NodeItem(NodeItem):
         self.setContentWidget(self.container_widget) @ Slot(dict)
 
     def _on_state_updated_from_logic(self, state: dict):
+        super()._on_state_updated_from_logic(state)
         f0 = state.get("f0_hz")
         confidence = state.get("confidence")
         gate = state.get("gate", False)
@@ -123,12 +124,6 @@ class SwiftF0NodeItem(NodeItem):
             self.gate_label.setText("Gate: OFF")
             self.gate_label.setStyleSheet("color: lightgray;")
 
-    @Slot()
-    def updateFromLogic(self):
-        state = self.node_logic.get_current_state_snapshot()
-        self._on_state_updated_from_logic(state)
-        super().updateFromLogic()
-
 
 # ==============================================================================
 # 2. Node Logic Class (SwiftF0Node) - CORRECTED
@@ -146,7 +141,6 @@ class SwiftF0Node(Node):
         self.add_output("f0_hz", data_type=float)
         self.add_output("msg_out", data_type=object)
 
-        self._lock = threading.Lock()
         self._resampler = T.Resample(orig_freq=DEFAULT_SAMPLERATE, new_freq=ANALYSIS_SAMPLERATE, dtype=torch.float32)
 
         if SWIFT_F0_AVAILABLE:
@@ -170,14 +164,13 @@ class SwiftF0Node(Node):
         self._ui_update_thread: Optional[threading.Thread] = None
         self._stop_ui_thread_event = threading.Event()
 
-    def get_current_state_snapshot(self) -> Dict:
-        with self._lock:
-            return {
-                "f0_hz": self._latest_f0_hz,
-                "confidence": self._latest_confidence,
-                "midi_note": self._latest_midi_note,  # Kept for potential future use
-                "gate": self._latest_gate,
-            }
+    def _get_current_state_snapshot(self) -> Dict:
+        return {
+            "f0_hz": self._latest_f0_hz,
+            "confidence": self._latest_confidence,
+            "midi_note": self._latest_midi_note,  # Kept for potential future use
+            "gate": self._latest_gate,
+        }
 
     def _analysis_thread_loop(self):
         """This function runs in a separate thread and does the heavy lifting."""

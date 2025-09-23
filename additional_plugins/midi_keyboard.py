@@ -182,11 +182,13 @@ class MIDIKeyboardNodeItem(NodeItem):
         self.setContentWidget(self.container)
         self.piano_widget.noteOn.connect(self.node_logic.play_note)
         self.piano_widget.noteOff.connect(self.node_logic.stop_note)
+        self.shift_left_button.clicked.connect(lambda: self.node_logic.shift_octave(-1))
         self.shift_right_button.clicked.connect(lambda: self.node_logic.shift_octave(1))
         self.octave_spinbox.valueChanged.connect(self.node_logic.set_num_octaves)
 
     @Slot(dict)
     def _on_state_updated_from_logic(self, state: dict):
+        super()._on_state_updated_from_logic(state)
         active_notes = state.get("active_notes", [])
         self.piano_widget.set_active_notes(active_notes)
         start_note = state.get("start_note", 48)
@@ -203,12 +205,6 @@ class MIDIKeyboardNodeItem(NodeItem):
         self.shift_right_button.setEnabled(start_note < 128 - (num_octaves * 12))
         self.update_geometry()
 
-    @Slot()
-    def updateFromLogic(self):
-        state = self.node_logic.get_current_state_snapshot()
-        self._on_state_updated_from_logic(state)
-        super().updateFromLogic()
-
 
 # ==============================================================================
 # 3. Node Logic Class
@@ -223,24 +219,17 @@ class MIDIKeyboardNode(Node):
         super().__init__(name, node_id)
         self.add_input("msg_in", data_type=MIDIPacket)
         self.add_output("msg_out", data_type=MIDIPacket)
-        self._lock = threading.Lock()
         self._message_queue = deque(maxlen=100)
         self._active_notes = set()
         self._start_note = 48
         self._num_octaves = 2
 
-    def _get_current_state_snapshot_locked(self) -> Dict:
-        """Helper to get a snapshot. ASSUMES LOCK IS HELD."""
+    def _get_state_snapshot_locked(self) -> Dict:
         return {
             "active_notes": list(self._active_notes),
             "start_note": self._start_note,
             "num_octaves": self._num_octaves,
         }
-
-    def get_current_state_snapshot(self) -> Dict:
-        """Thread-safely gets a copy of the current state."""
-        with self._lock:
-            return self._get_current_state_snapshot_locked()
 
     @Slot(int)
     def set_start_note(self, start_note: int):
@@ -250,7 +239,7 @@ class MIDIKeyboardNode(Node):
             new_start_note = max(0, min(start_note, max_start_note))
             if self._start_note != new_start_note:
                 self._start_note = new_start_note
-                state_to_emit = self._get_current_state_snapshot_locked()
+                state_to_emit = self._get_state_snapshot_locked()
         if state_to_emit:
             self.ui_update_callback(state_to_emit)
 
@@ -263,7 +252,7 @@ class MIDIKeyboardNode(Node):
                 self._num_octaves = new_num_octaves
                 max_start_note = 128 - (self._num_octaves * 12)
                 self._start_note = max(0, min(self._start_note, max_start_note))
-                state_to_emit = self._get_current_state_snapshot_locked()
+                state_to_emit = self._get_state_snapshot_locked()
         if state_to_emit:
             self.ui_update_callback(state_to_emit)
 
@@ -281,7 +270,7 @@ class MIDIKeyboardNode(Node):
             self._message_queue.append(msg)
             if note not in self._active_notes:
                 self._active_notes.add(note)
-                state_to_emit = self._get_current_state_snapshot_locked()
+                state_to_emit = self._get_state_snapshot_locked()
         if state_to_emit:
             self.ui_update_callback(state_to_emit)
 
@@ -293,7 +282,7 @@ class MIDIKeyboardNode(Node):
             self._message_queue.append(msg)
             if note in self._active_notes:
                 self._active_notes.discard(note)
-                state_to_emit = self._get_current_state_snapshot_locked()
+                state_to_emit = self._get_state_snapshot_locked()
         if state_to_emit:
             self.ui_update_callback(state_to_emit)
 
@@ -323,7 +312,7 @@ class MIDIKeyboardNode(Node):
 
         if state_changed_by_external:
             with self._lock:
-                state_to_emit = self._get_current_state_snapshot_locked()
+                state_to_emit = self._get_state_snapshot_locked()
 
         if state_to_emit:
             self.ui_update_callback(state_to_emit)
@@ -337,7 +326,7 @@ class MIDIKeyboardNode(Node):
         with self._lock:
             self._message_queue.clear()
             self._active_notes.clear()
-            state_to_emit = self._get_current_state_snapshot_locked()
+            state_to_emit = self._get_state_snapshot_locked()
         if state_to_emit:
             self.ui_update_callback(state_to_emit)
 
@@ -355,5 +344,17 @@ class MIDIKeyboardNode(Node):
             }
 
     def deserialize_extra(self, data: Dict):
-        self.set_num_octaves(data.get("num_octaves", 2))
-        self.set_start_note(data.get("start_note", 48))
+        state_to_emit = None
+        with self._lock:
+            # Set number of octaves first.
+            self._num_octaves = data.get("num_octaves", 2)
+            # Then set the start note, which can now be correctly validated
+            # against the new number of octaves.
+            max_start_note = 128 - (self._num_octaves * 12)
+            loaded_start_note = data.get("start_note", 48)
+            self._start_note = max(0, min(loaded_start_note, max_start_note))
+            state_to_emit = self._get_state_snapshot_locked()
+
+        # Emit a single, consistent state update to the UI.
+        if state_to_emit:
+            self.ui_update_callback(state_to_emit)

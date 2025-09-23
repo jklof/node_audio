@@ -329,7 +329,6 @@ class RVCUnifiedNode(Node):
         # --- MODIFIED: Sockets now use torch.Tensor ---
         self.add_input("audio_in", data_type=torch.Tensor)
         self.add_output("audio_out", data_type=torch.Tensor)
-        self._lock = threading.Lock()
 
         self._model_paths = {"rvc": None, "rmvpe": None}
         self._rvc_session: Optional[onnxruntime.InferenceSession] = None
@@ -649,32 +648,31 @@ class RVCUnifiedNode(Node):
         with self._lock:
             self._extra_conversion_ms = ms
 
-    def get_current_state_snapshot(self) -> Dict:
-        with self._lock:
-            info = (
-                {"sr": self._model_sr, "f0": self._metadata.get("f0", 1) == 1, "is_half": self._is_half}
-                if self._are_all_models_loaded()
-                else None
-            )
-            return {
-                "rvc_path": self._model_paths["rvc"],
-                "rmvpe_path": self._model_paths["rmvpe"],
-                "device": self._device,
-                "speaker_id": self._speaker_id,
-                "pitch_shift": self._pitch_shift,
-                "vad_enabled": self._vad_enabled,
-                "silent_threshold": self._silent_threshold,
-                "chunk_size_ms": self._chunk_size_ms,
-                "crossfade_ms": self._crossfade_ms,
-                "sola_search_ms": self._sola_search_ms,
-                "extra_conversion_ms": self._extra_conversion_ms,
-                "is_processing": self._is_processing,
-                "is_strained": self._is_strained,
-                "status": self._status,
-                "info": info,
-                "input_buffer_len_ms": self._input_buffer.shape[0] / DEFAULT_SAMPLERATE * 1000,
-                "output_buffer_len_ms": self._output_buffer.shape[0] / DEFAULT_SAMPLERATE * 1000,
-            }
+    def _get_current_state_snapshot(self) -> Dict:
+        info = (
+            {"sr": self._model_sr, "f0": self._metadata.get("f0", 1) == 1, "is_half": self._is_half}
+            if self._are_all_models_loaded()
+            else None
+        )
+        return {
+            "rvc_path": self._model_paths["rvc"],
+            "rmvpe_path": self._model_paths["rmvpe"],
+            "device": self._device,
+            "speaker_id": self._speaker_id,
+            "pitch_shift": self._pitch_shift,
+            "vad_enabled": self._vad_enabled,
+            "silent_threshold": self._silent_threshold,
+            "chunk_size_ms": self._chunk_size_ms,
+            "crossfade_ms": self._crossfade_ms,
+            "sola_search_ms": self._sola_search_ms,
+            "extra_conversion_ms": self._extra_conversion_ms,
+            "is_processing": self._is_processing,
+            "is_strained": self._is_strained,
+            "status": self._status,
+            "info": info,
+            "input_buffer_len_ms": self._input_buffer.shape[0] / DEFAULT_SAMPLERATE * 1000,
+            "output_buffer_len_ms": self._output_buffer.shape[0] / DEFAULT_SAMPLERATE * 1000,
+        }
 
     def process(self, input_data: dict) -> dict:
         audio_in = input_data.get("audio_in")

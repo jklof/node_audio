@@ -82,7 +82,6 @@ class NoiseGeneratorNode(Node):
         self.add_input("level", data_type=float)
         self.add_output("out", data_type=torch.Tensor)
 
-        self._lock = threading.Lock()
         self.samplerate = DEFAULT_SAMPLERATE
         self.blocksize = DEFAULT_BLOCKSIZE
         self.channels = DEFAULT_CHANNELS
@@ -124,12 +123,8 @@ class NoiseGeneratorNode(Node):
 
         logger.debug(f"[{self.name}] Filters initialized for {self.channels} channels at {self.samplerate}Hz.")
 
-    def _get_current_state_snapshot_locked(self) -> Dict:
+    def _get_state_snapshot_locked(self) -> Dict:
         return {"noise_type": self._noise_type, "level": self._level}
-
-    def get_current_state_snapshot(self) -> Dict:
-        with self._lock:
-            return self._get_current_state_snapshot_locked()
 
     @Slot(NoiseType)
     def set_noise_type(self, noise_type: NoiseType):
