@@ -10,7 +10,7 @@ from PySide6.QtCore import Slot
 
 from node_system import Node
 from constants import SpectralFrame, DEFAULT_COMPLEX_DTYPE
-from ui_elements import ParameterNodeItem, NodeStateEmitter
+from ui_elements import ParameterNodeItem
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +63,6 @@ class PitchAndFormantShifterNode(Node):
 
     def __init__(self, name: str, node_id: Optional[str] = None):
         super().__init__(name, node_id)
-        self.emitter = NodeStateEmitter()
 
         # --- Sockets ---
         self.add_input("spectral_frame_in", data_type=SpectralFrame)
@@ -101,7 +100,7 @@ class PitchAndFormantShifterNode(Node):
                 self._pitch_shift_st = float(value)
                 state_to_emit = self._get_current_state_snapshot_locked()
         if state_to_emit:
-            self.emitter.stateUpdated.emit(state_to_emit)
+            self.ui_update_callback(state_to_emit)
 
     @Slot(float)
     def set_formant_shift_st(self, value: float):
@@ -111,7 +110,7 @@ class PitchAndFormantShifterNode(Node):
                 self._formant_shift_st = float(value)
                 state_to_emit = self._get_current_state_snapshot_locked()
         if state_to_emit:
-            self.emitter.stateUpdated.emit(state_to_emit)
+            self.ui_update_callback(state_to_emit)
 
     @Slot(float)
     def set_phase_jitter(self, value: float):
@@ -121,7 +120,7 @@ class PitchAndFormantShifterNode(Node):
                 self._phase_jitter = float(value)
                 state_to_emit = self._get_current_state_snapshot_locked()
         if state_to_emit:
-            self.emitter.stateUpdated.emit(state_to_emit)
+            self.ui_update_callback(state_to_emit)
 
     def _get_current_state_snapshot_locked(self) -> Dict:
         return {
@@ -240,7 +239,7 @@ class PitchAndFormantShifterNode(Node):
             shifted_fft_data = self._process_frame(frame, pitch_ratio, formant_ratio, phase_jitter)
 
         if state_snapshot_to_emit:
-            self.emitter.stateUpdated.emit(state_snapshot_to_emit)
+            self.ui_update_callback(state_snapshot_to_emit)
 
         output_frame = SpectralFrame(
             data=shifted_fft_data.to(DEFAULT_COMPLEX_DTYPE),

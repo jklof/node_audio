@@ -12,7 +12,7 @@ import torchaudio.transforms as T
 
 from node_system import Node
 from constants import DEFAULT_SAMPLERATE, DEFAULT_BLOCKSIZE, DEFAULT_DTYPE
-from ui_elements import NodeItem, NodeStateEmitter, NODE_CONTENT_PADDING
+from ui_elements import NodeItem, NODE_CONTENT_PADDING
 
 from PySide6.QtWidgets import QWidget, QLabel, QSlider, QVBoxLayout, QHBoxLayout, QFileDialog, QPushButton
 from PySide6.QtCore import Qt, Slot, Signal, QObject
@@ -81,7 +81,6 @@ class AudioFilePlayerNodeItem(NodeItem):
         self.load_button.clicked.connect(self._on_load_button_clicked)
         self.play_pause_button.clicked.connect(self._on_play_pause_clicked)
         self.seek_slider.sliderReleased.connect(self._on_seek)
-        self.node_logic.emitter.stateUpdated.connect(self._on_playback_state_changed)
 
     @Slot()
     def updateFromLogic(self):
@@ -166,7 +165,6 @@ class AudioFilePlayerNode(Node):
     def __init__(self, name, node_id=None):
         super().__init__(name, node_id)
         self.add_output("out", data_type=torch.Tensor)
-        self.emitter = NodeStateEmitter()
         self._lock = threading.Lock()
         self._worker_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
@@ -199,7 +197,7 @@ class AudioFilePlayerNode(Node):
             )
 
         if state_to_emit:
-            self.emitter.stateUpdated.emit(state_to_emit)
+            self.ui_update_callback(state_to_emit)
 
         self._stop_event.clear()
         self._worker_thread = threading.Thread(target=self._file_reader_loop, daemon=True)

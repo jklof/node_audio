@@ -8,7 +8,7 @@ import logging
 from typing import List, Tuple, Dict, Any, Optional, Callable
 
 from node_system import Node, IClockProvider
-from ui_elements import NodeItem, NodeStateEmitter, NODE_CONTENT_PADDING
+from ui_elements import NodeItem, NODE_CONTENT_PADDING
 
 from PySide6.QtWidgets import QWidget, QComboBox, QLabel, QVBoxLayout, QSizePolicy, QPushButton, QHBoxLayout
 from PySide6.QtCore import Qt, Slot, QObject, Signal, QSignalBlocker, QTimer
@@ -178,7 +178,6 @@ class AudioDeviceNodeItem(NodeItem):
 
         self.setContentWidget(self.container_widget)
         self.device_combobox.currentIndexChanged.connect(self._on_ui_device_selection_changed)
-        self.node_logic.emitter.stateUpdated.connect(self._on_state_updated)
 
         self._populate_device_combobox()
 
@@ -189,7 +188,7 @@ class AudioDeviceNodeItem(NodeItem):
         This is essential for initializing the UI when the node is first created.
         """
         state = self.node_logic.get_current_state_snapshot()
-        self._on_state_updated(state)
+        self._on_state_updated_from_logic(state)
         super().updateFromLogic()
 
     def _populate_device_combobox(self):
@@ -238,7 +237,7 @@ class AudioDeviceNodeItem(NodeItem):
         self.node_logic.set_user_selected_device(selected_device_identifier)
 
     @Slot(dict)
-    def _on_state_updated(self, state: dict):
+    def _on_state_updated_from_logic(self, state: dict):
         """Single point of UI updates from comprehensive state dictionary."""
         if not self.node_logic:
             return
@@ -295,7 +294,6 @@ class BaseAudioNode(Node):
 
     def __init__(self, name, node_id=None):
         super().__init__(name, node_id)
-        self.emitter = NodeStateEmitter()
 
         self.samplerate = AudioDeviceManager.TARGET_SAMPLERATE
         self.blocksize = DEFAULT_BLOCKSIZE
@@ -413,7 +411,7 @@ class BaseAudioNode(Node):
 
         state = self._get_current_state_snapshot_locked()
         state["device_list_refreshed"] = True
-        self.emitter.stateUpdated.emit(state)
+        self.ui_update_callback(state)
 
         if stream_was_active:
             self.start()
@@ -446,7 +444,7 @@ class BaseAudioNode(Node):
             self.stop()
             self.start()
         else:
-            self.emitter.stateUpdated.emit(self._get_current_state_snapshot_locked())
+            self.ui_update_callback(self._get_current_state_snapshot_locked())
 
     def start(self):
         is_input_node = self._get_is_input_node()
@@ -498,7 +496,7 @@ class BaseAudioNode(Node):
                     self._active_device_info = None
                     self._reset_channels_on_failure()
 
-        self.emitter.stateUpdated.emit(self._get_current_state_snapshot_locked())
+        self.ui_update_callback(self._get_current_state_snapshot_locked())
 
     def stop(self):
         with self._lock:
@@ -512,7 +510,7 @@ class BaseAudioNode(Node):
             self._active_device_info = None
             self._update_status_message("Inactive")
             self._post_stream_stop_actions()
-        self.emitter.stateUpdated.emit(self._get_current_state_snapshot_locked())
+        self.ui_update_callback(self._get_current_state_snapshot_locked())
 
     def remove(self):
         self.stop()
@@ -565,7 +563,7 @@ class BaseAudioNode(Node):
             self._update_status_message("Deserialized - Inactive")
 
         # Emit after deserialization to sync UI
-        self.emitter.stateUpdated.emit(self._get_current_state_snapshot_locked())
+        self.ui_update_callback(self._get_current_state_snapshot_locked())
 
 
 # ==============================================================================

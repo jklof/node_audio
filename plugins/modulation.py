@@ -5,7 +5,7 @@ from typing import Dict, Optional
 
 # --- Node System Imports ---
 from node_system import Node
-from ui_elements import ParameterNodeItem, NodeItem, NodeStateEmitter, NODE_CONTENT_PADDING
+from ui_elements import ParameterNodeItem, NodeItem, NODE_CONTENT_PADDING
 from constants import DEFAULT_SAMPLERATE, DEFAULT_BLOCKSIZE, DEFAULT_DTYPE
 
 # --- Qt Imports ---
@@ -81,7 +81,6 @@ class ADSRNode(Node):
 
     def __init__(self, name: str, node_id: Optional[str] = None):
         super().__init__(name, node_id)
-        self.emitter = NodeStateEmitter()
 
         # --- Define Sockets ---
         self.add_input("gate", data_type=bool)
@@ -113,7 +112,7 @@ class ADSRNode(Node):
             self._attack_s = float(value)
             state_to_emit = self._get_current_state_snapshot_locked()
         if state_to_emit:
-            self.emitter.stateUpdated.emit(state_to_emit)
+            self.ui_update_callback(state_to_emit)
 
     @Slot(float)
     def set_decay(self, value: float):
@@ -122,7 +121,7 @@ class ADSRNode(Node):
             self._decay_s = float(value)
             state_to_emit = self._get_current_state_snapshot_locked()
         if state_to_emit:
-            self.emitter.stateUpdated.emit(state_to_emit)
+            self.ui_update_callback(state_to_emit)
 
     @Slot(float)
     def set_sustain(self, value: float):
@@ -131,7 +130,7 @@ class ADSRNode(Node):
             self._sustain_level = float(value)
             state_to_emit = self._get_current_state_snapshot_locked()
         if state_to_emit:
-            self.emitter.stateUpdated.emit(state_to_emit)
+            self.ui_update_callback(state_to_emit)
 
     @Slot(float)
     def set_release(self, value: float):
@@ -140,7 +139,7 @@ class ADSRNode(Node):
             self._release_s = float(value)
             state_to_emit = self._get_current_state_snapshot_locked()
         if state_to_emit:
-            self.emitter.stateUpdated.emit(state_to_emit)
+            self.ui_update_callback(state_to_emit)
 
     def _get_current_state_snapshot_locked(self) -> Dict:
         return {
@@ -253,7 +252,7 @@ class ADSRNode(Node):
             output_value = self._current_level
 
         if state_snapshot_to_emit:
-            self.emitter.stateUpdated.emit(state_snapshot_to_emit)
+            self.ui_update_callback(state_snapshot_to_emit)
 
         return {"out": float(output_value)}
 
@@ -304,15 +303,6 @@ class GateButtonNodeItem(NodeItem):
         self.button.pressed.connect(self.node_logic.set_gate_true)
         self.button.released.connect(self.node_logic.set_gate_false)
 
-        # Connect the logic node's state updates back to the UI (for standardization)
-        self.node_logic.emitter.stateUpdated.connect(self._on_state_updated)
-
-    @Slot(dict)
-    def _on_state_updated(self, state: dict):
-        # The button's visual state doesn't need to be updated as user controls it
-        # This is primarily for consistency with the unidirectional data flow pattern
-        pass
-
     # No updateFromLogic is needed as the UI only sends state to the logic
 
 
@@ -327,7 +317,6 @@ class GateButtonNode(Node):
 
     def __init__(self, name: str, node_id: str = None):
         super().__init__(name, node_id)
-        self.emitter = NodeStateEmitter()
         self.add_output("out", data_type=bool)
 
         self._lock = threading.Lock()
@@ -341,7 +330,7 @@ class GateButtonNode(Node):
         with self._lock:
             self._gate_state = True
             state = {"gate_state": self._gate_state}
-        self.emitter.stateUpdated.emit(state)
+        self.ui_update_callback(state)
 
     @Slot()
     def set_gate_false(self):
@@ -349,7 +338,7 @@ class GateButtonNode(Node):
         with self._lock:
             self._gate_state = False
             state = {"gate_state": self._gate_state}
-        self.emitter.stateUpdated.emit(state)
+        self.ui_update_callback(state)
 
     def process(self, input_data: dict) -> dict:
         """Outputs the current state of the button."""
@@ -397,7 +386,6 @@ class LFONode(Node):
 
     def __init__(self, name, node_id=None):
         super().__init__(name, node_id)
-        self.emitter = NodeStateEmitter()
 
         self.add_input("sync_control", data_type=bool)
         self.add_input("frequency", data_type=float)
@@ -426,7 +414,7 @@ class LFONode(Node):
                 self._frequency_hz = new_freq
                 state_to_emit = {"frequency": self._frequency_hz}
         if state_to_emit:
-            self.emitter.stateUpdated.emit(state_to_emit)
+            self.ui_update_callback(state_to_emit)
 
     def get_frequency_hz(self) -> float:
         with self.lock:
@@ -459,7 +447,7 @@ class LFONode(Node):
             freq = self._frequency_hz
 
         if state_snapshot_to_emit:
-            self.emitter.stateUpdated.emit(state_snapshot_to_emit)
+            self.ui_update_callback(state_snapshot_to_emit)
 
         # phase increment calculation.
         # The phase must advance by the number of samples in one processing block (tick).

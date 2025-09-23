@@ -8,7 +8,7 @@ from collections import deque
 # --- Node System Imports ---
 from node_system import Node
 from constants import SpectralFrame, DEFAULT_DTYPE, DEFAULT_COMPLEX_DTYPE
-from ui_elements import ParameterNodeItem, NodeItem, NodeStateEmitter, NODE_CONTENT_PADDING
+from ui_elements import ParameterNodeItem, NodeItem, NODE_CONTENT_PADDING
 
 # --- Qt Imports ---
 from PySide6.QtCore import Qt, Signal, Slot, QObject, QSignalBlocker
@@ -77,7 +77,6 @@ class SpectralShimmerNode(Node):
 
     def __init__(self, name: str, node_id: Optional[str] = None):
         super().__init__(name, node_id)
-        self.emitter = NodeStateEmitter()
 
         # --- Setup Sockets ---
         self.add_input("spectral_frame_in", data_type=SpectralFrame)
@@ -106,7 +105,7 @@ class SpectralShimmerNode(Node):
                 self._pitch_shift_st = value
                 state_to_emit = self._get_current_state_snapshot_locked()
         if state_to_emit:
-            self.emitter.stateUpdated.emit(state_to_emit)
+            self.ui_update_callback(state_to_emit)
 
     @Slot(float)
     def set_feedback(self, value: float):
@@ -117,7 +116,7 @@ class SpectralShimmerNode(Node):
                 self._feedback = new_feedback
                 state_to_emit = self._get_current_state_snapshot_locked()
         if state_to_emit:
-            self.emitter.stateUpdated.emit(state_to_emit)
+            self.ui_update_callback(state_to_emit)
 
     @Slot(float)
     def set_mix(self, value: float):
@@ -128,7 +127,7 @@ class SpectralShimmerNode(Node):
                 self._mix = new_mix
                 state_to_emit = self._get_current_state_snapshot_locked()
         if state_to_emit:
-            self.emitter.stateUpdated.emit(state_to_emit)
+            self.ui_update_callback(state_to_emit)
 
     def _get_current_state_snapshot_locked(self) -> Dict:
         return {"pitch_shift": self._pitch_shift_st, "feedback": self._feedback, "mix": self._mix}
@@ -215,7 +214,7 @@ class SpectralShimmerNode(Node):
             output_fft = (frame.data * (1.0 - self._mix)) + (wet_signal * self._mix)
 
         if state_snapshot_to_emit:
-            self.emitter.stateUpdated.emit(state_snapshot_to_emit)
+            self.ui_update_callback(state_snapshot_to_emit)
 
         output_frame = SpectralFrame(
             data=output_fft,
@@ -248,14 +247,7 @@ class SpectralShimmerNode(Node):
 
 
 # ==============================================================================
-# 1. State Emitter for UI Communication
-# ==============================================================================
-class SpectralModulatorEmitter(QObject):
-    stateUpdated = Signal(dict)
-
-
-# ==============================================================================
-# 2. Custom UI Class (SpectralModulatorNodeItem)
+# 1. Custom UI Class (SpectralModulatorNodeItem)
 # ==============================================================================
 class SpectralModulatorNodeItem(ParameterNodeItem):
     NODE_SPECIFIC_WIDTH = 200
@@ -286,21 +278,16 @@ class SpectralModulatorNodeItem(ParameterNodeItem):
         ]
         super().__init__(node_logic, parameters, width=self.NODE_SPECIFIC_WIDTH)
 
-        # --- Customization: Disable rate control if mod_in is connected ---
-        # We need to override the default state update handler to add this custom logic.
-        self.node_logic.emitter.stateUpdated.connect(self._custom_on_state_updated)
-        self.updateFromLogic()
-
-    @Slot(dict)
-    def _custom_on_state_updated(self, state: dict):
-        # First, call the parent's handler to update all the standard widgets
-        super()._on_state_updated(state)
-        # Then, add our custom logic
+    def updateFromLogic(self):
+        super().updateFromLogic()
+        # Custom logic to disable rate control if mod_in is connected
         is_mod_ext = self.node_logic.inputs["mod_in"].connections
         self._controls["rate"]["widget"].setEnabled(not is_mod_ext)
         label_text = self._controls["rate"]["label"].text()
         if is_mod_ext and "(ext)" not in label_text:
             self._controls["rate"]["label"].setText(label_text + " (ext)")
+        elif not is_mod_ext and "(ext)" in label_text:
+            self._controls["rate"]["label"].setText(label_text.replace(" (ext)", ""))
 
 
 # ==============================================================================
@@ -343,7 +330,7 @@ class SpectralModulatorNode(Node):
                 self._rate_hz = value
                 state_to_emit = self._get_current_state_snapshot_locked()
         if state_to_emit:
-            self.emitter.stateUpdated.emit(state_to_emit)
+            self.ui_update_callback(state_to_emit)
 
     @Slot(float)
     def set_depth(self, value: float):
@@ -353,7 +340,7 @@ class SpectralModulatorNode(Node):
                 self._depth_ms = value
                 state_to_emit = self._get_current_state_snapshot_locked()
         if state_to_emit:
-            self.emitter.stateUpdated.emit(state_to_emit)
+            self.ui_update_callback(state_to_emit)
 
     @Slot(float)
     def set_mix(self, value: float):
@@ -364,7 +351,7 @@ class SpectralModulatorNode(Node):
                 self._mix = new_mix
                 state_to_emit = self._get_current_state_snapshot_locked()
         if state_to_emit:
-            self.emitter.stateUpdated.emit(state_to_emit)
+            self.ui_update_callback(state_to_emit)
 
     def _get_current_state_snapshot_locked(self) -> Dict:
         return {"rate": self._rate_hz, "depth": self._depth_ms, "mix": self._mix}
@@ -426,7 +413,7 @@ class SpectralModulatorNode(Node):
 
         # --- Emit state update AFTER releasing lock ---
         if state_snapshot_to_emit:
-            self.emitter.stateUpdated.emit(state_snapshot_to_emit)
+            self.ui_update_callback(state_snapshot_to_emit)
 
         output_frame = SpectralFrame(
             data=output_fft,
@@ -589,7 +576,7 @@ class SpectralReverbNode(Node):
                 self._params_dirty = True
                 state = self._get_current_state_snapshot_locked()
         if state:
-            self.emitter.stateUpdated.emit(state)
+            self.ui_update_callback(state)
 
     @Slot(float)
     def set_decay_time(self, value: float):
@@ -600,7 +587,7 @@ class SpectralReverbNode(Node):
                 self._params_dirty = True
                 state = self._get_current_state_snapshot_locked()
         if state:
-            self.emitter.stateUpdated.emit(state)
+            self.ui_update_callback(state)
 
     @Slot(float)
     def set_hf_damp(self, value: float):
@@ -611,7 +598,7 @@ class SpectralReverbNode(Node):
                 self._params_dirty = True
                 state = self._get_current_state_snapshot_locked()
         if state:
-            self.emitter.stateUpdated.emit(state)
+            self.ui_update_callback(state)
 
     @Slot(float)
     def set_lf_damp(self, value: float):
@@ -622,7 +609,7 @@ class SpectralReverbNode(Node):
                 self._params_dirty = True
                 state = self._get_current_state_snapshot_locked()
         if state:
-            self.emitter.stateUpdated.emit(state)
+            self.ui_update_callback(state)
 
     @Slot(float)
     def set_diffusion(self, value: float):
@@ -634,7 +621,7 @@ class SpectralReverbNode(Node):
                 self._params_dirty = True
                 state = self._get_current_state_snapshot_locked()
         if state:
-            self.emitter.stateUpdated.emit(state)
+            self.ui_update_callback(state)
 
     @Slot(float)
     def set_width(self, value: float):
@@ -646,7 +633,7 @@ class SpectralReverbNode(Node):
                 self._params_dirty = True
                 state = self._get_current_state_snapshot_locked()
         if state:
-            self.emitter.stateUpdated.emit(state)
+            self.ui_update_callback(state)
 
     @Slot(float)
     def set_mix(self, value: float):
@@ -657,7 +644,7 @@ class SpectralReverbNode(Node):
                 self._mix = value
                 state = self._get_current_state_snapshot_locked()
         if state:
-            self.emitter.stateUpdated.emit(state)
+            self.ui_update_callback(state)
 
     def _get_current_state_snapshot_locked(self) -> Dict:
         return {
@@ -767,7 +754,7 @@ class SpectralReverbNode(Node):
             output_fft = (dry_signal * (1.0 - self._mix)) + (wet_signal * self._mix)
 
         if state_snapshot_to_emit:
-            self.emitter.stateUpdated.emit(state_snapshot_to_emit)
+            self.ui_update_callback(state_snapshot_to_emit)
 
         output_frame = SpectralFrame(
             data=output_fft,

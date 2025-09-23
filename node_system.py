@@ -90,6 +90,7 @@ class Node:
         self.outputs = OrderedDict()
         self.pos = (0.0, 0.0)
         self.error_state: str | None = None  # Attribute to hold error messages
+        self.ui_update_callback = lambda state_dict: None  # No-op callback by default
 
     def clear_error_state(self):
         """Resets the node's error state."""

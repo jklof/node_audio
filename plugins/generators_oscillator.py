@@ -10,7 +10,7 @@ from node_system import Node
 from constants import DEFAULT_DTYPE, DEFAULT_SAMPLERATE, DEFAULT_BLOCKSIZE, DEFAULT_CHANNELS
 
 # --- UI and Qt Imports ---
-from ui_elements import ParameterNodeItem, NodeStateEmitter
+from ui_elements import ParameterNodeItem
 from PySide6.QtCore import Slot
 
 # Configure logging
@@ -70,7 +70,7 @@ class OscillatorNodeItem(ParameterNodeItem):
         super().__init__(node_logic, parameters, width=self.NODE_SPECIFIC_WIDTH)
 
     @Slot(dict)
-    def _on_state_updated(self, state: dict):
+    def _on_state_updated_from_logic(self, state: dict):
         """
         Overrides the base class method to add custom UI logic.
         """
@@ -107,7 +107,6 @@ class OscillatorNode(Node):
 
     def __init__(self, name, node_id=None):
         super().__init__(name, node_id)
-        self.emitter = NodeStateEmitter()
         self.add_input("freq", data_type=float)
         self.add_input("pulse_width", data_type=float)
         self.add_output("out", data_type=torch.Tensor)
@@ -139,7 +138,7 @@ class OscillatorNode(Node):
                 self._waveform = waveform
                 state_to_emit = self._get_current_state_snapshot_locked()
         if state_to_emit:
-            self.emitter.stateUpdated.emit(state_to_emit)
+            self.ui_update_callback(state_to_emit)
 
     @Slot(float)
     def set_frequency(self, frequency: float):
@@ -150,7 +149,7 @@ class OscillatorNode(Node):
                 self._frequency = new_freq
                 state_to_emit = self._get_current_state_snapshot_locked()
         if state_to_emit:
-            self.emitter.stateUpdated.emit(state_to_emit)
+            self.ui_update_callback(state_to_emit)
 
     @Slot(float)
     def set_pulse_width(self, pulse_width: float):
@@ -161,7 +160,7 @@ class OscillatorNode(Node):
                 self._pulse_width = new_pw
                 state_to_emit = self._get_current_state_snapshot_locked()
         if state_to_emit:
-            self.emitter.stateUpdated.emit(state_to_emit)
+            self.ui_update_callback(state_to_emit)
 
     def process(self, input_data: dict) -> dict:
         state_snapshot_to_emit = None
@@ -190,7 +189,7 @@ class OscillatorNode(Node):
 
         # Emit signal after releasing the lock to avoid deadlocks
         if state_snapshot_to_emit:
-            self.emitter.stateUpdated.emit(state_snapshot_to_emit)
+            self.ui_update_callback(state_snapshot_to_emit)
 
         # --- Generate Waveform using PyTorch ---
         phase_increment = (2 * torch.pi * frequency) / self.samplerate

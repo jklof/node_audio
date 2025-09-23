@@ -9,7 +9,7 @@ from node_system import Node
 from constants import DEFAULT_DTYPE, DEFAULT_BLOCKSIZE
 
 # --- UI and Qt Imports ---
-from ui_elements import ParameterNodeItem, NodeStateEmitter, NODE_CONTENT_PADDING
+from ui_elements import ParameterNodeItem, NODE_CONTENT_PADDING
 from PySide6.QtCore import Qt, Slot
 
 # --- Configure logging ---
@@ -60,7 +60,7 @@ class PannerNodeItem(ParameterNodeItem):
         return f"Pan: {label}"
 
     @Slot(dict)
-    def _on_state_updated(self, state: dict):
+    def _on_state_updated_from_logic(self, state: dict):
         """
         Overrides the base class method to apply custom text formatting to the label
         after the base functionality (like updating the slider) has been executed.
@@ -91,7 +91,6 @@ class PannerNode(Node):
 
     def __init__(self, name: str, node_id: str | None = None):
         super().__init__(name, node_id)
-        self.emitter = NodeStateEmitter()
         self.add_input("in", data_type=torch.Tensor)
         self.add_input("pan", data_type=float)
         self.add_output("out", data_type=torch.Tensor)
@@ -109,7 +108,7 @@ class PannerNode(Node):
                 self._pan = clipped_value
                 state_to_emit = self.get_current_state_snapshot(locked=True)
         if state_to_emit:
-            self.emitter.stateUpdated.emit(state_to_emit)
+            self.ui_update_callback(state_to_emit)
 
     def get_current_state_snapshot(self, locked: bool = False) -> Dict:
         """Returns a copy of the current parameters for UI or serialization."""
@@ -138,7 +137,7 @@ class PannerNode(Node):
             pan_value = self._pan
 
         if state_snapshot_to_emit:
-            self.emitter.stateUpdated.emit(state_snapshot_to_emit)
+            self.ui_update_callback(state_snapshot_to_emit)
 
         # --- DSP Processing ---
 

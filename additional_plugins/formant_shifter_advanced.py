@@ -11,7 +11,7 @@ from PySide6.QtCore import Slot
 
 from node_system import Node
 from constants import SpectralFrame, DEFAULT_COMPLEX_DTYPE
-from ui_elements import ParameterNodeItem, NodeStateEmitter
+from ui_elements import ParameterNodeItem
 
 logger = logging.getLogger(__name__)
 EPSILON = 1e-12
@@ -40,7 +40,6 @@ class FormantShifterAdvancedNode(Node):
 
     def __init__(self, name: str, node_id: Optional[str] = None):
         super().__init__(name, node_id)
-        self.emitter = NodeStateEmitter()
         self.add_input("spectral_frame_in", data_type=SpectralFrame)
         self.add_input("formant_shift_st", data_type=float)
         self.add_input("cepstral_cutoff", data_type=float)
@@ -169,7 +168,7 @@ class FormantShifterAdvancedNode(Node):
                     self._last_cutoff = -1
 
         if state_to_emit:
-            self.emitter.stateUpdated.emit(state_to_emit)
+            self.ui_update_callback(state_to_emit)
 
     def _get_current_state_snapshot_locked(self) -> Dict:
         return {"formant_shift_st": self._formant_shift_st, "cepstral_cutoff": self._cepstral_cutoff}
@@ -281,7 +280,7 @@ class FormantShifterAdvancedNode(Node):
             self._last_formant_ratio = formant_ratio
 
         if state_to_emit:
-            self.emitter.stateUpdated.emit(state_to_emit)
+            self.ui_update_callback(state_to_emit)
 
         # Early exit: check if processing can be bypassed
         bypass_condition = (

@@ -44,18 +44,6 @@ SOCKET_Y_SPACING = 25
 NODE_CONTENT_PADDING = 5
 
 
-class NodeStateEmitter(QObject):
-    """
-    A generic emitter for sending state updates from a logic Node to its UI NodeItem.
-    Centralized in ui_common.py to keep it separate from core system logic.
-    """
-
-    def __init__(self):
-        super().__init__()
-
-    stateUpdated = Signal(dict)
-
-
 class SocketItem(QGraphicsObject):
     """Visual representation of a socket in the scene."""
 
@@ -113,6 +101,9 @@ class NodeItem(QGraphicsObject):
     Manages its geometry centrally and adapts to its content.
     """
 
+    # This signal will handle the thread-safe transition to the main UI thread.
+    stateUpdated = Signal(dict)
+
     def __init__(self, node_logic, width=NODE_WIDTH):
         super().__init__()
         self.node_logic = node_logic
@@ -151,6 +142,10 @@ class NodeItem(QGraphicsObject):
             label = QGraphicsTextItem(logic_socket.name, self)
             label.setDefaultTextColor(Qt.GlobalColor.lightGray)
             self._socket_labels[logic_socket] = label
+
+        # setup thread safe update for logic -> UI communication
+        self.stateUpdated.connect(self._on_state_updated_from_logic)
+        self.node_logic.ui_update_callback = self.stateUpdated.emit
 
         self.update_geometry()
         self.setPos(QPointF(*node_logic.pos))
@@ -372,6 +367,19 @@ class NodeItem(QGraphicsObject):
         self.update_geometry()
         self.update()
 
+    @Slot(dict)
+    def _on_state_updated_from_logic(self, state_dict):
+        """Slot for receiving state updates from logic via callback bridge."""
+        # Explicitly check and update the title text from the logic object
+        if self.title_item.toPlainText() != self.node_logic.name:
+            self.title_item.setPlainText(self.node_logic.name)
+
+        # Update the UI's error state from the logic's state
+        self.set_error_display_state(self.node_logic.error_state)
+
+        self.update_geometry()
+        self.update()
+
     def contextMenuEvent(self, event):
         menu = QMenu()
 
@@ -406,7 +414,6 @@ class NodeItem(QGraphicsObject):
 
 
 class ConnectionItem(QGraphicsPathItem):
-    """Visual representation of a connection line."""
 
     def __init__(self, conn_logic, start_socket, end_socket, parent=None):
         super().__init__(parent)
@@ -552,8 +559,7 @@ class ParameterNodeItem(NodeItem):
 
         self.setContentWidget(self.container_widget)
 
-        # Connect logic node's state updates to UI
-        self.node_logic.emitter.stateUpdated.connect(lambda state: self._on_state_updated(state))
+        # The callback is now set up in the base NodeItem.__init__
         self.updateFromLogic()
 
     def _create_slider_control(self, param: dict, layout: QVBoxLayout):
@@ -642,7 +648,7 @@ class ParameterNodeItem(NodeItem):
             getattr(self.node_logic, setter_name)(data)
 
     @Slot(dict)
-    def _on_state_updated(self, state: dict):
+    def _on_state_updated_from_logic(self, state: dict):
         """Updates all controls based on the incoming state dictionary."""
         for key, info in self._controls.items():
             value = state.get(key)
@@ -670,5 +676,5 @@ class ParameterNodeItem(NodeItem):
     @Slot()
     def updateFromLogic(self):
         state = self.node_logic.get_current_state_snapshot()
-        self._on_state_updated(state)
+        self._on_state_updated_from_logic(state)
         super().updateFromLogic()

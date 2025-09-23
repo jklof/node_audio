@@ -6,7 +6,7 @@ from typing import Dict, Optional, List
 
 # --- Node System Imports ---
 from node_system import Node
-from ui_elements import NodeItem, NodeStateEmitter, NODE_CONTENT_PADDING
+from ui_elements import NodeItem, NODE_CONTENT_PADDING
 
 # -- import MIDIPacket type ---
 from constants import MIDIPacket
@@ -182,13 +182,11 @@ class MIDIKeyboardNodeItem(NodeItem):
         self.setContentWidget(self.container)
         self.piano_widget.noteOn.connect(self.node_logic.play_note)
         self.piano_widget.noteOff.connect(self.node_logic.stop_note)
-        self.node_logic.emitter.stateUpdated.connect(self._on_state_updated, Qt.ConnectionType.QueuedConnection)
-        self.shift_left_button.clicked.connect(lambda: self.node_logic.shift_octave(-1))
         self.shift_right_button.clicked.connect(lambda: self.node_logic.shift_octave(1))
         self.octave_spinbox.valueChanged.connect(self.node_logic.set_num_octaves)
 
     @Slot(dict)
-    def _on_state_updated(self, state: dict):
+    def _on_state_updated_from_logic(self, state: dict):
         active_notes = state.get("active_notes", [])
         self.piano_widget.set_active_notes(active_notes)
         start_note = state.get("start_note", 48)
@@ -208,7 +206,7 @@ class MIDIKeyboardNodeItem(NodeItem):
     @Slot()
     def updateFromLogic(self):
         state = self.node_logic.get_current_state_snapshot()
-        self._on_state_updated(state)
+        self._on_state_updated_from_logic(state)
         super().updateFromLogic()
 
 
@@ -223,7 +221,6 @@ class MIDIKeyboardNode(Node):
 
     def __init__(self, name: str, node_id: Optional[str] = None):
         super().__init__(name, node_id)
-        self.emitter = NodeStateEmitter()
         self.add_input("msg_in", data_type=MIDIPacket)
         self.add_output("msg_out", data_type=MIDIPacket)
         self._lock = threading.Lock()
@@ -255,7 +252,7 @@ class MIDIKeyboardNode(Node):
                 self._start_note = new_start_note
                 state_to_emit = self._get_current_state_snapshot_locked()
         if state_to_emit:
-            self.emitter.stateUpdated.emit(state_to_emit)
+            self.ui_update_callback(state_to_emit)
 
     @Slot(int)
     def set_num_octaves(self, num_octaves: int):
@@ -268,7 +265,7 @@ class MIDIKeyboardNode(Node):
                 self._start_note = max(0, min(self._start_note, max_start_note))
                 state_to_emit = self._get_current_state_snapshot_locked()
         if state_to_emit:
-            self.emitter.stateUpdated.emit(state_to_emit)
+            self.ui_update_callback(state_to_emit)
 
     def shift_octave(self, direction: int):
         with self._lock:
@@ -286,7 +283,7 @@ class MIDIKeyboardNode(Node):
                 self._active_notes.add(note)
                 state_to_emit = self._get_current_state_snapshot_locked()
         if state_to_emit:
-            self.emitter.stateUpdated.emit(state_to_emit)
+            self.ui_update_callback(state_to_emit)
 
     @Slot(int)
     def stop_note(self, note: int):
@@ -298,7 +295,7 @@ class MIDIKeyboardNode(Node):
                 self._active_notes.discard(note)
                 state_to_emit = self._get_current_state_snapshot_locked()
         if state_to_emit:
-            self.emitter.stateUpdated.emit(state_to_emit)
+            self.ui_update_callback(state_to_emit)
 
     def process(self, input_data: Dict) -> Dict:
         external_packet = input_data.get("msg_in")
@@ -329,7 +326,7 @@ class MIDIKeyboardNode(Node):
                 state_to_emit = self._get_current_state_snapshot_locked()
 
         if state_to_emit:
-            self.emitter.stateUpdated.emit(state_to_emit)
+            self.ui_update_callback(state_to_emit)
 
         if merged_messages:
             return {"msg_out": MIDIPacket(messages=merged_messages)}
@@ -342,7 +339,7 @@ class MIDIKeyboardNode(Node):
             self._active_notes.clear()
             state_to_emit = self._get_current_state_snapshot_locked()
         if state_to_emit:
-            self.emitter.stateUpdated.emit(state_to_emit)
+            self.ui_update_callback(state_to_emit)
 
     def start(self):
         self._reset_and_notify()

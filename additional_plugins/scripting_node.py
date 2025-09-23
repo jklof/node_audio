@@ -13,7 +13,6 @@ from node_system import Node
 from constants import DEFAULT_DTYPE
 from ui_elements import (
     NodeItem,
-    NodeStateEmitter,
     NODE_CONTENT_PADDING,
     HEADER_HEIGHT,
     SOCKET_Y_SPACING,
@@ -181,7 +180,6 @@ class CodeNodeItem(NodeItem):
         self.setContentWidget(self.container_widget)
 
         self.apply_button.clicked.connect(self._on_apply_clicked)
-        self.node_logic.emitter.stateUpdated.connect(self._on_state_updated)
         self.code_editor.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
         self.setAcceptHoverEvents(True)
 
@@ -295,7 +293,7 @@ class CodeNodeItem(NodeItem):
         self.node_logic.apply_code(self.code_editor.toPlainText())
 
     @Slot(dict)
-    def _on_state_updated(self, state: dict):
+    def _on_state_updated_from_logic(self, state: dict):
 
         # 1. First, check if the sockets have changed. If so, reconcile them.
         if state.get("sockets_changed", False):
@@ -367,7 +365,7 @@ class CodeNodeItem(NodeItem):
         with QSignalBlocker(self.code_editor):
             if self.code_editor.toPlainText() != state.get("code", ""):
                 self.code_editor.setPlainText(state.get("code", ""))
-        self._on_state_updated(state)
+        self._on_state_updated_from_logic(state)
 
         # Call the parent implementation
         super().updateFromLogic()
@@ -381,7 +379,6 @@ class CodeNode(Node):
 
     def __init__(self, name, node_id=None):
         super().__init__(name, node_id)
-        self.emitter = NodeStateEmitter()
         self._lock = threading.Lock()
         self._code: str = DEFAULT_CODE
         self._compiled_code: Optional[CodeType] = None
@@ -468,7 +465,7 @@ class CodeNode(Node):
             state_to_emit["sockets_changed"] = sockets_changed
             state_to_emit["connections_to_delete"] = connections_to_delete_ids
 
-        self.emitter.stateUpdated.emit(state_to_emit)
+        self.ui_update_callback(state_to_emit)
 
     def get_current_state_snapshot(self) -> Dict:
         with self._lock:
@@ -496,7 +493,7 @@ class CodeNode(Node):
                 self._state = execution_scope.get("state", self._state)
                 if self._status == "Error":
                     self._status, self._last_error, self._last_error_lineno = "OK", "", -1
-                    self.emitter.stateUpdated.emit(self._get_current_state_snapshot_locked())
+                    self.ui_update_callback(self._get_current_state_snapshot_locked())
             return {name: execution_scope.get(name) for name in self.outputs}
         except Exception as e:
             lineno = -1
@@ -511,7 +508,7 @@ class CodeNode(Node):
                 self._status = "Error"
                 self._last_error = f"Runtime: {str(e).replace(chr(10), ' ')}"
                 self._last_error_lineno = lineno
-                self.emitter.stateUpdated.emit(self._get_current_state_snapshot_locked())
+                self.ui_update_callback(self._get_current_state_snapshot_locked())
 
             raise e
 

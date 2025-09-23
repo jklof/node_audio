@@ -12,9 +12,8 @@ from constants import DEFAULT_DTYPE, DEFAULT_SAMPLERATE, DEFAULT_BLOCKSIZE
 from ui_elements import (
     ParameterNodeItem,
     NodeItem,
-    NodeStateEmitter,
     NODE_CONTENT_PADDING,
-)  # <-- IMPORTED NodeStateEmitter
+)
 from PySide6.QtWidgets import QWidget, QSlider, QLabel, QVBoxLayout
 from PySide6.QtCore import Qt, Signal, Slot, QObject, QSignalBlocker
 
@@ -83,7 +82,6 @@ class DelayNode(Node):
 
     def __init__(self, name: str, node_id: str | None = None):
         super().__init__(name, node_id)
-        self.emitter = NodeStateEmitter()
         self.add_input("in", data_type=torch.Tensor)
         self.add_input("delay_time_ms", data_type=float)
         self.add_input("feedback", data_type=float)
@@ -120,7 +118,7 @@ class DelayNode(Node):
                 self._delay_time_ms = clipped_value
                 state_to_emit = self.get_current_state_snapshot(locked=True)
         if state_to_emit:
-            self.emitter.stateUpdated.emit(state_to_emit)
+            self.ui_update_callback(state_to_emit)
 
     def set_feedback(self, value: float):
         state_to_emit = None
@@ -130,7 +128,7 @@ class DelayNode(Node):
                 self._feedback = clipped_value
                 state_to_emit = self.get_current_state_snapshot(locked=True)
         if state_to_emit:
-            self.emitter.stateUpdated.emit(state_to_emit)
+            self.ui_update_callback(state_to_emit)
 
     def set_mix(self, value: float):
         state_to_emit = None
@@ -140,7 +138,7 @@ class DelayNode(Node):
                 self._mix = clipped_value
                 state_to_emit = self.get_current_state_snapshot(locked=True)
         if state_to_emit:
-            self.emitter.stateUpdated.emit(state_to_emit)
+            self.ui_update_callback(state_to_emit)
 
     def get_current_state_snapshot(self, locked: bool = False) -> Dict:
         """Returns a copy of the current parameters for UI or serialization."""
@@ -213,7 +211,7 @@ class DelayNode(Node):
 
         # Emit signal to UI AFTER the lock is released
         if state_to_emit:
-            self.emitter.stateUpdated.emit(state_to_emit)
+            self.ui_update_callback(state_to_emit)
         # --- END CORRECTION ---
 
         # --- DSP Processing ---

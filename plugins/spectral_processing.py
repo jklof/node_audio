@@ -6,7 +6,7 @@ from collections import deque
 
 # --- Node System Imports ---
 from node_system import Node
-from ui_elements import NodeItem, NodeStateEmitter, NODE_CONTENT_PADDING, ParameterNodeItem
+from ui_elements import NodeItem, NODE_CONTENT_PADDING, ParameterNodeItem
 from constants import (
     DEFAULT_SAMPLERATE,
     DEFAULT_BLOCKSIZE,
@@ -51,7 +51,6 @@ class STFTNode(Node):
 
     def __init__(self, name, node_id=None):
         super().__init__(name, node_id)
-        self.emitter = NodeStateEmitter()
         self.add_input("audio_in", data_type=torch.Tensor)
         self.add_output("spectral_frame_out", data_type=SpectralFrame)
         self._lock = threading.Lock()
@@ -82,7 +81,7 @@ class STFTNode(Node):
                 state_to_emit = {"window_size": self._window_size}
 
         if state_to_emit:
-            self.emitter.stateUpdated.emit(state_to_emit)
+            self.ui_update_callback(state_to_emit)
 
         self._recalculate_params()
         self.start()
@@ -235,16 +234,12 @@ class SpectralFilterNodeItem(ParameterNodeItem):
         ]
         super().__init__(node_logic, parameters)
 
-        # Connect state updates to a custom handler to manage widget visibility
-        self.node_logic.emitter.stateUpdated.connect(self.custom_on_state_updated)
         self.updateFromLogic()
 
-    @Slot(dict)
-    def custom_on_state_updated(self, state: dict):
-        # First, run the parent's update logic
-        super()._on_state_updated(state)
-
-        # Now, add our custom logic
+    def updateFromLogic(self):
+        super().updateFromLogic()
+        # Custom logic for visibility
+        state = self.node_logic.get_current_state_snapshot()
         filter_type = state.get("filter_type", "Low Pass")
         is_bandpass = filter_type == "Band Pass"
 
@@ -282,7 +277,6 @@ class SpectralFilterNode(Node):
         self.add_input("cutoff_freq_1", data_type=float)
         self.add_input("cutoff_freq_2", data_type=float)
         self.add_output("spectral_frame_out", data_type=SpectralFrame)
-        self.emitter = NodeStateEmitter()
         self._lock = threading.Lock()
 
         self._filter_type = "Low Pass"
@@ -310,7 +304,7 @@ class SpectralFilterNode(Node):
                 self._filter_type = f_type
                 state_to_emit = self._get_current_state_snapshot_locked()
         if state_to_emit:
-            self.emitter.stateUpdated.emit(state_to_emit)
+            self.ui_update_callback(state_to_emit)
 
     @Slot(float)
     def set_cutoff_freq_1(self, freq: float):
@@ -320,7 +314,7 @@ class SpectralFilterNode(Node):
                 self._cutoff_freq_1 = freq
                 state_to_emit = self._get_current_state_snapshot_locked()
         if state_to_emit:
-            self.emitter.stateUpdated.emit(state_to_emit)
+            self.ui_update_callback(state_to_emit)
 
     @Slot(float)
     def set_cutoff_freq_2(self, freq: float):
@@ -330,7 +324,7 @@ class SpectralFilterNode(Node):
                 self._cutoff_freq_2 = freq
                 state_to_emit = self._get_current_state_snapshot_locked()
         if state_to_emit:
-            self.emitter.stateUpdated.emit(state_to_emit)
+            self.ui_update_callback(state_to_emit)
 
     def process(self, input_data: dict) -> dict:
         frame = input_data.get("spectral_frame_in")
@@ -363,7 +357,7 @@ class SpectralFilterNode(Node):
             fc2 = self._cutoff_freq_2
 
         if state_snapshot_to_emit:
-            self.emitter.stateUpdated.emit(state_snapshot_to_emit)
+            self.ui_update_callback(state_snapshot_to_emit)
 
         modified_data = frame.data.clone()
         freq_per_bin = frame.sample_rate / frame.fft_size

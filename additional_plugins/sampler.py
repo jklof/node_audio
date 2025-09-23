@@ -11,7 +11,7 @@ import torchaudio.transforms as T
 
 from node_system import Node
 from constants import DEFAULT_SAMPLERATE, DEFAULT_BLOCKSIZE, DEFAULT_DTYPE, DEFAULT_CHANNELS
-from ui_elements import NodeItem, NodeStateEmitter, NODE_CONTENT_PADDING
+from ui_elements import NodeItem, NODE_CONTENT_PADDING
 
 from PySide6.QtCore import Qt, Signal, Slot, QObject, QRunnable, QThreadPool
 from PySide6.QtWidgets import QWidget, QLabel, QPushButton, QVBoxLayout, QFileDialog
@@ -85,9 +85,7 @@ class SampleNodeItem(NodeItem):
         self.setContentWidget(self.container_widget)
 
         self.load_button.clicked.connect(self._on_load_clicked)
-        self.node_logic.emitter.stateUpdated.connect(self._on_state_updated)
-
-        # Initial state emission will be triggered by graph_scene.py
+        # TODO FIX THIS PROPERLY!# Initial state emission will be triggered by graph_scene.py
 
     @Slot()
     def _on_load_clicked(self):
@@ -97,7 +95,7 @@ class SampleNodeItem(NodeItem):
             self.node_logic.load_file(file_path)
 
     @Slot(dict)
-    def _on_state_updated(self, state: dict):
+    def _on_state_updated_from_logic(self, state: dict):
         status = state.get("status", "Unknown")
         filepath = state.get("filepath")
 
@@ -114,7 +112,7 @@ class SampleNodeItem(NodeItem):
 
     def updateFromLogic(self):
         state = self.node_logic.get_current_state_snapshot()
-        self._on_state_updated(state)
+        self._on_state_updated_from_logic(state)
         super().updateFromLogic()
 
 
@@ -133,7 +131,6 @@ class SampleNode(Node):
 
     def __init__(self, name: str, node_id: Optional[str] = None):
         super().__init__(name, node_id)
-        self.emitter = NodeStateEmitter()
 
         self.add_input("trigger", data_type=bool)
         self.add_input("pitch", data_type=float)
@@ -171,7 +168,7 @@ class SampleNode(Node):
             state_to_emit = self._get_current_state_snapshot_locked()
 
         if state_to_emit:
-            self.emitter.stateUpdated.emit(state_to_emit)
+            self.ui_update_callback(state_to_emit)
 
         runnable = SampleLoadRunnable(file_path, DEFAULT_SAMPLERATE, self.loader_signaller)
         QThreadPool.globalInstance().start(runnable)
@@ -195,7 +192,7 @@ class SampleNode(Node):
             state_to_emit = self._get_current_state_snapshot_locked()
 
         if state_to_emit:
-            self.emitter.stateUpdated.emit(state_to_emit)
+            self.ui_update_callback(state_to_emit)
 
     def _get_current_state_snapshot_locked(self) -> Dict:
         return {"status": self._status, "filepath": self._filepath}

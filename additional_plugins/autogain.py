@@ -8,7 +8,7 @@ from typing import Dict
 # --- Node System Imports ---
 from node_system import Node
 from constants import DEFAULT_SAMPLERATE, DEFAULT_BLOCKSIZE, DEFAULT_DTYPE
-from ui_elements import ParameterNodeItem, NodeItem, NodeStateEmitter, NODE_CONTENT_PADDING
+from ui_elements import ParameterNodeItem, NodeItem, NODE_CONTENT_PADDING
 
 # --- UI and Qt Imports ---
 from PySide6.QtWidgets import QWidget, QLabel, QSlider, QVBoxLayout
@@ -73,7 +73,6 @@ class AutoGainNode(Node):
 
     def __init__(self, name, node_id=None):
         super().__init__(name, node_id)
-        self.emitter = NodeStateEmitter()
         self.add_input("in", data_type=torch.Tensor)
         self.add_input("target_db", data_type=float)
         self.add_input("averaging_time_s", data_type=float)
@@ -119,7 +118,7 @@ class AutoGainNode(Node):
                 self._target_db = value
                 state_to_emit = self._get_current_state_snapshot_locked()
         if state_to_emit:
-            self.emitter.stateUpdated.emit(state_to_emit)
+            self.ui_update_callback(state_to_emit)
 
     @Slot(float)
     def set_averaging_time_s(self, value: float):
@@ -130,7 +129,7 @@ class AutoGainNode(Node):
                 self._recalculate_deque_size()
                 state_to_emit = self._get_current_state_snapshot_locked()
         if state_to_emit:
-            self.emitter.stateUpdated.emit(state_to_emit)
+            self.ui_update_callback(state_to_emit)
 
     @Slot(float)
     def set_gain_smoothing_ms(self, value: float):
@@ -140,7 +139,7 @@ class AutoGainNode(Node):
                 self._gain_smoothing_ms = value
                 state_to_emit = self._get_current_state_snapshot_locked()
         if state_to_emit:
-            self.emitter.stateUpdated.emit(state_to_emit)
+            self.ui_update_callback(state_to_emit)
 
     def process(self, input_data: dict) -> dict:
         signal = input_data.get("in")
@@ -173,7 +172,7 @@ class AutoGainNode(Node):
             gain_smoothing_ms = self._gain_smoothing_ms
 
         if state_snapshot_to_emit:
-            self.emitter.stateUpdated.emit(state_snapshot_to_emit)
+            self.ui_update_callback(state_snapshot_to_emit)
 
         # --- STAGE 1: Long-Term Loudness Measurement ---
         mono_signal = torch.mean(signal, dim=0)

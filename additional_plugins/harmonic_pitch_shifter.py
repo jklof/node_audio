@@ -9,7 +9,7 @@ from PySide6.QtCore import Slot
 
 from node_system import Node
 from constants import SpectralFrame, DEFAULT_COMPLEX_DTYPE
-from ui_elements import ParameterNodeItem, NodeStateEmitter
+from ui_elements import ParameterNodeItem
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +56,6 @@ class HarmonicPitchShifterNode(Node):
 
     def __init__(self, name: str, node_id: Optional[str] = None):
         super().__init__(name, node_id)
-        self.emitter = NodeStateEmitter()
         self.add_input("spectral_frame_in", data_type=SpectralFrame)
         self.add_input("f0_hz_in", data_type=float)
         self.add_input("pitch_shift_st", data_type=float)
@@ -99,7 +98,7 @@ class HarmonicPitchShifterNode(Node):
                 self._pitch_shift_st = float(value)
                 state_to_emit = self._get_current_state_snapshot_locked()
         if state_to_emit:
-            self.emitter.stateUpdated.emit(state_to_emit)
+            self.ui_update_callback(state_to_emit)
 
     @Slot(float)
     def set_formant_shift_st(self, value: float):
@@ -109,7 +108,7 @@ class HarmonicPitchShifterNode(Node):
                 self._formant_shift_st = float(value)
                 state_to_emit = self._get_current_state_snapshot_locked()
         if state_to_emit:
-            self.emitter.stateUpdated.emit(state_to_emit)
+            self.ui_update_callback(state_to_emit)
 
     def _get_current_state_snapshot_locked(self) -> Dict:
         return {"pitch_shift_st": self._pitch_shift_st, "formant_shift_st": self._formant_shift_st}
@@ -283,7 +282,7 @@ class HarmonicPitchShifterNode(Node):
                 state_snapshot_to_emit = self._get_current_state_snapshot_locked()
 
         if state_snapshot_to_emit:
-            self.emitter.stateUpdated.emit(state_snapshot_to_emit)
+            self.ui_update_callback(state_snapshot_to_emit)
 
         pitch_ratio = 2 ** (effective_pitch / 12.0)
         formant_ratio = 2 ** (effective_formant / 12.0)

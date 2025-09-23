@@ -10,7 +10,7 @@ from node_system import Node
 from constants import DEFAULT_DTYPE
 
 # --- UI and Qt Imports ---
-from ui_elements import ParameterNodeItem, NodeStateEmitter
+from ui_elements import ParameterNodeItem
 from PySide6.QtCore import Slot
 
 # Configure logging
@@ -83,7 +83,6 @@ class WaveShaperNode(Node):
 
     def __init__(self, name, node_id=None):
         super().__init__(name, node_id)
-        self.emitter = NodeStateEmitter()
         self.add_input("in", data_type=torch.Tensor)
         self.add_input("drive", data_type=float)
         self.add_input("mix", data_type=float)
@@ -110,7 +109,7 @@ class WaveShaperNode(Node):
                 self._shaper_type = shaper_type
                 state_to_emit = self.get_current_state_snapshot(locked=True)
         if state_to_emit:
-            self.emitter.stateUpdated.emit(state_to_emit)
+            self.ui_update_callback(state_to_emit)
 
     @Slot(float)
     def set_drive(self, drive: float):
@@ -121,7 +120,7 @@ class WaveShaperNode(Node):
                 self._drive = new_drive
                 state_to_emit = self.get_current_state_snapshot(locked=True)
         if state_to_emit:
-            self.emitter.stateUpdated.emit(state_to_emit)
+            self.ui_update_callback(state_to_emit)
 
     @Slot(float)
     def set_mix(self, mix: float):
@@ -132,7 +131,7 @@ class WaveShaperNode(Node):
                 self._mix = new_mix
                 state_to_emit = self.get_current_state_snapshot(locked=True)
         if state_to_emit:
-            self.emitter.stateUpdated.emit(state_to_emit)
+            self.ui_update_callback(state_to_emit)
 
     def process(self, input_data: dict) -> dict:
         signal = input_data.get("in")
@@ -169,7 +168,7 @@ class WaveShaperNode(Node):
 
         # Emit signal to UI AFTER the lock is released
         if state_to_emit:
-            self.emitter.stateUpdated.emit(state_to_emit)
+            self.ui_update_callback(state_to_emit)
         # --- END CORRECTION ---
 
         # All processing is now done with PyTorch

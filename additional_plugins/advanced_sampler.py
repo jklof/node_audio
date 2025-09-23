@@ -11,7 +11,7 @@ import torchaudio.transforms as T
 
 from node_system import Node
 from constants import DEFAULT_SAMPLERATE, DEFAULT_BLOCKSIZE, DEFAULT_DTYPE
-from ui_elements import NodeItem, NodeStateEmitter, NODE_CONTENT_PADDING
+from ui_elements import NodeItem, NODE_CONTENT_PADDING
 
 from PySide6.QtCore import Qt, Signal, Slot, QObject, QRunnable, QThreadPool, QPointF, QSize, QRectF, QSignalBlocker
 from PySide6.QtGui import QPainter, QColor, QBrush, QPen, QPaintEvent, QPainterPath, QCursor
@@ -358,7 +358,6 @@ class AdvancedSamplePlayerNodeItem(NodeItem):
         main_layout.addLayout(bottom_row_layout)
         self.setContentWidget(self.container_widget)
         self.load_button.clicked.connect(self._on_load_clicked)
-        self.node_logic.emitter.stateUpdated.connect(self._on_state_updated)
         self.waveform_widget.clipRangeChanged.connect(self.node_logic.set_clip_range)
         self.root_pitch_spinbox.valueChanged.connect(self.node_logic.set_root_pitch)
 
@@ -370,7 +369,7 @@ class AdvancedSamplePlayerNodeItem(NodeItem):
             self.node_logic.load_new_file_and_reset(file_path)
 
     @Slot(dict)
-    def _on_state_updated(self, state: dict):
+    def _on_state_updated_from_logic(self, state: dict):
         if "waveform_data" in state and state["waveform_data"] is not None:
             self.waveform_widget.set_waveform(state["waveform_data"])
         filepath = state.get("filepath")
@@ -385,7 +384,7 @@ class AdvancedSamplePlayerNodeItem(NodeItem):
 
     def updateFromLogic(self):
         state = self.node_logic.get_current_state_snapshot()
-        self._on_state_updated(state)
+        self._on_state_updated_from_logic(state)
         super().updateFromLogic()
 
 
@@ -397,7 +396,6 @@ class AdvancedSamplePlayerNode(Node):
 
     def __init__(self, name: str, node_id: Optional[str] = None):
         super().__init__(name, node_id)
-        self.emitter = NodeStateEmitter()
         self.add_input("trigger", data_type=bool)
         self.add_input("pitch", data_type=float)
         self.add_output("out", data_type=torch.Tensor)
@@ -446,7 +444,7 @@ class AdvancedSamplePlayerNode(Node):
             self._status, self._filepath = "Loading...", file_path
             state_to_emit = self._get_current_state_snapshot_locked()
         if state_to_emit:
-            self.emitter.stateUpdated.emit(state_to_emit)
+            self.ui_update_callback(state_to_emit)
         runnable = SampleLoadRunnable(file_path, DEFAULT_SAMPLERATE, self.loader_signaller)
         QThreadPool.globalInstance().start(runnable)
 
@@ -467,7 +465,7 @@ class AdvancedSamplePlayerNode(Node):
                 self._audio_data, self._status = None, f"Error: {data}"
                 state_to_emit = self._get_current_state_snapshot_locked()
         if state_to_emit:
-            self.emitter.stateUpdated.emit(state_to_emit)
+            self.ui_update_callback(state_to_emit)
 
     @Slot(float, float)
     def set_clip_range(self, start_norm: float, end_norm: float):
@@ -476,7 +474,7 @@ class AdvancedSamplePlayerNode(Node):
             self._start_pos_norm, self._end_pos_norm = start_norm, end_norm
             state_to_emit = self._get_current_state_snapshot_locked()
         if state_to_emit:
-            self.emitter.stateUpdated.emit(state_to_emit)
+            self.ui_update_callback(state_to_emit)
 
     @Slot(float)
     def set_root_pitch(self, pitch_hz: float):
@@ -486,7 +484,7 @@ class AdvancedSamplePlayerNode(Node):
             self._last_known_pitch_hz = pitch_hz
             state_to_emit = self._get_current_state_snapshot_locked()
         if state_to_emit:
-            self.emitter.stateUpdated.emit(state_to_emit)
+            self.ui_update_callback(state_to_emit)
 
     def process(self, input_data: dict) -> dict:
         trigger_socket_val = input_data.get("trigger")
@@ -539,7 +537,7 @@ class AdvancedSamplePlayerNode(Node):
             self._last_playhead_update_time = now
             state_to_emit = self.get_current_state_snapshot()
             if state_to_emit:
-                self.emitter.stateUpdated.emit(state_to_emit)
+                self.ui_update_callback(state_to_emit)
         return {"out": output_block, "on_end": on_end_signal}
 
     def serialize_extra(self) -> dict:
@@ -563,4 +561,4 @@ class AdvancedSamplePlayerNode(Node):
             self._end_pos_norm = data.get("end_pos_norm", 1.0)
             state_to_emit = self._get_current_state_snapshot_locked()
         if state_to_emit:
-            self.emitter.stateUpdated.emit(state_to_emit)
+            self.ui_update_callback(state_to_emit)

@@ -10,7 +10,7 @@ from node_system import Node
 from constants import DEFAULT_DTYPE, DEFAULT_SAMPLERATE, DEFAULT_BLOCKSIZE, DEFAULT_CHANNELS
 
 # --- UI and Qt Imports ---
-from ui_elements import ParameterNodeItem, NodeItem, NodeStateEmitter, NODE_CONTENT_PADDING
+from ui_elements import ParameterNodeItem, NodeItem, NODE_CONTENT_PADDING
 from PySide6.QtWidgets import QWidget, QSlider, QLabel, QVBoxLayout
 from PySide6.QtCore import Qt, Signal, Slot, QObject, QSignalBlocker
 
@@ -97,7 +97,6 @@ class CompressorNode(Node):
 
     def __init__(self, name: str, node_id: Optional[str] = None):
         super().__init__(name, node_id)
-        self.emitter = NodeStateEmitter()
         self.add_input("in", data_type=torch.Tensor)
         self.add_input("threshold_db", data_type=float)
         self.add_input("ratio", data_type=float)
@@ -185,14 +184,14 @@ class CompressorNode(Node):
             clipped_value = np.clip(float(value), MIN_THRESHOLD_DB, MAX_THRESHOLD_DB)
             if self._threshold_db != clipped_value:
                 self._threshold_db = clipped_value
-        self.emitter.stateUpdated.emit(self.get_current_state_snapshot())
+        self.ui_update_callback(self.get_current_state_snapshot())
 
     def set_ratio(self, value: float):
         with self._lock:
             clipped_value = np.clip(float(value), MIN_RATIO, MAX_RATIO)
             if self._ratio != clipped_value:
                 self._ratio = clipped_value
-        self.emitter.stateUpdated.emit(self.get_current_state_snapshot())
+        self.ui_update_callback(self.get_current_state_snapshot())
 
     def set_attack_ms(self, value: float):
         with self._lock:
@@ -200,7 +199,7 @@ class CompressorNode(Node):
             if self._attack_ms != clipped_value:
                 self._attack_ms = clipped_value
                 self._params_dirty = True
-        self.emitter.stateUpdated.emit(self.get_current_state_snapshot())
+        self.ui_update_callback(self.get_current_state_snapshot())
 
     def set_release_ms(self, value: float):
         with self._lock:
@@ -208,14 +207,14 @@ class CompressorNode(Node):
             if self._release_ms != clipped_value:
                 self._release_ms = clipped_value
                 self._params_dirty = True
-        self.emitter.stateUpdated.emit(self.get_current_state_snapshot())
+        self.ui_update_callback(self.get_current_state_snapshot())
 
     def set_knee_db(self, value: float):
         with self._lock:
             clipped_value = np.clip(float(value), MIN_KNEE_DB, MAX_KNEE_DB)
             if self._knee_db != clipped_value:
                 self._knee_db = clipped_value
-        self.emitter.stateUpdated.emit(self.get_current_state_snapshot())
+        self.ui_update_callback(self.get_current_state_snapshot())
 
     def get_current_state_snapshot(self, locked: bool = False) -> Dict:
         state = {
@@ -302,7 +301,7 @@ class CompressorNode(Node):
 
                 # If any socket caused a change, emit the new state to the UI
                 if ui_update_needed:
-                    self.emitter.stateUpdated.emit(self.get_current_state_snapshot(locked=True))
+                    self.ui_update_callback(self.get_current_state_snapshot(locked=True))
 
                 # Copy locked parameters to local variables for this tick's processing
                 threshold_db, ratio, knee_db, initial_envelope = (

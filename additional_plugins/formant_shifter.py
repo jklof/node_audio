@@ -10,7 +10,7 @@ from PySide6.QtCore import Slot
 
 from node_system import Node
 from constants import SpectralFrame, DEFAULT_COMPLEX_DTYPE
-from ui_elements import ParameterNodeItem, NodeStateEmitter
+from ui_elements import ParameterNodeItem
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +49,6 @@ class FormantShifterNode(Node):
 
     def __init__(self, name: str, node_id: Optional[str] = None):
         super().__init__(name, node_id)
-        self.emitter = NodeStateEmitter()
 
         self.add_input("spectral_frame_in", data_type=SpectralFrame)
         self.add_input("f0_hz_in", data_type=float)  # <-- IMPROVEMENT 1: F0 input
@@ -75,7 +74,7 @@ class FormantShifterNode(Node):
                 self._formant_shift_st = float(value)
                 state_to_emit = self._get_current_state_snapshot_locked()
         if state_to_emit:
-            self.emitter.stateUpdated.emit(state_to_emit)
+            self.ui_update_callback(state_to_emit)
 
     def _get_current_state_snapshot_locked(self) -> Dict:
         return {"formant_shift_st": self._formant_shift_st}
@@ -159,7 +158,7 @@ class FormantShifterNode(Node):
             self._last_formant_ratio = formant_ratio  # Store the new target ratio for the next frame
 
         if state_snapshot_to_emit:
-            self.emitter.stateUpdated.emit(state_snapshot_to_emit)
+            self.ui_update_callback(state_snapshot_to_emit)
 
         # Optimization: Pass through if no shift and ramp is flat
         if abs(formant_ratio - 1.0) < 1e-6 and abs(ramp[0] - 1.0) < 1e-6:

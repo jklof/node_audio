@@ -36,7 +36,7 @@ import torchaudio.transforms as T
 
 # --- Node System Imports ---
 from node_system import Node
-from ui_elements import ParameterNodeItem, NodeStateEmitter, NODE_CONTENT_PADDING
+from ui_elements import ParameterNodeItem, NODE_CONTENT_PADDING
 from constants import DEFAULT_SAMPLERATE, DEFAULT_BLOCKSIZE, DEFAULT_DTYPE
 
 # --- Qt Imports ---
@@ -133,7 +133,7 @@ class F0EstimatorNodeItem(ParameterNodeItem):
         # No need to call self.updateFromLogic() here, as the parent constructor does it.
 
     @Slot(dict)
-    def _on_state_updated(self, state: dict):
+    def _on_state_updated_from_logic(self, state: dict):
         """
         Overrides the parent method to add custom UI logic.
         """
@@ -231,7 +231,6 @@ class F0EstimatorNode(Node):
 
     def __init__(self, name: str, node_id: Optional[str] = None):
         super().__init__(name, node_id)
-        self.emitter = NodeStateEmitter()
 
         self.add_input("in", data_type=torch.Tensor)
         self.add_output("f0_hz", data_type=float)
@@ -275,7 +274,7 @@ class F0EstimatorNode(Node):
                 self._latest_confidence = 0.0
                 state_to_emit = self._get_current_state_snapshot_unlocked()
         if state_to_emit:
-            self.emitter.stateUpdated.emit(state_to_emit)
+            self.ui_update_callback(state_to_emit)
 
     def get_current_state_snapshot(self) -> Dict:
         with self._lock:
@@ -440,7 +439,7 @@ class F0EstimatorNode(Node):
     def _ui_updater_loop(self):
         while not self._stop_ui_thread_event.is_set():
             state_to_emit = self.get_current_state_snapshot()
-            self.emitter.stateUpdated.emit(state_to_emit)
+            self.ui_update_callback(state_to_emit)
             time.sleep(UI_UPDATE_INTERVAL_S)
 
     def start(self):
@@ -464,7 +463,7 @@ class F0EstimatorNode(Node):
 
         with self._lock:
             state = {"method": self._method, "f0_hz": 0.0, "confidence": 0.0}
-        self.emitter.stateUpdated.emit(state)
+        self.ui_update_callback(state)
 
     def remove(self):
         self.stop()

@@ -37,7 +37,7 @@ import torchaudio.transforms as T
 
 # --- Node System Imports ---
 from node_system import Node
-from ui_elements import NodeItem, NodeStateEmitter, NODE_CONTENT_PADDING
+from ui_elements import NodeItem, NODE_CONTENT_PADDING
 from constants import DEFAULT_SAMPLERATE, DEFAULT_BLOCKSIZE, DEFAULT_DTYPE
 
 # --- Qt Imports ---
@@ -99,12 +99,9 @@ class SwiftF0NodeItem(NodeItem):
             error_label.setWordWrap(True)
             layout.addWidget(error_label)
 
-        self.setContentWidget(self.container_widget)
+        self.setContentWidget(self.container_widget) @ Slot(dict)
 
-        self.node_logic.emitter.stateUpdated.connect(self._on_state_updated)
-
-    @Slot(dict)
-    def _on_state_updated(self, state: dict):
+    def _on_state_updated_from_logic(self, state: dict):
         f0 = state.get("f0_hz")
         confidence = state.get("confidence")
         gate = state.get("gate", False)
@@ -129,7 +126,7 @@ class SwiftF0NodeItem(NodeItem):
     @Slot()
     def updateFromLogic(self):
         state = self.node_logic.get_current_state_snapshot()
-        self._on_state_updated(state)
+        self._on_state_updated_from_logic(state)
         super().updateFromLogic()
 
 
@@ -144,7 +141,6 @@ class SwiftF0Node(Node):
 
     def __init__(self, name: str, node_id: Optional[str] = None):
         super().__init__(name, node_id)
-        self.emitter = NodeStateEmitter()
 
         self.add_input("in", data_type=torch.Tensor)
         self.add_output("f0_hz", data_type=float)
@@ -259,7 +255,7 @@ class SwiftF0Node(Node):
     def _ui_updater_loop(self):
         while not self._stop_ui_thread_event.is_set():
             state_to_emit = self.get_current_state_snapshot()
-            self.emitter.stateUpdated.emit(state_to_emit)
+            self.ui_update_callback(state_to_emit)
             time.sleep(UI_UPDATE_INTERVAL_S)
 
     def start(self):
@@ -294,7 +290,7 @@ class SwiftF0Node(Node):
 
         with self._lock:
             state = {"f0_hz": 0.0, "confidence": 0.0, "midi_note": None, "gate": False}
-        self.emitter.stateUpdated.emit(state)
+        self.ui_update_callback(state)
 
     def remove(self):
         self.stop()

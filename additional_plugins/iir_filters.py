@@ -8,7 +8,7 @@ from typing import Dict, Optional
 # --- Node System Imports ---
 from node_system import Node
 from constants import DEFAULT_SAMPLERATE, DEFAULT_DTYPE
-from ui_elements import ParameterNodeItem, NodeStateEmitter
+from ui_elements import ParameterNodeItem
 
 # --- UI and Qt Imports ---
 from PySide6.QtCore import Slot
@@ -73,7 +73,7 @@ class BiquadFilterNodeItem(ParameterNodeItem):
         super().__init__(node_logic, parameters, width=self.NODE_SPECIFIC_WIDTH)
 
     @Slot(dict)
-    def _on_state_updated(self, state: dict):
+    def _on_state_updated_from_logic(self, state: dict):
         """
         Overrides the parent method to add custom logic for showing/hiding controls.
         """
@@ -109,7 +109,6 @@ class BiquadFilterNode(Node):
 
     def __init__(self, name: str, node_id: Optional[str] = None):
         super().__init__(name, node_id)
-        self.emitter = NodeStateEmitter()
         self._lock = threading.Lock()
         self.add_input("in", data_type=torch.Tensor)
         self.add_input("cutoff_freq", data_type=float)
@@ -199,7 +198,7 @@ class BiquadFilterNode(Node):
             if self._filter_type != f_type:
                 self._filter_type = f_type
                 self._params_dirty = True
-        self.emitter.stateUpdated.emit(self.get_current_state_snapshot())
+        self.ui_update_callback(self.get_current_state_snapshot())
 
     @Slot(float)
     def set_cutoff_freq(self, freq: float):
@@ -208,7 +207,7 @@ class BiquadFilterNode(Node):
             if self._cutoff_freq != new_freq:
                 self._cutoff_freq = new_freq
                 self._params_dirty = True
-        self.emitter.stateUpdated.emit(self.get_current_state_snapshot())
+        self.ui_update_callback(self.get_current_state_snapshot())
 
     @Slot(float)
     def set_q(self, q: float):
@@ -217,7 +216,7 @@ class BiquadFilterNode(Node):
             if self._q != new_q:
                 self._q = new_q
                 self._params_dirty = True
-        self.emitter.stateUpdated.emit(self.get_current_state_snapshot())
+        self.ui_update_callback(self.get_current_state_snapshot())
 
     @Slot(float)
     def set_gain_db(self, gain: float):
@@ -225,7 +224,7 @@ class BiquadFilterNode(Node):
             if self._gain_db != float(gain):
                 self._gain_db = float(gain)
                 self._params_dirty = True
-        self.emitter.stateUpdated.emit(self.get_current_state_snapshot())
+        self.ui_update_callback(self.get_current_state_snapshot())
 
     def get_current_state_snapshot(self) -> Dict:
         with self._lock:
@@ -296,7 +295,7 @@ class BiquadFilterNode(Node):
         with self._lock:
             self._zi = zf_next_np
         if state_snapshot_to_emit:
-            self.emitter.stateUpdated.emit(state_snapshot_to_emit)
+            self.ui_update_callback(state_snapshot_to_emit)
 
         return {"out": torch.from_numpy(filtered_signal_np.astype(np.float32))}
 

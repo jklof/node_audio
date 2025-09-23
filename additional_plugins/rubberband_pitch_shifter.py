@@ -9,7 +9,7 @@ from typing import Dict, Optional
 
 from node_system import Node
 from constants import DEFAULT_DTYPE, DEFAULT_SAMPLERATE, DEFAULT_BLOCKSIZE
-from ui_elements import ParameterNodeItem, NodeStateEmitter
+from ui_elements import ParameterNodeItem
 from PySide6.QtCore import Slot
 
 logger = logging.getLogger(__name__)
@@ -49,7 +49,7 @@ class RubberBandPitchShiftNodeItem(ParameterNodeItem):
         super().__init__(node_logic, parameters, width=self.NODE_SPECIFIC_WIDTH)
 
     @Slot(dict)
-    def _on_state_updated(self, state: dict):
+    def _on_state_updated_from_logic(self, state: dict):
         """Overrides base method to add custom UI logic."""
         # First, call the parent method to handle standard updates.
         super()._on_state_updated(state)
@@ -76,7 +76,6 @@ class RubberBandPitchShiftNode(Node):
 
     def __init__(self, name: str, node_id: Optional[str] = None):
         super().__init__(name, node_id)
-        self.emitter = NodeStateEmitter()
         self.add_input("audio_in", data_type=torch.Tensor)
         self.add_input("pitch_shift_st", data_type=float)
         self.add_input("formant_shift_st", data_type=float)
@@ -154,7 +153,7 @@ class RubberBandPitchShiftNode(Node):
                 self._cleanup_stretcher_locked()
                 state_to_emit = self._get_current_state_snapshot_locked()
         if state_to_emit:
-            self.emitter.stateUpdated.emit(state_to_emit)
+            self.ui_update_callback(state_to_emit)
 
     def _update_parameter(self, attr_name: str, value):
         state_to_emit = None
@@ -163,7 +162,7 @@ class RubberBandPitchShiftNode(Node):
                 setattr(self, attr_name, value)
                 state_to_emit = self._get_current_state_snapshot_locked()
         if state_to_emit:
-            self.emitter.stateUpdated.emit(state_to_emit)
+            self.ui_update_callback(state_to_emit)
 
     def _get_current_state_snapshot_locked(self) -> Dict:
         return {
@@ -246,7 +245,7 @@ class RubberBandPitchShiftNode(Node):
                 output_block = torch.zeros((channels, DEFAULT_BLOCKSIZE), dtype=DEFAULT_DTYPE)
 
         if state_to_emit:
-            self.emitter.stateUpdated.emit(state_to_emit)
+            self.ui_update_callback(state_to_emit)
 
         return {"audio_out": output_block}
 

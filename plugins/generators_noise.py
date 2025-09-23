@@ -11,7 +11,7 @@ from node_system import Node
 from constants import DEFAULT_DTYPE, DEFAULT_SAMPLERATE, DEFAULT_BLOCKSIZE, DEFAULT_CHANNELS
 
 # --- UI and Qt Imports ---
-from ui_elements import ParameterNodeItem, NodeStateEmitter
+from ui_elements import ParameterNodeItem
 from PySide6.QtCore import Slot  # <-- FIXED: Added the missing import for Slot
 
 # Configure logging
@@ -79,7 +79,6 @@ class NoiseGeneratorNode(Node):
 
     def __init__(self, name, node_id=None):
         super().__init__(name, node_id)
-        self.emitter = NodeStateEmitter()
         self.add_input("level", data_type=float)
         self.add_output("out", data_type=torch.Tensor)
 
@@ -142,7 +141,7 @@ class NoiseGeneratorNode(Node):
                 # No need to re-init filters, just use the correct one
                 state_to_emit = self._get_current_state_snapshot_locked()
         if state_to_emit:
-            self.emitter.stateUpdated.emit(state_to_emit)
+            self.ui_update_callback(state_to_emit)
 
     @Slot(float)
     def set_level(self, level: float):
@@ -153,7 +152,7 @@ class NoiseGeneratorNode(Node):
                 self._level = new_level
                 state_to_emit = self._get_current_state_snapshot_locked()
         if state_to_emit:
-            self.emitter.stateUpdated.emit(state_to_emit)
+            self.ui_update_callback(state_to_emit)
 
     def process(self, input_data: dict) -> dict:
         state_snapshot_to_emit = None
@@ -168,7 +167,7 @@ class NoiseGeneratorNode(Node):
             level = self._level
 
         if state_snapshot_to_emit:
-            self.emitter.stateUpdated.emit(state_snapshot_to_emit)
+            self.ui_update_callback(state_snapshot_to_emit)
 
         # Generate white noise directly as a torch tensor
         white_noise = torch.rand(self.channels, self.blocksize, dtype=DEFAULT_DTYPE) * 2.0 - 1.0

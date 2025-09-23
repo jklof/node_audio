@@ -5,7 +5,7 @@ import logging
 from collections import deque
 from node_system import Node
 
-from ui_elements import NodeItem, NodeStateEmitter, NODE_CONTENT_PADDING, ParameterNodeItem
+from ui_elements import NodeItem, NODE_CONTENT_PADDING, ParameterNodeItem
 from constants import DEFAULT_DTYPE, TICK_DURATION_S
 
 from PySide6.QtWidgets import QDoubleSpinBox, QVBoxLayout, QWidget, QDial, QSizePolicy, QLabel
@@ -41,10 +41,9 @@ class ValueNodeItem(NodeItem):
         self.setContentWidget(self.container_widget)
 
         self.spin_box.valueChanged.connect(self.node_logic.set_value)
-        self.node_logic.emitter.stateUpdated.connect(self._on_state_updated)
 
     @Slot(dict)
-    def _on_state_updated(self, state: dict):
+    def _on_state_updated_from_logic(self, state: dict):
         """Updates the UI from a state dictionary."""
         value = state.get("value", 0.0)
         with QSignalBlocker(self.spin_box):
@@ -54,7 +53,7 @@ class ValueNodeItem(NodeItem):
     def updateFromLogic(self):
         """Pulls the initial state from the logic node to initialize the UI."""
         state = self.node_logic.get_current_state_snapshot()
-        self._on_state_updated(state)
+        self._on_state_updated_from_logic(state)
         super().updateFromLogic()
 
 
@@ -76,14 +75,13 @@ class DialNodeItem(NodeItem):
         self.setContentWidget(self.dial)
 
         self.dial.valueChanged.connect(self._on_dial_change)
-        self.node_logic.emitter.stateUpdated.connect(self._on_state_updated)
 
     def _on_dial_change(self, dial_int_value: int):
         logical_value = max(0.0, min(1.0, dial_int_value / self.DIAL_MAX))
         self.node_logic.set_value(logical_value)
 
     @Slot(dict)
-    def _on_state_updated(self, state: dict):
+    def _on_state_updated_from_logic(self, state: dict):
         """Updates the UI from a state dictionary."""
         value = state.get("value", 0.0)
         dial_int_value = int(round(value * self.DIAL_MAX))
@@ -94,7 +92,7 @@ class DialNodeItem(NodeItem):
     def updateFromLogic(self):
         """Pulls the initial state from the logic node to initialize the UI."""
         state = self.node_logic.get_current_state_snapshot()
-        self._on_state_updated(state)
+        self._on_state_updated_from_logic(state)
         super().updateFromLogic()
 
 
@@ -109,7 +107,6 @@ class ValueNode(Node):
 
     def __init__(self, name: str, node_id: str | None = None):
         super().__init__(name, node_id)
-        self.emitter = NodeStateEmitter()
         self.add_output("out", data_type=float)
         self._lock = threading.Lock()
         self._value = 0.0
@@ -132,7 +129,7 @@ class ValueNode(Node):
         except (ValueError, TypeError):
             logger.warning(f"ValueNode [{self.name}]: Invalid value received: {value}")
         if state_to_emit:
-            self.emitter.stateUpdated.emit(state_to_emit)
+            self.ui_update_callback(state_to_emit)
 
     def process(self, input_data: dict) -> dict:
         with self._lock:
@@ -191,10 +188,9 @@ class RunningAverageNodeItem(NodeItem):
         self.setContentWidget(self.container_widget)
 
         self.spin_box.valueChanged.connect(self.node_logic.set_time)
-        self.node_logic.emitter.stateUpdated.connect(self._on_state_updated)
 
     @Slot(dict)
-    def _on_state_updated(self, state: dict):
+    def _on_state_updated_from_logic(self, state: dict):
         """Updates the UI from a state dictionary."""
         time_s = state.get("time_s", 1.0)
         is_ext_controlled = "time" in self.node_logic.inputs and self.node_logic.inputs["time"].connections
@@ -209,7 +205,7 @@ class RunningAverageNodeItem(NodeItem):
     def updateFromLogic(self):
         """Pulls the initial state from the logic node to initialize the UI."""
         state = self.node_logic.get_current_state_snapshot()
-        self._on_state_updated(state)
+        self._on_state_updated_from_logic(state)
         super().updateFromLogic()
 
 
@@ -224,7 +220,6 @@ class RunningAverageNode(Node):
 
     def __init__(self, name: str, node_id: str | None = None):
         super().__init__(name, node_id)
-        self.emitter = NodeStateEmitter()
         self.add_input("in", data_type=float)
         self.add_input("time", data_type=float)  # Time in seconds
         self.add_output("out", data_type=float)
@@ -254,7 +249,7 @@ class RunningAverageNode(Node):
         except (ValueError, TypeError):
             logger.warning(f"RunningAverageNode [{self.name}]: Invalid time received: {time_s}")
         if state_to_emit:
-            self.emitter.stateUpdated.emit(state_to_emit)
+            self.ui_update_callback(state_to_emit)
 
     def process(self, input_data: dict) -> dict:
         state_snapshot_to_emit = None
@@ -293,7 +288,7 @@ class RunningAverageNode(Node):
 
         # Emit UI update after releasing lock
         if state_snapshot_to_emit:
-            self.emitter.stateUpdated.emit(state_snapshot_to_emit)
+            self.ui_update_callback(state_snapshot_to_emit)
 
         return {"out": output_value}
 
@@ -432,7 +427,6 @@ class DialHzNode(Node):
 
     def __init__(self, name: str, node_id: str | None = None):
         super().__init__(name, node_id)
-        self.emitter = NodeStateEmitter()
         self.add_input("frequency", data_type=float)
         self.add_output("freq_out", data_type=float)
         self._lock = threading.Lock()
@@ -453,7 +447,7 @@ class DialHzNode(Node):
                 self._frequency = new_freq
                 state_to_emit = self.get_current_state_snapshot(locked=True)
         if state_to_emit:
-            self.emitter.stateUpdated.emit(state_to_emit)
+            self.ui_update_callback(state_to_emit)
 
     def process(self, input_data: dict) -> dict:
         state_snapshot_to_emit = None
@@ -466,7 +460,7 @@ class DialHzNode(Node):
                     state_snapshot_to_emit = self.get_current_state_snapshot(locked=True)
             output_freq = self._frequency
         if state_snapshot_to_emit:
-            self.emitter.stateUpdated.emit(state_snapshot_to_emit)
+            self.ui_update_callback(state_snapshot_to_emit)
         return {"freq_out": output_freq}
 
     def serialize_extra(self) -> dict:
@@ -513,7 +507,6 @@ class GainNode(Node):
 
     def __init__(self, name, node_id=None):
         super().__init__(name, node_id)
-        self.emitter = NodeStateEmitter()
         self._lock = threading.Lock()
         self.add_input("in", data_type=torch.Tensor)
         self.add_input("gain_db", data_type=float)
@@ -535,7 +528,7 @@ class GainNode(Node):
                 self._gain_db = new_db_value
                 state_to_emit = self.get_current_state_snapshot(locked=True)
         if state_to_emit:
-            self.emitter.stateUpdated.emit(state_to_emit)
+            self.ui_update_callback(state_to_emit)
 
     def process(self, input_data: dict) -> dict:
         signal = input_data.get("in")
@@ -552,7 +545,7 @@ class GainNode(Node):
             else:
                 current_gain_db = self._gain_db
         if state_snapshot_to_emit:
-            self.emitter.stateUpdated.emit(state_snapshot_to_emit)
+            self.ui_update_callback(state_snapshot_to_emit)
 
         amplitude_factor = 10.0 ** (np.clip(current_gain_db, -120.0, 60.0) / 20.0)
         output_signal = signal * amplitude_factor
