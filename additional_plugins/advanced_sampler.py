@@ -61,6 +61,7 @@ class WaveformDisplayWidget(QWidget):
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setMinimumHeight(100)
         self.setCursor(Qt.CursorShape.IBeamCursor)
+        self.setMouseTracking(True)  # Required for hover events
         self._full_waveform: Optional[torch.Tensor] = None
         self._downsampled_waveform: Optional[np.ndarray] = None
         self._view_start_norm, self._view_end_norm = 0.0, 1.0
@@ -135,9 +136,34 @@ class WaveformDisplayWidget(QWidget):
                 path.lineTo(x, y)
             painter.setPen(QPen(QColor("orange"), 1.5))
             painter.drawPath(path)
+
+        # --- Draw visual handles on top of the selection lines ---
         painter.setPen(QPen(QColor("yellow"), 2))
         painter.drawLine(int(clip_start_x), 0, int(clip_start_x), h)
         painter.drawLine(int(clip_end_x), 0, int(clip_end_x), h)
+
+        # Draw small triangles at the top as grabber handles
+        handle_width = 8
+        handle_height = 8
+        painter.setBrush(QColor("yellow"))
+        painter.setPen(Qt.PenStyle.NoPen)
+
+        # Start handle triangle
+        start_handle_path = QPainterPath()
+        start_handle_path.moveTo(clip_start_x, 0)
+        start_handle_path.lineTo(clip_start_x + handle_width, 0)
+        start_handle_path.lineTo(clip_start_x, handle_height)
+        start_handle_path.closeSubpath()
+        painter.drawPath(start_handle_path)
+
+        # End handle triangle
+        end_handle_path = QPainterPath()
+        end_handle_path.moveTo(clip_end_x, 0)
+        end_handle_path.lineTo(clip_end_x - handle_width, 0)
+        end_handle_path.lineTo(clip_end_x, handle_height)
+        end_handle_path.closeSubpath()
+        painter.drawPath(end_handle_path)
+
         if self._playhead_norm is not None and self._clip_start_norm <= self._playhead_norm <= self._clip_end_norm:
             playhead_x = self.norm_to_pixel(self._playhead_norm)
             painter.setPen(QPen(QColor(100, 255, 100), 2))
@@ -146,8 +172,19 @@ class WaveformDisplayWidget(QWidget):
     def mousePressEvent(self, event):
         if self._full_waveform is None:
             return
+
+        # --- Right-click panning logic ---
+        if event.button() == Qt.MouseButton.RightButton:
+            self._is_panning = True
+            self._last_pan_pos = event.position()
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            event.accept()
+            return
+
         if event.button() == Qt.MouseButton.LeftButton:
             pos_norm = self.pixel_to_norm(event.position().x())
+
+            # --- SELECTION LOGIC ---
             clip_start_x, clip_end_x = self.norm_to_pixel(self._clip_start_norm), self.norm_to_pixel(
                 self._clip_end_norm
             )
@@ -155,30 +192,51 @@ class WaveformDisplayWidget(QWidget):
             is_on_start = abs(event.position().x() - clip_start_x) < handle_width
             is_on_end = abs(event.position().x() - clip_end_x) < handle_width
             is_inside = clip_start_x < event.position().x() < clip_end_x
-            alt_pressed = bool(event.modifiers() & Qt.KeyboardModifier.AltModifier)
+
             if is_on_start:
                 self._drag_mode = "start"
             elif is_on_end:
                 self._drag_mode = "end"
-            elif is_inside and alt_pressed:
+            elif is_inside:
                 self._drag_mode = "move_both"
             else:
                 self._drag_mode = "select"
                 self._clip_start_norm = pos_norm
                 self._clip_end_norm = pos_norm
+
             self._drag_start_x_norm = pos_norm
             self._drag_orig_clip_start, self._drag_orig_clip_end = self._clip_start_norm, self._clip_end_norm
             self.update()
+
             event.accept()
-        elif event.button() == Qt.MouseButton.RightButton:
-            self._is_panning = True
-            self._last_pan_pos = event.position()
-            self.setCursor(Qt.CursorShape.ClosedHandCursor)
-            event.accept()
+            return
+
+        super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
         if self._full_waveform is None:
             return
+
+        # --- cursor feedback when not dragging ---
+        if not self._is_panning and self._drag_mode == "none":
+            is_in_selection_zone = event.position().y() < self.height() / 2
+            if is_in_selection_zone:
+                clip_start_x = self.norm_to_pixel(self._clip_start_norm)
+                clip_end_x = self.norm_to_pixel(self._clip_end_norm)
+                handle_width = 10
+                is_on_start = abs(event.position().x() - clip_start_x) < handle_width
+                is_on_end = abs(event.position().x() - clip_end_x) < handle_width
+                is_inside = clip_start_x < event.position().x() < clip_end_x
+
+                if is_on_start or is_on_end:
+                    self.setCursor(Qt.CursorShape.SizeHorCursor)
+                elif is_inside:
+                    self.setCursor(Qt.CursorShape.PointingHandCursor)
+                else:
+                    self.setCursor(Qt.CursorShape.IBeamCursor)
+            else:
+                self.setCursor(Qt.CursorShape.IBeamCursor)
+
         pos_norm = self.pixel_to_norm(event.position().x())
         if self._is_panning:
             delta_x = event.position().x() - self._last_pan_pos.x()
@@ -209,10 +267,13 @@ class WaveformDisplayWidget(QWidget):
                 )
             self.update()
             event.accept()
+        else:
+            super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
+        # --- Reset cursor on release ---
         if event.button() == Qt.MouseButton.RightButton:
-            self._is_panning, self._drag_mode = False, "none"
+            self._is_panning = False
             self.setCursor(Qt.CursorShape.IBeamCursor)
             event.accept()
         elif event.button() == Qt.MouseButton.LeftButton and self._drag_mode != "none":
@@ -220,7 +281,10 @@ class WaveformDisplayWidget(QWidget):
                 self._clip_start_norm, self._clip_end_norm = self._clip_end_norm, self._clip_start_norm
             self.clipRangeChanged.emit(self._clip_start_norm, self._clip_end_norm)
             self._drag_mode = "none"
+            self.setCursor(Qt.CursorShape.IBeamCursor)
             event.accept()
+        else:
+            super().mouseReleaseEvent(event)
 
     def wheelEvent(self, event):
         if self._full_waveform is None:
@@ -303,7 +367,7 @@ class AdvancedSamplePlayerNodeItem(NodeItem):
         parent = self.scene().views()[0] if self.scene() and self.scene().views() else None
         file_path, _ = QFileDialog.getOpenFileName(parent, "Load Sample", "", "Audio Files (*.wav *.flac *.aiff *.mp3)")
         if file_path:
-            self.node_logic.load_file(file_path)
+            self.node_logic.load_new_file_and_reset(file_path)
 
     @Slot(dict)
     def _on_state_updated(self, state: dict):
@@ -349,7 +413,6 @@ class AdvancedSamplePlayerNode(Node):
         self._start_pos_norm: float = 0.0
         self._end_pos_norm: float = 1.0
         self._last_playhead_update_time: float = 0.0
-        # --- NEW: State variable to hold the last pitch when the trigger was high ---
         self._last_known_pitch_hz: float = self._root_pitch_hz
         self._silence_block = torch.zeros((1, DEFAULT_BLOCKSIZE), dtype=DEFAULT_DTYPE)
         self.loader_signaller = SampleLoadSignaller()
@@ -372,6 +435,11 @@ class AdvancedSamplePlayerNode(Node):
         with self._lock:
             return self._get_current_state_snapshot_locked()
 
+    def load_new_file_and_reset(self, file_path: str):
+        with self._lock:
+            self._start_pos_norm, self._end_pos_norm = 0.0, 1.0
+        self.load_file(file_path)
+
     def load_file(self, file_path: str):
         state_to_emit = None
         with self._lock:
@@ -392,7 +460,6 @@ class AdvancedSamplePlayerNode(Node):
             if status == "success":
                 self._audio_data, self._status = data, "Ready"
                 self._is_playing, self._play_pos = False, 0.0
-                self._start_pos_norm, self._end_pos_norm = 0.0, 1.0
                 self._silence_block = torch.zeros((data.shape[0], DEFAULT_BLOCKSIZE), dtype=DEFAULT_DTYPE)
                 state_to_emit = self._get_current_state_snapshot_locked()
                 state_to_emit["waveform_data"] = self._audio_data.clone()
@@ -416,7 +483,7 @@ class AdvancedSamplePlayerNode(Node):
         state_to_emit = None
         with self._lock:
             self._root_pitch_hz = pitch_hz
-            self._last_known_pitch_hz = pitch_hz  # Also update the latched pitch
+            self._last_known_pitch_hz = pitch_hz
             state_to_emit = self._get_current_state_snapshot_locked()
         if state_to_emit:
             self.emitter.stateUpdated.emit(state_to_emit)
@@ -425,11 +492,9 @@ class AdvancedSamplePlayerNode(Node):
         trigger_socket_val = input_data.get("trigger")
         trigger = bool(trigger_socket_val) if trigger_socket_val is not None else False
         pitch_socket_val = input_data.get("pitch")
-
         output_block, on_end_signal = self._silence_block.clone(), False
         should_process, start_pos_samples, end_pos_samples, current_play_pos = False, 0, 0, 0
-
-        speed_ratio = 1.0  # Default value
+        speed_ratio = 1.0
 
         with self._lock:
             local_audio_data = self._audio_data
@@ -439,28 +504,22 @@ class AdvancedSamplePlayerNode(Node):
 
             # --- PITCH LATCHING LOGIC ---
             if trigger:
-                # If the gate is high, we update our latched pitch from the input if available.
                 if pitch_socket_val is not None:
                     self._last_known_pitch_hz = float(pitch_socket_val)
-            # The speed ratio is ALWAYS calculated from the last known pitch.
             speed_ratio = self._last_known_pitch_hz / self._root_pitch_hz if self._root_pitch_hz != 0 else 1.0
-
             total_frames = local_audio_data.shape[1]
             start_pos_samples, end_pos_samples = int(self._start_pos_norm * total_frames), int(
                 self._end_pos_norm * total_frames
             )
-
             if trigger and not self._prev_trigger:
                 self._is_playing, self._play_pos = True, float(start_pos_samples)
             self._prev_trigger = trigger
-
             should_process = self._is_playing and total_frames > 1
             if should_process:
                 current_play_pos = self._play_pos
                 self._play_pos += DEFAULT_BLOCKSIZE * speed_ratio
                 if self._play_pos >= end_pos_samples:
                     self._is_playing, on_end_signal = False, True
-
         if should_process:
             num_channels_sample, _ = local_audio_data.shape
             indices = current_play_pos + torch.arange(DEFAULT_BLOCKSIZE, dtype=torch.float32) * speed_ratio
@@ -475,7 +534,6 @@ class AdvancedSamplePlayerNode(Node):
                 sample_ceil = local_audio_data.gather(1, indices_ceil.expand(num_channels_sample, -1))
                 interpolated_samples = sample_floor * (1.0 - fraction) + sample_ceil * fraction
                 output_block[:, valid_mask] = interpolated_samples
-
         now = time.monotonic()
         if now > self._last_playhead_update_time + 0.05:
             self._last_playhead_update_time = now
@@ -500,7 +558,7 @@ class AdvancedSamplePlayerNode(Node):
         state_to_emit = None
         with self._lock:
             self._root_pitch_hz = data.get("root_pitch_hz", 261.63)
-            self._last_known_pitch_hz = self._root_pitch_hz  # Ensure latched value is initialized
+            self._last_known_pitch_hz = self._root_pitch_hz
             self._start_pos_norm = data.get("start_pos_norm", 0.0)
             self._end_pos_norm = data.get("end_pos_norm", 1.0)
             state_to_emit = self._get_current_state_snapshot_locked()
