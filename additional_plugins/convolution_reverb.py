@@ -28,7 +28,7 @@ FFT_SIZE = PARTITION_SIZE * 2
 
 
 # ==============================================================================
-# 1. Background IR Loader (Unchanged)
+# 1. Background IR Loader (MODIFIED FOR STEREO)
 # ==============================================================================
 class IRLoadSignaller(QObject):
     load_finished = Signal(tuple)
@@ -49,29 +49,46 @@ class IRLoadRunnable(QRunnable):
         try:
             ir_data_np, source_sr = sf.read(self.file_path, dtype="float32", always_2d=True)
             ir_data = torch.from_numpy(ir_data_np.T).to(DEFAULT_DTYPE)
-            if ir_data.shape[0] > 1:
-                ir_data = torch.mean(ir_data, dim=0, keepdim=True)
+
+            # --- MODIFICATION: Handle stereo/mono IRs ---
+            if ir_data.shape[0] > 2:
+                logger.warning(f"[{node.name}] IR has more than 2 channels. Using only the first two.")
+                ir_data = ir_data[:2, :]
+            num_ir_channels = ir_data.shape[0]
+            # --- END MODIFICATION ---
+
             if source_sr != self.target_sr:
                 resampler = T.Resample(orig_freq=source_sr, new_freq=self.target_sr, dtype=DEFAULT_DTYPE)
                 ir_data = resampler(ir_data)
             max_val = torch.max(torch.abs(ir_data))
             if max_val > 0:
                 ir_data /= max_val
-            ir_samples = ir_data.squeeze(0)
-            num_partitions = int(np.ceil(len(ir_samples) / PARTITION_SIZE))
+
+            # --- MODIFICATION: Process each channel independently ---
+            ir_samples = ir_data
+            num_partitions = int(np.ceil(ir_samples.shape[1] / PARTITION_SIZE))
             padded_len = num_partitions * PARTITION_SIZE
-            pad_amount = padded_len - len(ir_samples)
+            pad_amount = padded_len - ir_samples.shape[1]
             if pad_amount > 0:
                 ir_samples = torch.nn.functional.pad(ir_samples, (0, pad_amount), "constant", 0)
-            partition_ffts = []
-            for i in range(num_partitions):
-                partition = ir_samples[i * PARTITION_SIZE : (i + 1) * PARTITION_SIZE]
-                padded_partition = torch.nn.functional.pad(partition, (0, PARTITION_SIZE), "constant", 0)
-                partition_fft = torch.fft.rfft(padded_partition, n=FFT_SIZE)
-                partition_ffts.append(partition_fft)
-            stacked_ffts = torch.stack(partition_ffts).unsqueeze(1).to(DEFAULT_COMPLEX_DTYPE)
+
+            all_channels_ffts = []
+            for ch_idx in range(num_ir_channels):
+                channel_samples = ir_samples[ch_idx, :]
+                partition_ffts = []
+                for i in range(num_partitions):
+                    partition = channel_samples[i * PARTITION_SIZE : (i + 1) * PARTITION_SIZE]
+                    padded_partition = torch.nn.functional.pad(partition, (0, PARTITION_SIZE), "constant", 0)
+                    partition_fft = torch.fft.rfft(padded_partition, n=FFT_SIZE)
+                    partition_ffts.append(partition_fft)
+                all_channels_ffts.append(torch.stack(partition_ffts))
+
+            # Stack along a new dimension to get (partitions, channels, bins)
+            stacked_ffts = torch.stack(all_channels_ffts, dim=1).to(DEFAULT_COMPLEX_DTYPE)
+            # --- END MODIFICATION ---
+
             logger.info(
-                f"[{node.name}] IR prepared: {len(ir_samples)} samples -> {num_partitions} partitions, shape {stacked_ffts.shape}"
+                f"[{node.name}] IR prepared: {ir_samples.shape[1]} samples -> {num_partitions} partitions, {num_ir_channels} channels. Final FFT shape {stacked_ffts.shape}"
             )
             self.signaller.load_finished.emit(("success", stacked_ffts, self.file_path))
         except Exception as e:
@@ -81,7 +98,7 @@ class IRLoadRunnable(QRunnable):
 
 
 # ==============================================================================
-# 2. Custom UI Class (CORRECTED)
+# 2. Custom UI Class (Unchanged)
 # ==============================================================================
 class ConvolutionReverbNodeItem(ParameterNodeItem):
     """
@@ -91,40 +108,27 @@ class ConvolutionReverbNodeItem(ParameterNodeItem):
     NODE_SPECIFIC_WIDTH = 240
 
     def __init__(self, node_logic: "ConvolutionReverbNode"):
-        # 1. Define standard parameters
         parameters = [
             {"key": "input_gain_db", "name": "Input", "min": -24.0, "max": 24.0, "format": "{:+.1f} dB"},
             {"key": "mix", "name": "Mix", "min": 0.0, "max": 1.0, "format": "{:.0%}"},
             {"key": "output_gain_db", "name": "Output", "min": -24.0, "max": 24.0, "format": "{:+.1f} dB"},
         ]
-
-        # --- FIX: Create custom widgets and assign to self BEFORE calling super().__init__ ---
         self.load_button = QPushButton("Load Impulse Response")
         self.status_label = QLabel("Status: No IR Loaded")
         self.filename_label = QLabel("File: None")
-        # --- END FIX ---
-
-        # 2. Call the parent constructor. This will create the layout and also call
-        #    _on_state_updated, which now works because self.status_label exists.
         super().__init__(node_logic, parameters, width=self.NODE_SPECIFIC_WIDTH)
-
-        # 3. Configure and add the custom widgets to the layout created by the parent.
         self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.filename_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.filename_label.setWordWrap(True)
         self.status_label.setWordWrap(True)
-
         main_layout = self.container_widget.layout()
         main_layout.insertWidget(0, self.filename_label)
         main_layout.insertWidget(0, self.status_label)
         main_layout.insertWidget(0, self.load_button)
-
-        # 4. Connect signals for the custom widgets.
         self.load_button.clicked.connect(self._handle_load_button)
 
     @Slot()
     def _handle_load_button(self):
-        """Handles the file dialog for loading an impulse response."""
         parent = self.scene().views()[0] if self.scene() and self.scene().views() else None
         file_path, _ = QFileDialog.getOpenFileName(
             parent, "Open Impulse Response", "", "Audio Files (*.wav *.flac *.aiff)"
@@ -134,14 +138,9 @@ class ConvolutionReverbNodeItem(ParameterNodeItem):
 
     @Slot(dict)
     def _on_state_updated_from_logic(self, state: dict):
-        """
-        Handles state updates from the logic node for both custom and parent widgets.
-        """
         super()._on_state_updated_from_logic(state)
-        # --- Handle custom widget logic ---
         status = state.get("status", "Unknown")
         self.status_label.setText(f"Status: {status}")
-
         ir_filepath = state.get("ir_filepath")
         if ir_filepath:
             self.filename_label.setText(f"File: {os.path.basename(ir_filepath)}")
@@ -149,7 +148,6 @@ class ConvolutionReverbNodeItem(ParameterNodeItem):
         else:
             self.filename_label.setText("File: None")
             self.filename_label.setToolTip("")
-
         if "Error" in status:
             self.status_label.setStyleSheet("color: red;")
         elif "Loading" in status:
@@ -159,7 +157,7 @@ class ConvolutionReverbNodeItem(ParameterNodeItem):
 
 
 # ==============================================================================
-# 3. Node Logic Class (ConvolutionReverbNode) (Unchanged)
+# 3. Node Logic Class (ConvolutionReverbNode) (MODIFIED FOR STEREO)
 # ==============================================================================
 class ConvolutionReverbNode(Node):
     NODE_TYPE = "Convolution Reverb"
@@ -219,7 +217,8 @@ class ConvolutionReverbNode(Node):
                 self._ir_partitions_fft = data
                 self._status = "Ready"
                 if self._expected_channels is not None:
-                    self._reset_dsp_state_locked(self._expected_channels)
+                    # Force a reset to resize overlap buffer if IR channel count changed
+                    self._is_initialized = False
                 logger.info(f"[{self.name}] IR loaded successfully: {self._ir_partitions_fft.shape}")
             else:
                 self._ir_partitions_fft = None
@@ -264,7 +263,10 @@ class ConvolutionReverbNode(Node):
             )
         else:
             self._input_fft_history = None
-        self._overlap_add_buffer = torch.zeros((num_channels, PARTITION_SIZE), dtype=DEFAULT_DTYPE)
+        # Predict output channels, but process() will resize if it's wrong
+        num_ir_channels = self._ir_partitions_fft.shape[1] if self._ir_partitions_fft is not None else 1
+        num_output_channels = max(num_channels, num_ir_channels)
+        self._overlap_add_buffer = torch.zeros((num_output_channels, PARTITION_SIZE), dtype=DEFAULT_DTYPE)
         self._is_initialized = True
         logger.debug(f"[{self.name}] DSP state reset for {num_channels} channels.")
 
@@ -284,6 +286,7 @@ class ConvolutionReverbNode(Node):
             else:
                 signal = signal[:, :PARTITION_SIZE]
                 logger.warning(f"Input signal truncated from {num_samples} to {PARTITION_SIZE} samples")
+
         with torch.no_grad():
             with self._lock:
                 input_gain_socket = input_data.get("input_gain_db")
@@ -301,27 +304,61 @@ class ConvolutionReverbNode(Node):
                 self._current_input_gain += self._smoothing_coeff * (target_input_gain - self._current_input_gain)
                 self._current_output_gain += self._smoothing_coeff * (target_output_gain - self._current_output_gain)
                 self._current_mix += self._smoothing_coeff * (target_mix - self._current_mix)
+
                 if self._ir_partitions_fft is None:
                     return {"out": signal}
+
                 if not self._is_initialized or self._expected_channels != num_channels:
                     self._reset_dsp_state_locked(num_channels)
                 if self._input_fft_history is None:
                     logger.error("DSP state not properly initialized")
                     return {"out": signal}
+
                 gained_signal = signal * self._current_input_gain
                 padded_input = torch.nn.functional.pad(gained_signal, (0, PARTITION_SIZE), "constant", 0)
                 input_fft = torch.fft.rfft(padded_input, n=FFT_SIZE, dim=1).to(DEFAULT_COMPLEX_DTYPE)
                 self._input_fft_history = torch.roll(self._input_fft_history, shifts=1, dims=0)
                 self._input_fft_history[0] = input_fft
-                convolved_partitions = self._input_fft_history * self._ir_partitions_fft
+
+                # --- MODIFIED: TRUE STEREO CONVOLUTION LOGIC ---
+                input_history_fft = self._input_fft_history
+                ir_partitions_fft = self._ir_partitions_fft
+                num_in_channels = input_history_fft.shape[1]
+                num_ir_channels = ir_partitions_fft.shape[1]
+                num_output_channels = max(num_in_channels, num_ir_channels)
+
+                if num_in_channels < num_output_channels:
+                    input_to_convolve = input_history_fft.repeat(1, num_output_channels, 1)
+                else:
+                    input_to_convolve = input_history_fft
+                if num_ir_channels < num_output_channels:
+                    ir_to_convolve = ir_partitions_fft.repeat(1, num_output_channels, 1)
+                else:
+                    ir_to_convolve = ir_partitions_fft
+
+                convolved_partitions = input_to_convolve * ir_to_convolve
                 output_fft_sum = torch.sum(convolved_partitions, dim=0)
+
+                if self._overlap_add_buffer.shape[0] != num_output_channels:
+                    self._overlap_add_buffer = torch.zeros((num_output_channels, PARTITION_SIZE), dtype=DEFAULT_DTYPE)
+
                 full_ifft = torch.fft.irfft(output_fft_sum, n=FFT_SIZE, dim=1)
-                wet_signal = full_ifft[:, :PARTITION_SIZE] + self._overlap_add_buffer
+                wet_signal_pre_gain = full_ifft[:, :PARTITION_SIZE] + self._overlap_add_buffer
                 self._overlap_add_buffer = full_ifft[:, PARTITION_SIZE:].clone()
-                wet_signal_gained = wet_signal * self._current_output_gain
+                wet_signal = wet_signal_pre_gain * self._current_output_gain
+
+                dry_mix_signal = signal
+                if num_output_channels > num_in_channels:
+                    if num_in_channels == 1:
+                        dry_mix_signal = dry_mix_signal.repeat(num_output_channels, 1)
+                    else:  # Truncate if input has more channels than output
+                        dry_mix_signal = dry_mix_signal[:num_output_channels, :]
+
                 dry_mix = 1.0 - self._current_mix
                 wet_mix = self._current_mix
-                output_signal = (signal * dry_mix) + (wet_signal_gained * wet_mix)
+                output_signal = (dry_mix_signal * dry_mix) + (wet_signal * wet_mix)
+                # --- END MODIFICATION ---
+
         return {"out": output_signal}
 
     def start(self):
