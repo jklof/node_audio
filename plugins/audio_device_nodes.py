@@ -299,6 +299,7 @@ class BaseAudioNode(Node):
         self._user_selected_device_hostapi_name: Optional[str] = None
         self._active_device_info: Optional[Dict[str, Any]] = None
         self._current_status_message = "Status: Uninitialized"
+        self._stop_requested = threading.Event()  # Thread-safe flag to signal termination
 
         self._set_initial_default_device_selection()
         logger.debug(f"[{self.name}] BaseAudioNode initialized.")
@@ -487,18 +488,48 @@ class BaseAudioNode(Node):
         self.ui_update_callback(self._get_current_state_snapshot_locked())
 
     def stop(self):
+        logger.debug(f"[{self.name}] Stopping audio stream...")
         with self._lock:
             if self._stream:
+                # Set the stop flag so callback knows to exit early
+                self._stop_requested.set()
+
                 try:
+                    # Now call stop() - the callback should exit quickly since stop_requested is set
                     self._stream.stop()
-                    self._stream.close()
+                    logger.debug(f"[{self.name}] Stream stopped successfully")
                 except Exception as e:
                     logger.warning(f"[{self.name}] Error stopping stream: {e}")
+                    # Try abort as fallback
+                    try:
+                        self._stream.abort()
+                    except Exception:
+                        pass
+
+                try:
+                    # Always close the stream
+                    self._stream.close()
+                    logger.debug(f"[{self.name}] Stream closed successfully")
+                except Exception as e:
+                    logger.warning(f"[{self.name}] Error closing stream: {e}")
+                    try:
+                        # Last resort: terminate
+                        if hasattr(self._stream, 'terminate'):
+                            self._stream.terminate()
+                    except Exception:
+                        pass
+
+                # Clear the stop flag and reset stream reference
+                self._stop_requested.clear()
                 self._stream = None
+
             self._active_device_info = None
             self._update_status_message("Inactive")
             self._post_stream_stop_actions()
         self.ui_update_callback(self._get_current_state_snapshot_locked())
+        logger.debug(f"[{self.name}] Audio stream stop completed")
+
+
 
     def remove(self):
         self.stop()
@@ -662,6 +693,12 @@ class AudioSinkNode(BaseAudioNode, IClockProvider):
         self._active_stream_channels = self.channels
 
     def _audio_callback_output(self, outdata: np.ndarray, frames: int, time_info, status: sd.CallbackFlags):
+        # Check if stop was requested - allow graceful exit
+        if self._stop_requested.is_set():
+            logger.debug(f"[{self.name}] Stop requested during callback, exiting gracefully")
+            outdata.fill(0)
+            return
+
         if self._tick_callback:
             try:
                 self._tick_callback()
@@ -669,6 +706,12 @@ class AudioSinkNode(BaseAudioNode, IClockProvider):
                 self._stream_error_count += 1
                 if self._stream_error_count < 10:
                     logger.error(f"[{self.name}] Error in graph tick: {e}", exc_info=True)
+
+        # Another check after graph processing in case stop was requested during processing
+        if self._stop_requested.is_set():
+            logger.debug(f"[{self.name}] Stop requested after graph tick, exiting gracefully")
+            outdata.fill(0)
+            return
 
         if status.output_underflow:
             self._underflow_count += 1
