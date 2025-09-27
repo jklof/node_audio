@@ -487,18 +487,28 @@ class BaseAudioNode(Node):
         self.ui_update_callback(self._get_current_state_snapshot_locked())
 
     def stop(self):
+        logger.debug(f"[{self.name}] Stopping audio stream...")
+        stream_to_stop = None
         with self._lock:
             if self._stream:
-                try:
-                    self._stream.stop()
-                    self._stream.close()
-                except Exception as e:
-                    logger.warning(f"[{self.name}] Error stopping stream: {e}")
-                self._stream = None
+                stream_to_stop = self._stream
+
+        if stream_to_stop:
+            try:
+                stream_to_stop.stop()
+                logger.debug(f"[{self.name}] Stream stopped successfully.")
+                stream_to_stop.close()
+                logger.debug(f"[{self.name}] Stream closed successfully.")
+            except Exception as e:
+                logger.warning(f"[{self.name}] Error stopping stream: {e}")
+
+        with self._lock:
+            self._stream = None
             self._active_device_info = None
             self._update_status_message("Inactive")
             self._post_stream_stop_actions()
         self.ui_update_callback(self._get_current_state_snapshot_locked())
+        logger.debug(f"[{self.name}] Audio stream stop completed")
 
     def remove(self):
         self.stop()
@@ -662,6 +672,7 @@ class AudioSinkNode(BaseAudioNode, IClockProvider):
         self._active_stream_channels = self.channels
 
     def _audio_callback_output(self, outdata: np.ndarray, frames: int, time_info, status: sd.CallbackFlags):
+
         if self._tick_callback:
             try:
                 self._tick_callback()
