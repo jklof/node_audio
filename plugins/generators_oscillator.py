@@ -28,7 +28,7 @@ class Waveform(Enum):
 
 
 # ==============================================================================
-# UI Class for the Oscillator Node (REFACTORED)
+# UI Class for the Oscillator Node
 # ==============================================================================
 class OscillatorNodeItem(ParameterNodeItem):
     """
@@ -121,8 +121,30 @@ class OscillatorNode(Node):
         self._frequency: float = 440.0
         self._pulse_width: float = 0.5
 
-        # -- Pre-calculate the phase ramp to avoid allocation in process() ---
+        # --- Pre-computed constants for performance ---
+        self._two_pi = torch.tensor(2 * np.pi, dtype=DEFAULT_DTYPE)
+        self._inv_two_pi = torch.tensor(1.0 / (2 * np.pi), dtype=DEFAULT_DTYPE)
+        self._sr_reciprocal = 1.0 / self.samplerate
+        self._half = torch.tensor(0.5, dtype=DEFAULT_DTYPE)
+        self._neg_half = torch.tensor(-0.5, dtype=DEFAULT_DTYPE)
+        self._two = torch.tensor(2.0, dtype=DEFAULT_DTYPE)
+
+        # --- Pre-allocate buffers to avoid allocation in process() ---
+        self._phase_ramp = None
+        self._phases_buffer = None
+        self._norm_phases_buffer = None
+        self._output_1d_buffer = None
+        self._output_buffer = None
+        self._resize_buffers()  # Initialize buffers on creation
+
+    def _resize_buffers(self):
+        """Initializes or re-initializes all processing buffers."""
+        logger.debug(f"[{self.name}] Resizing internal buffers for blocksize {self.blocksize}.")
         self._phase_ramp = torch.arange(self.blocksize, dtype=DEFAULT_DTYPE)
+        self._phases_buffer = torch.empty(self.blocksize, dtype=DEFAULT_DTYPE)
+        self._norm_phases_buffer = torch.empty(self.blocksize, dtype=DEFAULT_DTYPE)
+        self._output_1d_buffer = torch.empty(self.blocksize, dtype=DEFAULT_DTYPE)
+        self._output_buffer = torch.empty((self.channels, self.blocksize), dtype=DEFAULT_DTYPE)
 
     def _get_state_snapshot_locked(self) -> Dict:
         """Returns a copy of the current parameters for UI synchronization. Assumes lock is held."""
@@ -189,35 +211,44 @@ class OscillatorNode(Node):
         if state_snapshot_to_emit:
             self.ui_update_callback(state_snapshot_to_emit)
 
-        # --- Generate Waveform using PyTorch ---
-        phase_increment = (2 * torch.pi * frequency) / self.samplerate
+        # --- Generate Waveform using pre-allocated buffers and constants ---
+        # --- Use pre-computed reciprocal for division ---
+        phase_increment = frequency * self._two_pi * self._sr_reciprocal
 
-        # Use the pre-calculated phase ramp ---
-        phases = self._phase + self._phase_ramp * phase_increment
+        # Calculate phases for the entire block in-place
+        torch.mul(self._phase_ramp, phase_increment, out=self._phases_buffer)
+        self._phases_buffer.add_(self._phase)
 
-        output_1d = None
-        # Normalize phase to [0, 2*pi) for periodic functions
-        norm_phases = torch.fmod(phases, 2 * torch.pi)
+        # Normalize phases to [0, 2*pi) for periodic functions
+        torch.fmod(self._phases_buffer, self._two_pi, out=self._norm_phases_buffer)
 
+        # --- Waveform generation into pre-allocated 1D buffer ---
         if waveform == Waveform.SINE:
-            output_1d = 0.5 * torch.sin(norm_phases)
+            torch.sin(self._norm_phases_buffer, out=self._output_1d_buffer)
+            self._output_1d_buffer.mul_(self._half)
         elif waveform == Waveform.SQUARE:
-            # Create square wave from -0.5 to 0.5
-            output_1d = torch.where(norm_phases < (2 * torch.pi * pulse_width), 0.5, -0.5)
+            # --- Pre-calculate threshold scalar ---
+            pw_threshold = pulse_width * self._two_pi
+            torch.where(self._norm_phases_buffer < pw_threshold, self._half, self._neg_half, out=self._output_1d_buffer)
         elif waveform == Waveform.SAWTOOTH:
-            # Create sawtooth from -0.5 to 0.5
-            output_1d = (norm_phases / (2 * torch.pi)) - 0.5
+            # (norm_phases * INV_TWO_PI) - 0.5
+            torch.mul(self._norm_phases_buffer, self._inv_two_pi, out=self._output_1d_buffer)
+            self._output_1d_buffer.sub_(self._half)
         elif waveform == Waveform.TRIANGLE:
-            # Create triangle from -0.5 to 0.5
-            output_1d = 2 * torch.abs((norm_phases / (2 * torch.pi)) - 0.5) - 0.5
+            # 2 * abs((norm_phases * INV_TWO_PI) - 0.5) - 0.5
+            torch.mul(self._norm_phases_buffer, self._inv_two_pi, out=self._output_1d_buffer)
+            self._output_1d_buffer.sub_(self._half)
+            torch.abs(self._output_1d_buffer, out=self._output_1d_buffer)
+            self._output_1d_buffer.mul_(self._two)
+            self._output_1d_buffer.sub_(self._half)
 
         # Update phase for the next block
-        self._phase = torch.fmod(phases[-1] + phase_increment, 2 * torch.pi).item()
+        self._phase = torch.fmod(self._phases_buffer[-1] + phase_increment, self._two_pi).item()
 
-        # Tile to match channel count, creating (channels, samples) shape
-        output_2d = output_1d.unsqueeze(0).expand(self.channels, -1)
+        # Expand to match channel count using broadcasting assignment
+        self._output_buffer[:] = self._output_1d_buffer.unsqueeze(0)
 
-        return {"out": output_2d}
+        return {"out": self._output_buffer}
 
     def serialize_extra(self) -> dict:
         with self._lock:
