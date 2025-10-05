@@ -4,3 +4,6 @@ na/
 # Python cache directories
 __pycache__/
 *.pyc
+*.dylib
+*.so
+*.dll

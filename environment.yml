@@ -1,0 +1,28 @@
+name: node-audio-dev
+
+channels:
+  - conda-forge
+  - https://repo.anaconda.com/pkgs/main
+  - https://repo.anaconda.com/pkgs/r
+
+dependencies:
+  - cmake
+  - cxx-compiler
+  - python=3.10
+  - pip
+  - pyside6
+  - pytorch
+  - torchaudio
+  - numpy
+  - pysoundfile
+  - mido
+  - scipy
+  - librosa
+  - onnxruntime
+  - resampy
+
+  - pip:
+    - sounddevice
+    - pydub
+    - pytubefix
+    - pylibrb
