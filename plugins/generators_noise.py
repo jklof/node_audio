@@ -12,7 +12,7 @@ from constants import DEFAULT_DTYPE, DEFAULT_SAMPLERATE, DEFAULT_BLOCKSIZE, DEFA
 
 # --- UI and Qt Imports ---
 from ui_elements import ParameterNodeItem
-from PySide6.QtCore import Slot  # <-- FIXED: Added the missing import for Slot
+from PySide6.QtCore import Slot
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -115,11 +115,15 @@ class NoiseGeneratorNode(Node):
             NoiseType.VIOLET: (b_violet, a_violet),
         }
 
-        # Reset initial filter conditions (zi) for each channel
+        # --- FIXED: Correctly initialize a 2D NumPy array for filter states ---
+        # Each channel needs its own independent state.
         for nt, (b, a) in self._filter_coeffs.items():
-            zi = scipy.signal.lfilter_zi(b, a)
-            # The shape must be (num_channels, filter_order)
-            self._filter_states[nt] = np.tile(zi, (self.channels, 1))
+            # 1. Get the initial state for a single channel.
+            zi_single = scipy.signal.lfilter_zi(b, a)
+            # 2. Create a 2D array of shape (num_channels, filter_order)
+            #    by repeating the single-channel state for each channel.
+            #    This ensures each channel has a separate copy of the state.
+            self._filter_states[nt] = np.array([zi_single] * self.channels)
 
         logger.debug(f"[{self.name}] Filters initialized for {self.channels} channels at {self.samplerate}Hz.")
 
@@ -176,6 +180,8 @@ class NoiseGeneratorNode(Node):
             with self._lock:  # Lock only when accessing shared filter state
                 b, a = self._filter_coeffs[noise_type]
                 zi = self._filter_states[noise_type]
+                # The lfilter function with axis=1 and a 2D zi array correctly
+                # processes each channel independently.
                 processed_signal_np, zf = scipy.signal.lfilter(b, a, white_noise_np, axis=1, zi=zi)
                 self._filter_states[noise_type] = zf
 

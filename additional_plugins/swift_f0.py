@@ -99,8 +99,9 @@ class SwiftF0NodeItem(NodeItem):
             error_label.setWordWrap(True)
             layout.addWidget(error_label)
 
-        self.setContentWidget(self.container_widget) @ Slot(dict)
+        self.setContentWidget(self.container_widget)
 
+    @Slot(dict)
     def _on_state_updated_from_logic(self, state: dict):
         super()._on_state_updated_from_logic(state)
         f0 = state.get("f0_hz")
@@ -159,8 +160,6 @@ class SwiftF0Node(Node):
         self._latest_confidence: float = 0.0
         self._latest_midi_note: Optional[int] = None
         self._latest_gate: bool = False
-
-        # --- FIX: Initialize the missing attribute ---
         self._ui_update_thread: Optional[threading.Thread] = None
         self._stop_ui_thread_event = threading.Event()
 

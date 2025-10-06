@@ -412,11 +412,9 @@ class F0EstimatorNode(Node):
                         self._smoothed_f0 = raw_f0
                     output_f0 = self._smoothed_f0
                 else:
-                    if self._smoothed_f0 > 0:
-                        self._smoothed_f0 *= 1 - F0_SMOOTHING_ALPHA * 2
-                        if self._smoothed_f0 < 10:
-                            self._smoothed_f0 = 0.0
-                    output_f0 = 0.0
+                    # Explicitly target 0 when unvoiced
+                    self._smoothed_f0 = (1 - F0_SMOOTHING_ALPHA) * self._smoothed_f0
+                    output_f0 = self._smoothed_f0
 
                 output_confidence = confidence
                 self._latest_f0_hz = output_f0

@@ -79,9 +79,9 @@ class Connection:
 class Node:
     """Base class for all processing nodes."""
 
-    NODE_TYPE = "Base Node"
-    UI_CLASS = None
-    CATEGORY = "Uncategorized"
+    UI_CLASS = None  # The class used for the node's UI representation
+    NODE_TYPE = None  # Nodes name, e.g. "Oscillator", "Filter"
+    CATEGORY = None  # E.g. "Sources", "Effects", "Synthesis"
     DESCRIPTION = ""
 
     def __init__(self, name: str, node_id: str | None = None):

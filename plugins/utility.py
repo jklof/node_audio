@@ -515,7 +515,7 @@ class GainNode(Node):
             else:
                 current_gain_db = self._gain_db
         if state_snapshot_to_emit:
-            self.ui_update_callback(state_to_emit)
+            self.ui_update_callback(state_snapshot_to_emit)
 
         amplitude_factor = 10.0 ** (np.clip(current_gain_db, -120.0, 60.0) / 20.0)
         output_signal = signal * amplitude_factor

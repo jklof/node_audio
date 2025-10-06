@@ -121,8 +121,7 @@ def scan_and_load_plugins(plugin_dirs: list[str], clear_registry: bool = True) -
 
                     # Inspect and register node classes from the module.
                     for _, obj in inspect.getmembers(module, inspect.isclass):
-                        if issubclass(obj, Node) and obj is not Node:
-                            registry.register_node_type(obj)
+                        registry.register_node_type(obj)
 
                     if module_name not in _loaded_plugin_modules:
                         _loaded_plugin_modules.append(module_name)

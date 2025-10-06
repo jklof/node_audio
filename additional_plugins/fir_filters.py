@@ -244,11 +244,11 @@ class LinearPhaseEQNode(Node):
 
     def serialize_extra(self) -> Dict:
         with self._lock:
-            return {"filter_type": self._filter_type, "freq": self._cutoff_freq, "q": self._q}
+            return {"filter_type": self._filter_type, "cutoff_freq": self._cutoff_freq, "q": self._q}
 
     def deserialize_extra(self, data: Dict):
         with self._lock:
             self._filter_type = data.get("filter_type", "Low Pass")
-            self._cutoff_freq = data.get("freq", 1000.0)
+            self._cutoff_freq = data.get("cutoff_freq", 1000.0)
             self._q = data.get("q", 1.0)
             self._params_dirty = True
