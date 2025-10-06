@@ -205,6 +205,10 @@ class YouTubePlayerNode(Node):
         self._ffmpeg_process: Optional[subprocess.Popen] = None
         self._audio_buffer = deque()
 
+        # --- MODIFICATION: Store thread references for graceful shutdown ---
+        self._audio_thread: Optional[threading.Thread] = None
+        self._video_thread: Optional[threading.Thread] = None
+
         # --- Explicit State Variables ---
         self._playback_state = PlaybackState.STOPPED
         self._url: str = ""
@@ -215,10 +219,6 @@ class YouTubePlayerNode(Node):
         self._seek_request_s: float = -1.0
 
     def _get_state_snapshot_locked(self) -> Dict:
-        """
-        Constructs a consistent state dictionary from internal variables
-        while the lock is held.
-        """
         return {
             "state": self._playback_state,
             "url": self._url,
@@ -304,20 +304,57 @@ class YouTubePlayerNode(Node):
         super().remove()
 
     def _stop_worker(self):
-        if self._worker_thread and self._worker_thread.is_alive():
-            self._stop_event.set()
-            if self._ffmpeg_process:
-                self._ffmpeg_process.terminate()
-                try:
-                    self._ffmpeg_process.wait(timeout=1.0)
-                except subprocess.TimeoutExpired:
-                    self._ffmpeg_process.kill()
-            self._worker_thread.join(timeout=2.0)
-        self._worker_thread = None
-        self._ffmpeg_process = None
+        # --- MODIFICATION: New graceful shutdown logic ---
+        # Signal all loops to stop
+        self._stop_event.set()
+
+        # Get local references to threads and process under a lock
+        proc_to_stop = self._ffmpeg_process
+        audio_thread_to_join = self._audio_thread
+        video_thread_to_join = self._video_thread
+        worker_thread_to_join = self._worker_thread
+
+        # Gracefully shut down the ffmpeg process by closing its pipes
+        if proc_to_stop:
+            try:
+                # Closing stdout will cause ffmpeg's audio write to fail with SIGPIPE
+                if proc_to_stop.stdout:
+                    proc_to_stop.stdout.close()
+                # Closing stderr will cause ffmpeg's video write to fail
+                if proc_to_stop.stderr:
+                    proc_to_stop.stderr.close()
+            except Exception as e:
+                logger.warning(f"[{self.name}] Error closing ffmpeg pipes: {e}")
+
+        # Now that the data source is stopped, wait for reader threads to finish draining pipes
+        if audio_thread_to_join and audio_thread_to_join.is_alive():
+            audio_thread_to_join.join(timeout=2.0)
+        if video_thread_to_join and video_thread_to_join.is_alive():
+            video_thread_to_join.join(timeout=2.0)
+        
+        # Wait for the main worker loop to finish
+        if worker_thread_to_join and worker_thread_to_join.is_alive():
+            worker_thread_to_join.join(timeout=2.0)
+
+        # As a final measure, ensure the ffmpeg process has exited
+        if proc_to_stop and proc_to_stop.poll() is None:
+            logger.warning(f"[{self.name}] Ffmpeg did not exit after pipe close, forcing termination.")
+            try:
+                proc_to_stop.kill()
+                proc_to_stop.wait(timeout=2.0)
+            except Exception as e:
+                logger.error(f"[{self.name}] Error during final ffmpeg kill: {e}")
+
+        # Clear all state variables
         with self._lock:
+            self._worker_thread = None
+            self._audio_thread = None
+            self._video_thread = None
+            self._ffmpeg_process = None
             self._audio_buffer.clear()
             self._seek_request_s = -1.0
+        
+        logger.info(f"[{self.name}] Worker and all subprocesses stopped.")
 
     def _get_youtube_info(self, url: str) -> Optional[Tuple[str, float, str, Stream]]:
         try:
@@ -346,13 +383,13 @@ class YouTubePlayerNode(Node):
             if is_paused_or_full:
                 time.sleep(0.01)
                 continue
+            
+            # This read will block until data is available or the pipe is closed
             raw_audio = pipe.read(FFMPEG_AUDIO_CHUNK_SIZE)
-            if not raw_audio:
+            if not raw_audio: # Pipe was closed from the other end
                 break
 
-            # --- FIX: Create a writable copy of the numpy array ---
             audio_array_np = np.frombuffer(raw_audio, dtype=np.int16).copy()
-
             audio_tensor = torch.from_numpy(audio_array_np).to(DEFAULT_DTYPE) / 32768.0
             num_samples = audio_tensor.shape[0] // 2
             if num_samples == 0:
@@ -387,16 +424,18 @@ class YouTubePlayerNode(Node):
             self.video_emitter.emit_video_frame(
                 QImage(raw_frame, VIDEO_WIDTH, VIDEO_HEIGHT, QImage.Format.Format_ARGB32).copy()
             )
+            # Rough frame rate limiting
             time.sleep(1 / 20)
         logger.info(f"[{self.name}] Video reader thread finished.")
 
     def _end_of_stream_actions(self, final_playback_time_s: float):
         state_to_emit = None
         with self._lock:
-            if abs(final_playback_time_s - self._duration_s) <= 0.5 and self._duration_s > 0:
+            # Check if we naturally reached the end of the stream (and aren't in a stop/seek process)
+            if abs(final_playback_time_s - self._duration_s) <= 1.0 and self._duration_s > 0 and self._seek_request_s == -1.0:
                 logger.info(f"[{self.name}] End of video reached, looping.")
                 self._seek_request_s, self._position_s = 0.0, 0.0
-                self._playback_state = PlaybackState.PLAYING
+                # Don't change playback state, let the main loop restart ffmpeg
             elif not self._stop_event.is_set():
                 self._playback_state, self._position_s = PlaybackState.STOPPED, final_playback_time_s
             else:
@@ -411,6 +450,7 @@ class YouTubePlayerNode(Node):
         info = self._get_youtube_info(url)
         if not info:
             with self._lock:
+                self._playback_state = PlaybackState.ERROR
                 state_to_emit = self._get_state_snapshot_locked()
             self.ui_update_callback(state_to_emit)
             return
@@ -427,85 +467,78 @@ class YouTubePlayerNode(Node):
                 if self._seek_request_s != -1.0:
                     start_time, self._seek_request_s = self._seek_request_s, -1.0
                     self._audio_buffer.clear()
-                elif not self._ffmpeg_process:
+                else:
                     start_time = self._position_s
-                    if start_time >= self._duration_s and self._duration_s > 0:
-                        start_time = 0.0
+                
+                if start_time >= self._duration_s and self._duration_s > 0:
+                    start_time = 0.0
+
                 if self._playback_state != PlaybackState.PAUSED:
                     self._playback_state = PlaybackState.BUFFERING
                     state_to_emit = self._get_state_snapshot_locked()
             self.ui_update_callback(state_to_emit)
 
             ffmpeg_cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error"]
-            if start_time > 0:
+            if start_time > 0.1: # Add a small tolerance
                 ffmpeg_cmd.extend(["-ss", str(start_time)])
             ffmpeg_cmd.extend(
                 [
                     "-i",
                     stream_url,
-                    "-f",
-                    "s16le",
-                    "-ac",
-                    "2",
-                    "-ar",
-                    str(DEFAULT_SAMPLERATE),
-                    "-c:a",
-                    "pcm_s16le",
-                    "pipe:1",
-                    "-f",
-                    "rawvideo",
-                    "-pix_fmt",
-                    "bgra",
-                    "-vf",
-                    f"scale={VIDEO_WIDTH}:{VIDEO_HEIGHT}",
-                    "-r",
-                    "15",
-                    "-c:v",
-                    "rawvideo",
-                    "pipe:2",
+                    "-f", "s16le", "-ac", "2", "-ar", str(DEFAULT_SAMPLERATE), "-c:a", "pcm_s16le", "pipe:1",
+                    "-f", "rawvideo", "-pix_fmt", "bgra", "-vf", f"scale={VIDEO_WIDTH}:{VIDEO_HEIGHT}", "-r", "15", "-c:v", "rawvideo", "pipe:2",
                 ]
             )
 
+            proc = None
             try:
                 flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+                proc = subprocess.Popen(
+                    ffmpeg_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=flags
+                )
                 with self._lock:
-                    self._ffmpeg_process = subprocess.Popen(
-                        ffmpeg_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=flags
-                    )
-                if not self._ffmpeg_process:
-                    raise RuntimeError("Failed to start FFMPEG.")
+                    self._ffmpeg_process = proc
 
-                audio_thread = threading.Thread(
-                    target=self._audio_reader_thread, args=(self._ffmpeg_process.stdout, start_time), daemon=True
+                # --- MODIFICATION: Store thread references ---
+                self._audio_thread = threading.Thread(
+                    target=self._audio_reader_thread, args=(proc.stdout, start_time), daemon=True
                 )
-                video_thread = threading.Thread(
-                    target=self._video_reader_thread, args=(self._ffmpeg_process.stderr,), daemon=True
+                self._video_thread = threading.Thread(
+                    target=self._video_reader_thread, args=(proc.stderr,), daemon=True
                 )
-                audio_thread.start()
-                video_thread.start()
+                self._audio_thread.start()
+                self._video_thread.start()
 
-                while self._ffmpeg_process.poll() is None and not self._stop_event.is_set():
+                # Main loop now just waits for something to change
+                while proc.poll() is None and not self._stop_event.is_set():
                     with self._lock:
                         if self._seek_request_s != -1.0:
                             break
                     time.sleep(0.1)
+
             except Exception as e:
                 logger.error(f"[{self.name}] FFmpeg error: {e}", exc_info=True)
                 with self._lock:
                     self._playback_state, self._error_message = PlaybackState.ERROR, f"Stream error: {e}"
                 break
             finally:
-                if self._ffmpeg_process:
-                    self._ffmpeg_process.terminate()
-                if "audio_thread" in locals() and audio_thread.is_alive():
-                    audio_thread.join(timeout=1.0)
-                if "video_thread" in locals() and video_thread.is_alive():
-                    video_thread.join(timeout=1.0)
+                # --- MODIFICATION: Cleanup logic for seeks/loops ---
+                if proc:
+                    # If we are stopping globally, _stop_worker handles this.
+                    # If we are just seeking, we need to clean up the old process.
+                    if not self._stop_event.is_set() and proc.poll() is None:
+                        proc.terminate()
+                
+                if self._audio_thread and self._audio_thread.is_alive():
+                    self._audio_thread.join(timeout=1.0)
+                if self._video_thread and self._video_thread.is_alive():
+                    self._video_thread.join(timeout=1.0)
+
                 with self._lock:
                     self._ffmpeg_process = None
-                if self._stop_event.is_set():
-                    break
-
+                    self._audio_thread = None
+                    self._video_thread = None
+                
         logger.info(f"[{self.name}] Main worker loop finished.")
         with self._lock:
             if self._playback_state != PlaybackState.ERROR:
