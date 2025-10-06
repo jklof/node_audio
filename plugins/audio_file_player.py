@@ -82,15 +82,6 @@ class AudioFilePlayerNodeItem(NodeItem):
         self.play_pause_button.clicked.connect(self._on_play_pause_clicked)
         self.seek_slider.sliderReleased.connect(self._on_seek)
 
-    @Slot()
-    def updateFromLogic(self):
-        """
-        Pulls the current state from the logic node to initialize the UI.
-        """
-        state = self.node_logic.get_current_state_snapshot()
-        self._on_playback_state_changed(state)
-        super().updateFromLogic()
-
     def _format_time(self, seconds: float) -> str:
         if seconds < 0:
             return "00:00"
@@ -119,7 +110,9 @@ class AudioFilePlayerNodeItem(NodeItem):
         self.node_logic.seek(seek_proportion)
 
     @Slot(dict)
-    def _on_playback_state_changed(self, state: Dict):
+    def _on_state_updated_from_logic(self, state: Dict):
+        super()._on_state_updated_from_logic(state)  # Call parent method
+
         playback_state = state.get("state")
         has_file = state.get("file_path") is not None
 
@@ -220,7 +213,7 @@ class AudioFilePlayerNode(Node):
             state_to_emit = self._update_state_snapshot_locked(state=self._playback_state)
 
         if state_to_emit:
-            self.emitter.stateUpdated.emit(state_to_emit)
+            self.ui_update_callback(state_to_emit)
 
     def seek(self, proportion: float):
         with self._lock:
@@ -230,12 +223,6 @@ class AudioFilePlayerNode(Node):
 
     def _get_state_snapshot_locked(self) -> Dict:
         return self._state_snapshot.copy()
-
-    def emit_initial_state(self):
-        """Emits the current state for UI initialization."""
-        with self._lock:
-            state = self._state_snapshot.copy()
-        self.emitter.stateUpdated.emit(state)
 
     def start(self):
         super().start()
@@ -249,7 +236,7 @@ class AudioFilePlayerNode(Node):
                 logger.info(f"[{self.name}] Graph started. Node is active but will remain paused.")
 
         if state_to_emit:
-            self.emitter.stateUpdated.emit(state_to_emit)
+            self.ui_update_callback(state_to_emit)
 
     def stop(self):
         super().stop()
@@ -261,7 +248,7 @@ class AudioFilePlayerNode(Node):
                 state_to_emit = self._update_state_snapshot_locked(state=self._playback_state)
 
         if state_to_emit:
-            self.emitter.stateUpdated.emit(state_to_emit)
+            self.ui_update_callback(state_to_emit)
 
     def remove(self):
         logger.info(f"[{self.name}] Remove called. Stopping worker thread.")
@@ -326,7 +313,7 @@ class AudioFilePlayerNode(Node):
                     )
 
                 if state_to_emit:
-                    self.emitter.stateUpdated.emit(state_to_emit)
+                    self.ui_update_callback(state_to_emit)
 
                 if initial_seek_seconds > 0 and duration > 0:
                     seek_proportion = min(1.0, initial_seek_seconds / duration)
@@ -339,7 +326,7 @@ class AudioFilePlayerNode(Node):
                             position=(current_frame / file_info["samplerate"])
                         )
                     if state_to_emit:
-                        self.emitter.stateUpdated.emit(state_to_emit)
+                        self.ui_update_callback(state_to_emit)
 
                 last_ui_update_time = 0
                 while not self._stop_event.is_set():
@@ -398,7 +385,7 @@ class AudioFilePlayerNode(Node):
                                 position=position, state=current_playback_state
                             )
                         if state_to_emit:
-                            self.emitter.stateUpdated.emit(state_to_emit)
+                            self.ui_update_callback(state_to_emit)
                         last_ui_update_time = now
 
         except Exception as e:
@@ -407,9 +394,9 @@ class AudioFilePlayerNode(Node):
                 state_to_emit = self._update_state_snapshot_locked(state=PlaybackState.ERROR, file_path=self._file_path)
             if state_to_emit:
                 try:
-                    self.emitter.stateUpdated.emit(state_to_emit)
+                    self.ui_update_callback(state_to_emit)
                 except RuntimeError:
-                    logger.debug(f"[{self.name}] Emitter deleted before final error state could be sent.")
+                    logger.debug(f"[{self.name}] UI callback failed before final error state could be sent.")
 
         logger.info(f"[{self.name}] File reader thread finished.")
         with self._lock:
@@ -417,9 +404,9 @@ class AudioFilePlayerNode(Node):
                 state_to_emit = self._update_state_snapshot_locked(state=PlaybackState.STOPPED, position=0.0)
         if state_to_emit:
             try:
-                self.emitter.stateUpdated.emit(state_to_emit)
+                self.ui_update_callback(state_to_emit)
             except RuntimeError:
-                logger.debug(f"[{self.name}] Emitter deleted before final stopped state could be sent.")
+                logger.debug(f"[{self.name}] UI callback failed before final stopped state could be sent.")
 
     def serialize_extra(self) -> dict:
         with self._lock:
