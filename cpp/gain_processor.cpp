@@ -7,8 +7,7 @@
     #define PLUGIN_API extern "C"
 #endif
 
-
-// The actual DSP logic class
+// - The actual DSP logic class
 class GainProcessor {
 public:
     GainProcessor() : gain_factor(1.0f) {}
@@ -29,7 +28,6 @@ private:
 };
 
 // The C-style API that Python will talk to
-// Returns a pointer to a new instance
 PLUGIN_API void* create_processor() {
     return new GainProcessor();
 }

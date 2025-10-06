@@ -331,7 +331,7 @@ class YouTubePlayerNode(Node):
             audio_thread_to_join.join(timeout=2.0)
         if video_thread_to_join and video_thread_to_join.is_alive():
             video_thread_to_join.join(timeout=2.0)
-        
+
         # Wait for the main worker loop to finish
         if worker_thread_to_join and worker_thread_to_join.is_alive():
             worker_thread_to_join.join(timeout=2.0)
@@ -353,7 +353,7 @@ class YouTubePlayerNode(Node):
             self._ffmpeg_process = None
             self._audio_buffer.clear()
             self._seek_request_s = -1.0
-        
+
         logger.info(f"[{self.name}] Worker and all subprocesses stopped.")
 
     def _get_youtube_info(self, url: str) -> Optional[Tuple[str, float, str, Stream]]:
@@ -383,10 +383,10 @@ class YouTubePlayerNode(Node):
             if is_paused_or_full:
                 time.sleep(0.01)
                 continue
-            
+
             # This read will block until data is available or the pipe is closed
             raw_audio = pipe.read(FFMPEG_AUDIO_CHUNK_SIZE)
-            if not raw_audio: # Pipe was closed from the other end
+            if not raw_audio:  # Pipe was closed from the other end
                 break
 
             audio_array_np = np.frombuffer(raw_audio, dtype=np.int16).copy()
@@ -432,7 +432,11 @@ class YouTubePlayerNode(Node):
         state_to_emit = None
         with self._lock:
             # Check if we naturally reached the end of the stream (and aren't in a stop/seek process)
-            if abs(final_playback_time_s - self._duration_s) <= 1.0 and self._duration_s > 0 and self._seek_request_s == -1.0:
+            if (
+                abs(final_playback_time_s - self._duration_s) <= 1.0
+                and self._duration_s > 0
+                and self._seek_request_s == -1.0
+            ):
                 logger.info(f"[{self.name}] End of video reached, looping.")
                 self._seek_request_s, self._position_s = 0.0, 0.0
                 # Don't change playback state, let the main loop restart ffmpeg
@@ -469,7 +473,7 @@ class YouTubePlayerNode(Node):
                     self._audio_buffer.clear()
                 else:
                     start_time = self._position_s
-                
+
                 if start_time >= self._duration_s and self._duration_s > 0:
                     start_time = 0.0
 
@@ -479,23 +483,39 @@ class YouTubePlayerNode(Node):
             self.ui_update_callback(state_to_emit)
 
             ffmpeg_cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error"]
-            if start_time > 0.1: # Add a small tolerance
+            if start_time > 0.1:  # Add a small tolerance
                 ffmpeg_cmd.extend(["-ss", str(start_time)])
             ffmpeg_cmd.extend(
                 [
                     "-i",
                     stream_url,
-                    "-f", "s16le", "-ac", "2", "-ar", str(DEFAULT_SAMPLERATE), "-c:a", "pcm_s16le", "pipe:1",
-                    "-f", "rawvideo", "-pix_fmt", "bgra", "-vf", f"scale={VIDEO_WIDTH}:{VIDEO_HEIGHT}", "-r", "15", "-c:v", "rawvideo", "pipe:2",
+                    "-f",
+                    "s16le",
+                    "-ac",
+                    "2",
+                    "-ar",
+                    str(DEFAULT_SAMPLERATE),
+                    "-c:a",
+                    "pcm_s16le",
+                    "pipe:1",
+                    "-f",
+                    "rawvideo",
+                    "-pix_fmt",
+                    "bgra",
+                    "-vf",
+                    f"scale={VIDEO_WIDTH}:{VIDEO_HEIGHT}",
+                    "-r",
+                    "15",
+                    "-c:v",
+                    "rawvideo",
+                    "pipe:2",
                 ]
             )
 
             proc = None
             try:
                 flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
-                proc = subprocess.Popen(
-                    ffmpeg_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=flags
-                )
+                proc = subprocess.Popen(ffmpeg_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=flags)
                 with self._lock:
                     self._ffmpeg_process = proc
 
@@ -528,7 +548,7 @@ class YouTubePlayerNode(Node):
                     # If we are just seeking, we need to clean up the old process.
                     if not self._stop_event.is_set() and proc.poll() is None:
                         proc.terminate()
-                
+
                 if self._audio_thread and self._audio_thread.is_alive():
                     self._audio_thread.join(timeout=1.0)
                 if self._video_thread and self._video_thread.is_alive():
@@ -538,7 +558,7 @@ class YouTubePlayerNode(Node):
                     self._ffmpeg_process = None
                     self._audio_thread = None
                     self._video_thread = None
-                
+
         logger.info(f"[{self.name}] Main worker loop finished.")
         with self._lock:
             if self._playback_state != PlaybackState.ERROR:

@@ -1,10 +1,15 @@
 cmake_minimum_required(VERSION 3.15)
 project(gain_processor CXX)
 
-# Create the shared library (.dll/.so)
+# --- Target Definition ---
 add_library(gain_processor SHARED gain_processor.cpp)
 
-# --- CRITICAL PART ---
-# Tell CMake where to put the final .dll or .so file.
-# We want it right next to the Python plugin that will use it.
-set(LIBRARY_OUTPUT_PATH "${PROJECT_SOURCE_DIR}/../plugins")
+set_target_properties(gain_processor PROPERTIES
+    # General output directory for the DLL/shared library
+    RUNTIME_OUTPUT_DIRECTORY "${PROJECT_SOURCE_DIR}/../plugins"
+    
+    # Explicitly set the output directory for the RELEASE configuration
+    # This is the key that overrides MSBuild's default of adding "/Release"
+    RUNTIME_OUTPUT_DIRECTORY_RELEASE "${PROJECT_SOURCE_DIR}/../plugins"
+)
+

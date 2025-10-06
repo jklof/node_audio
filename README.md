@@ -15,5 +15,5 @@ conda env remove --name node-audio-dev
 # 1. Triggers scikit-build-core, which runs CMake to compile your C++ code.
 # 2. Installs your Python package in a way that any changes to the .py
 #    files are immediately reflected without needing to reinstall.
-pip install -e .
+pip install -e . -v
 
