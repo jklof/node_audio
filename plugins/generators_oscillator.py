@@ -134,7 +134,6 @@ class OscillatorNode(Node):
         self._phases_buffer = None
         self._norm_phases_buffer = None
         self._output_1d_buffer = None
-        self._output_buffer = None
         self._resize_buffers()  # Initialize buffers on creation
 
     def _resize_buffers(self):
@@ -144,7 +143,6 @@ class OscillatorNode(Node):
         self._phases_buffer = torch.empty(self.blocksize, dtype=DEFAULT_DTYPE)
         self._norm_phases_buffer = torch.empty(self.blocksize, dtype=DEFAULT_DTYPE)
         self._output_1d_buffer = torch.empty(self.blocksize, dtype=DEFAULT_DTYPE)
-        self._output_buffer = torch.empty((self.channels, self.blocksize), dtype=DEFAULT_DTYPE)
 
     def _get_state_snapshot_locked(self) -> Dict:
         """Returns a copy of the current parameters for UI synchronization. Assumes lock is held."""
@@ -212,7 +210,6 @@ class OscillatorNode(Node):
             self.ui_update_callback(state_snapshot_to_emit)
 
         # --- Generate Waveform using pre-allocated buffers and constants ---
-        # --- Use pre-computed reciprocal for division ---
         phase_increment = frequency * self._two_pi * self._sr_reciprocal
 
         # Calculate phases for the entire block in-place
@@ -227,15 +224,12 @@ class OscillatorNode(Node):
             torch.sin(self._norm_phases_buffer, out=self._output_1d_buffer)
             self._output_1d_buffer.mul_(self._half)
         elif waveform == Waveform.SQUARE:
-            # --- Pre-calculate threshold scalar ---
             pw_threshold = pulse_width * self._two_pi
             torch.where(self._norm_phases_buffer < pw_threshold, self._half, self._neg_half, out=self._output_1d_buffer)
         elif waveform == Waveform.SAWTOOTH:
-            # (norm_phases * INV_TWO_PI) - 0.5
             torch.mul(self._norm_phases_buffer, self._inv_two_pi, out=self._output_1d_buffer)
             self._output_1d_buffer.sub_(self._half)
         elif waveform == Waveform.TRIANGLE:
-            # 2 * abs((norm_phases * INV_TWO_PI) - 0.5) - 0.5
             torch.mul(self._norm_phases_buffer, self._inv_two_pi, out=self._output_1d_buffer)
             self._output_1d_buffer.sub_(self._half)
             torch.abs(self._output_1d_buffer, out=self._output_1d_buffer)
@@ -245,10 +239,11 @@ class OscillatorNode(Node):
         # Update phase for the next block
         self._phase = torch.fmod(self._phases_buffer[-1] + phase_increment, self._two_pi).item()
 
-        # Expand to match channel count using broadcasting assignment
-        self._output_buffer[:] = self._output_1d_buffer.unsqueeze(0)
+        # Create the final output tensor by creating a view and then cloning it for safety.
+        # This is more efficient than writing to an intermediate multi-channel buffer first.
+        output_signal = self._output_1d_buffer.unsqueeze(0).expand(self.channels, -1).clone()
 
-        return {"out": self._output_buffer}
+        return {"out": output_signal}
 
     def serialize_extra(self) -> dict:
         with self._lock:
