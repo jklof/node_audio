@@ -56,7 +56,16 @@ class FFINodeBase(Node):
 
         self.lib = ctypes.CDLL(lib_path)
 
-        for func_name, signature in self.API.items():
+        # create and remove are required for lifecycle management
+        API = dict(self.API)
+        API.update(
+            {
+                "create_handle": {"restype": ctypes.c_void_p},
+                "delete_handle": {"argtypes": [ctypes.c_void_p]},
+            }
+        )
+
+        for func_name, signature in API.items():
             try:
                 c_func = getattr(self.lib, func_name)
                 c_func.restype = signature.get("restype")
@@ -64,14 +73,15 @@ class FFINodeBase(Node):
             except AttributeError:
                 raise RuntimeError(f"Function '{func_name}' not found in library '{self.LIB_NAME}'.")
 
-        self.dsp_handle = self.lib.create_processor()
+        # create the handle
+        self.dsp_handle = self.lib.create_handle()
         if not self.dsp_handle:
-            raise RuntimeError(f"create_processor() failed in library '{self.LIB_NAME}'.")
+            raise RuntimeError(f"Failed to create DSP handle in library '{self.LIB_NAME}'.")
 
     def remove(self):
         """Ensures the C++ object is destroyed when the node is removed."""
         if self.lib and self.dsp_handle:
-            self.lib.destroy_processor(self.dsp_handle)
+            self.lib.delete_handle(self.dsp_handle)
             self.dsp_handle = None
         super().remove()
 

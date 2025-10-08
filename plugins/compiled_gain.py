@@ -52,8 +52,6 @@ class CompiledGainNode(FFINodeBase):
     # The FFINodeBase class will use this to find the library and bind the functions.
     LIB_NAME = "gain_processor"
     API = {
-        "create_processor": {"restype": ctypes.c_void_p},
-        "destroy_processor": {"argtypes": [ctypes.c_void_p]},
         "set_gain_db": {"argtypes": [ctypes.c_void_p, ctypes.c_float]},
         "process_block": {"argtypes": [ctypes.c_void_p, ctypes.POINTER(ctypes.c_float), ctypes.c_int, ctypes.c_int]},
     }

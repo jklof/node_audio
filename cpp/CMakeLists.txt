@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.15)
-project(gain_processor CXX)
+project(node_audio_plugins CXX)
 
 # --- Reusable function to copy target to directory ---
 function(copy_target_to_directory target_name destination_dir)
@@ -12,11 +12,13 @@ function(copy_target_to_directory target_name destination_dir)
     )
 endfunction()
 
-# --- Target Definition ---
-add_library(gain_processor SHARED gain_processor.cpp)
-
-# Define the target directory
+# --- Target Directory (plugins need to be next to their Python wrappers) ---
 set(TARGET_DIR "${PROJECT_SOURCE_DIR}/../plugins")
 
-# Use the reusable function
+# --- Target: Gain Processor ---
+add_library(gain_processor SHARED gain_processor.cpp)
 copy_target_to_directory(gain_processor "${TARGET_DIR}")
+
+# --- NEW Target: Delay Processor ---
+add_library(delay_processor SHARED delay_processor.cpp)
+copy_target_to_directory("delay_processor" "${PROJECT_SOURCE_DIR}/../additional_plugins")

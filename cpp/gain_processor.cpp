@@ -28,8 +28,17 @@ private:
 };
 
 // The C-style API that Python will talk to
-PLUGIN_API void* create_processor() {
+
+// create the instance (required)
+PLUGIN_API void* create_handle() {
     return new GainProcessor();
+}
+
+// cleans up the instance (required)
+PLUGIN_API void remove_handle(void* handle) {
+    if (handle) {
+        delete static_cast<GainProcessor*>(handle);
+    }
 }
 
 // Sets a parameter on an existing instance
@@ -43,12 +52,5 @@ PLUGIN_API void set_gain_db(void* handle, float db) {
 PLUGIN_API void process_block(void* handle, float* buffer, int num_channels, int num_samples) {
     if (handle) {
         static_cast<GainProcessor*>(handle)->process(buffer, num_channels, num_samples);
-    }
-}
-
-// Cleans up the instance
-PLUGIN_API void destroy_processor(void* handle) {
-    if (handle) {
-        delete static_cast<GainProcessor*>(handle);
     }
 }
