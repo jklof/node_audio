@@ -85,8 +85,8 @@ public:
 
             for (int ch = 0; ch < num_channels; ++ch) {
                 // --- 2. Read from delay buffer with interpolation ---
-                float sample1 = _delay_buffer[index_floor * _max_channels + ch];
-                float sample2 = _delay_buffer[index_ceil * _max_channels + ch];
+                float sample1 = _delay_buffer[ch * _buffer_size + index_floor];
+                float sample2 = _delay_buffer[ch * _buffer_size + index_ceil];
                 float delayed_sample = sample1 * (1.0f - fraction) + sample2 * fraction;
 
                 float dry_sample = in_channels[ch][i];
@@ -96,7 +96,7 @@ public:
 
                 // --- 4. Create feedback signal and write to buffer ---
                 float feedback_sample = dry_sample + (delayed_sample * _feedback);
-                _delay_buffer[_write_head * _max_channels + ch] = feedback_sample;
+                _delay_buffer[ch * _buffer_size + _write_head] = feedback_sample;
             }
 
             // --- 5. Advance write head ---

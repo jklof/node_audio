@@ -247,11 +247,7 @@ class OscillatorNode(Node):
 
     def serialize_extra(self) -> dict:
         with self._lock:
-            return {
-                "waveform": self._waveform.name,
-                "frequency": self._frequency,
-                "pulse_width": self._pulse_width,
-            }
+            return self._get_state_snapshot_locked()
 
     def deserialize_extra(self, data: dict):
         with self._lock:
@@ -260,6 +256,5 @@ class OscillatorNode(Node):
                 self._waveform = Waveform[waveform_name]
             except KeyError:
                 self._waveform = Waveform.SINE
-
             self._frequency = float(data.get("frequency", 440.0))
             self._pulse_width = float(data.get("pulse_width", 0.5))
