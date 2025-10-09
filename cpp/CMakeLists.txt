@@ -12,14 +12,10 @@ function(copy_target_to_directory target_name destination_dir)
     )
 endfunction()
 
-# --- Target: Gain Processor ---
-add_library(gain_processor SHARED gain_processor.cpp)
-copy_target_to_directory(gain_processor "${PROJECT_SOURCE_DIR}/../plugins")
-
 # --- Target: Delay Processor ---
 add_library(delay_processor SHARED delay_processor.cpp)
 copy_target_to_directory(delay_processor "${PROJECT_SOURCE_DIR}/../additional_plugins")
 
-# --- NEW Target: Modulation Processor ---
+# --- Target: Modulation Processor ---
 add_library(modulation_processor SHARED modulation_processor.cpp)
 copy_target_to_directory(modulation_processor "${PROJECT_SOURCE_DIR}/../additional_plugins")

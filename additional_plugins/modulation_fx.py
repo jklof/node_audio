@@ -9,18 +9,29 @@ from constants import DEFAULT_SAMPLERATE, DEFAULT_BLOCKSIZE, DEFAULT_CHANNELS
 # Define a C-style pointer to a float pointer for our 2D audio data
 float_pp = ctypes.POINTER(ctypes.POINTER(ctypes.c_float))
 
+
 class ModulationEffectType(Enum):
     CHORUS = "Chorus"
     FLANGER = "Flanger"
     PHASER = "Phaser"
 
+
 # UI Class (can reuse the existing one)
-class CompiledModulationFXNodeItem(ParameterNodeItem):
+class ModulationFXNodeItem(ParameterNodeItem):
     NODE_SPECIFIC_WIDTH = 220
-    def __init__(self, node_logic: "CompiledModulationFXNode"):
+
+    def __init__(self, node_logic: "ModulationFXNode"):
         parameters = [
             {"key": "mode", "name": "Mode", "type": "combobox", "items": [(m.value, m) for m in ModulationEffectType]},
-            {"key": "rate", "name": "Rate", "type": "dial", "min": 0.05, "max": 20.0, "format": "{:.2f} Hz", "is_log": True},
+            {
+                "key": "rate",
+                "name": "Rate",
+                "type": "dial",
+                "min": 0.05,
+                "max": 20.0,
+                "format": "{:.2f} Hz",
+                "is_log": True,
+            },
             {"key": "depth", "name": "Depth", "type": "slider", "min": 0.0, "max": 1.0, "format": "{:.0%}"},
             {"key": "feedback", "name": "Feedback", "type": "slider", "min": 0.0, "max": 0.98, "format": "{:.0%}"},
             {"key": "mix", "name": "Mix", "type": "slider", "min": 0.0, "max": 1.0, "format": "{:.0%}"},
@@ -39,21 +50,24 @@ class CompiledModulationFXNodeItem(ParameterNodeItem):
             self.container_widget.adjustSize()
             self.update_geometry()
 
+
 # Logic Class
-class CompiledModulationFXNode(FFINodeBase):
-    NODE_TYPE = "Modulation FX (Compiled)"
-    UI_CLASS = CompiledModulationFXNodeItem
+class ModulationFXNode(FFINodeBase):
+    NODE_TYPE = "Modulation FX"
+    UI_CLASS = ModulationFXNodeItem
     CATEGORY = "Effects"
     DESCRIPTION = "High-performance Chorus, Flanger, and Phaser effects."
 
-    LIB_NAME = "modulation_processor" # Assumes the compiled library is named modulation_processor.dll/so/dylib
+    LIB_NAME = "modulation_processor"  # Assumes the compiled library is named modulation_processor.dll/so/dylib
     API = {
         "prepare": {"argtypes": [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_int]},
         "reset": {"argtypes": [ctypes.c_void_p]},
-        "set_parameters": {"argtypes": [ctypes.c_void_p, ctypes.c_int, ctypes.c_float, ctypes.c_float, ctypes.c_float, ctypes.c_float]},
+        "set_parameters": {
+            "argtypes": [ctypes.c_void_p, ctypes.c_int, ctypes.c_float, ctypes.c_float, ctypes.c_float, ctypes.c_float]
+        },
         "process_block": {"argtypes": [ctypes.c_void_p, float_pp, float_pp, ctypes.c_int, ctypes.c_int]},
     }
-    MAX_CHANNELS = DEFAULT_CHANNELS # Define max channels for buffer allocation
+    MAX_CHANNELS = DEFAULT_CHANNELS  # Define max channels for buffer allocation
 
     def __init__(self, name, node_id=None):
         super().__init__(name, node_id)
@@ -77,14 +91,21 @@ class CompiledModulationFXNode(FFINodeBase):
             self._update_cpp_params()
 
     def _get_state_snapshot_locked(self) -> dict:
-        return {"mode": self._mode, "rate": self._rate_hz, "depth": self._depth, "feedback": self._feedback, "mix": self._mix}
+        return {
+            "mode": self._mode,
+            "rate": self._rate_hz,
+            "depth": self._depth,
+            "feedback": self._feedback,
+            "mix": self._mix,
+        }
 
     def _update_cpp_params(self):
-        if not self.dsp_handle: return
-        
+        if not self.dsp_handle:
+            return
+
         mode_map = {ModulationEffectType.CHORUS: 0, ModulationEffectType.FLANGER: 1, ModulationEffectType.PHASER: 2}
         mode_int = mode_map.get(self._mode, 0)
-        
+
         self.lib.set_parameters(self.dsp_handle, mode_int, self._rate_hz, self._depth, self._feedback, self._mix)
 
     def _update_and_emit(self, **kwargs):
@@ -103,19 +124,24 @@ class CompiledModulationFXNode(FFINodeBase):
             self.ui_update_callback(state_to_emit)
 
     @Slot(ModulationEffectType)
-    def set_mode(self, value: ModulationEffectType): self._update_and_emit(mode=value)
-    
-    @Slot(float)
-    def set_rate(self, value: float): self._update_and_emit(rate_hz=value)
+    def set_mode(self, value: ModulationEffectType):
+        self._update_and_emit(mode=value)
 
     @Slot(float)
-    def set_depth(self, value: float): self._update_and_emit(depth=value)
+    def set_rate(self, value: float):
+        self._update_and_emit(rate_hz=value)
 
     @Slot(float)
-    def set_feedback(self, value: float): self._update_and_emit(feedback=value)
+    def set_depth(self, value: float):
+        self._update_and_emit(depth=value)
 
     @Slot(float)
-    def set_mix(self, value: float): self._update_and_emit(mix=value)
+    def set_feedback(self, value: float):
+        self._update_and_emit(feedback=value)
+
+    @Slot(float)
+    def set_mix(self, value: float):
+        self._update_and_emit(mix=value)
 
     def start(self):
         if self.dsp_handle:
@@ -124,13 +150,16 @@ class CompiledModulationFXNode(FFINodeBase):
     def process(self, input_data: dict) -> dict:
         if not self.dsp_handle or self.error_state:
             return {"out": None}
-            
+
         # Update parameters from sockets
-        param_changed = False
-        if (val := input_data.get("rate")) is not None and self._rate_hz != val: self.set_rate(val)
-        if (val := input_data.get("depth")) is not None and self._depth != val: self.set_depth(val)
-        if (val := input_data.get("feedback")) is not None and self._feedback != val: self.set_feedback(val)
-        if (val := input_data.get("mix")) is not None and self._mix != val: self.set_mix(val)
+        if (val := input_data.get("rate")) is not None and self._rate_hz != val:
+            self.set_rate(val)
+        if (val := input_data.get("depth")) is not None and self._depth != val:
+            self.set_depth(val)
+        if (val := input_data.get("feedback")) is not None and self._feedback != val:
+            self.set_feedback(val)
+        if (val := input_data.get("mix")) is not None and self._mix != val:
+            self.set_mix(val)
 
         # Process audio
         signal = input_data.get("in")
@@ -154,7 +183,7 @@ class CompiledModulationFXNode(FFINodeBase):
     def serialize_extra(self) -> dict:
         with self._lock:
             state = self._get_state_snapshot_locked()
-            state["mode"] = state["mode"].name # Serialize enum as string
+            state["mode"] = state["mode"].name  # Serialize enum as string
             return state
 
     def deserialize_extra(self, data: dict):
@@ -170,15 +199,15 @@ class CompiledModulationFXNode(FFINodeBase):
                 # Safely convert the saved string back to an enum member
                 self._mode = ModulationEffectType[mode_name]
             except KeyError:
-                self._mode = ModulationEffectType.CHORUS # Default on failure
+                self._mode = ModulationEffectType.CHORUS  # Default on failure
 
             self._rate_hz = data.get("rate", 0.5)
             self._depth = data.get("depth", 0.5)
             self._feedback = data.get("feedback", 0.0)
             self._mix = data.get("mix", 0.5)
-            
+
             # After setting all Python-side state, update the C++ side in a single batch.
             self._update_cpp_params()
-            
+
         # No UI update callback is needed here. The engine's post-load sync
         # will handle updating the UI with the final, fully loaded state.

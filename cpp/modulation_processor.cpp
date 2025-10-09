@@ -9,7 +9,7 @@
     #define PLUGIN_API extern "C"
 #endif
 
-// Define a portable, compile-time constant for PI
+// Define a portable, compile-time constant for Pi
 constexpr float PI = 3.14159265358979323846f;
 
 // A small constant for floating point comparisons and preventing division by zero
@@ -22,6 +22,10 @@ enum class ModulationEffectType {
     PHASER = 2
 };
 
+// --- Define the number of phaser stages ---
+constexpr int PHASER_STAGES = 6;
+
+
 class ModulationProcessor {
 public:
     // --- Lifecycle and Configuration ---
@@ -30,7 +34,6 @@ public:
         : _sampleRate(44100), _maxChannels(0), _maxBlockSize(0), _bufferSizeSamples(0),
           _mode(ModulationEffectType::CHORUS), _rateHz(0.5f), _depth(0.5f),
           _feedback(0.0f), _mix(0.5f), _lfoPhase(0.0f), _writeHead(0) {
-        // Constructor is minimal; setup happens in prepare()
     }
 
     void prepare(int sampleRate, int maxBlockSize, int maxChannels) {
@@ -42,7 +45,13 @@ public:
         _bufferSizeSamples = static_cast<int>(MAX_DELAY_S * _sampleRate);
 
         _delayBuffer.resize(_maxChannels, std::vector<float>(_bufferSizeSamples, 0.0f));
-        _phaserZ.resize(6, std::vector<float>(_maxChannels, 0.0f)); // 6 phaser stages
+        
+        // --- Resize phaser state buffer for IIR filters ---
+        // Each of the 6 stages needs 2 state variables per channel:
+        // z[0] = x[n-1] (previous input)
+        // z[1] = y[n-1] (previous output)
+        _phaserZ.resize(PHASER_STAGES, std::vector<std::vector<float>>(2, std::vector<float>(_maxChannels, 0.0f)));
+        
         _lfoBuffer.resize(_maxBlockSize, 0.0f);
 
         reset();
@@ -52,8 +61,11 @@ public:
         for (auto& channel_buffer : _delayBuffer) {
             std::fill(channel_buffer.begin(), channel_buffer.end(), 0.0f);
         }
+        // --- reset the 3D phaser state buffer ---
         for (auto& stage_buffer : _phaserZ) {
-            std::fill(stage_buffer.begin(), stage_buffer.end(), 0.0f);
+            for (auto& state_vec : stage_buffer) {
+                std::fill(state_vec.begin(), state_vec.end(), 0.0f);
+            }
         }
         _writeHead = 0;
         _lfoPhase = 0.0f;
@@ -80,15 +92,14 @@ public:
             return;
         }
 
-        // 1. Pre-calculate LFO for the entire block
         const float phaseIncrement = _rateHz / static_cast<float>(_sampleRate);
         for (int i = 0; i < numSamples; ++i) {
-            _lfoBuffer[i] = sinf(2.0f * PI * _lfoPhase); // <-- FIX: Use PI
+            // Generate a bipolar LFO signal (-1 to 1)
+            _lfoBuffer[i] = sinf(2.0f * PI * _lfoPhase);
             _lfoPhase += phaseIncrement;
             if (_lfoPhase >= 1.0f) _lfoPhase -= 1.0f;
         }
 
-        // 2. Process based on the current mode
         switch (_mode) {
             case ModulationEffectType::CHORUS:
                 processDelayEffect(inChannels, outChannels, numChannels, numSamples, 25.0f, 20.0f);
@@ -132,29 +143,57 @@ private:
         }
     }
 
+    // --- Phaser Implementation ---
     void processPhaser(float** inChannels, float** outChannels, int numChannels, int numSamples) {
-        constexpr int PHASER_STAGES = 6;
+        const float min_freq = 100.0f;
+        const float max_freq = 4000.0f;
+        const float sweep_width = (max_freq - min_freq) * _depth;
+
         for (int i = 0; i < numSamples; ++i) {
-            float sweep_width = (4000.0f - 100.0f) * _depth;
-            float center_freq = 100.0f + sweep_width / 2.0f + ((4000.0f - 100.0f - sweep_width) / 2.0f) * (_lfoBuffer[i] + 1.0f);
-            float d = (1.0f - (PI * center_freq / _sampleRate)) / (1.0f + (PI * center_freq / _sampleRate) + EPSILON);
+            // Map bipolar LFO (-1 to 1) to unipolar (0 to 1) for frequency control
+            float unipolar_lfo = (_lfoBuffer[i] + 1.0f) * 0.5f;
+            float center_freq = min_freq + sweep_width * unipolar_lfo;
+
+            // Calculate the all-pass filter coefficient 'a' based on the modulated frequency.
+            // This is the core of the sweeping effect.
+            float tan_val = tanf(PI * center_freq / static_cast<float>(_sampleRate));
+            float a = (1.0f - tan_val) / (1.0f + tan_val + EPSILON);
 
             for (int ch = 0; ch < numChannels; ++ch) {
-                float feedback_input = _phaserZ[PHASER_STAGES - 1][ch] * _feedback;
-                float stage_input = inChannels[ch][i] + feedback_input;
+                // Get the feedback from the output of the final stage from the PREVIOUS sample tick.
+                float feedback_input = _phaserZ[PHASER_STAGES - 1][1][ch] * _feedback;
 
+                // The input to the first stage is the dry signal plus the feedback.
+                float current_stage_input = inChannels[ch][i] - feedback_input;
+
+                // Cascade through all all-pass filter stages.
                 for (int stage = 0; stage < PHASER_STAGES; ++stage) {
-                    float output_sample = d * stage_input + (1.0f - d) * _phaserZ[stage][ch];
-                    _phaserZ[stage][ch] = stage_input;
-                    stage_input = output_sample;
+                    // Retrieve state variables from the previous sample tick for this stage.
+                    float prev_input = _phaserZ[stage][0][ch];
+                    float prev_output = _phaserZ[stage][1][ch];
+
+                    // Apply the first-order IIR all-pass filter difference equation:
+                    // y[n] = a*x[n] + x[n-1] - a*y[n-1]
+                    float current_stage_output = a * current_stage_input + prev_input - a * prev_output;
+
+                    // Update the state variables for the NEXT sample tick.
+                    _phaserZ[stage][0][ch] = current_stage_input;  // Store current input as x[n-1] for next time.
+                    _phaserZ[stage][1][ch] = current_stage_output; // Store current output as y[n-1] for next time.
+
+                    // The output of this stage becomes the input for the next one.
+                    current_stage_input = current_stage_output;
                 }
-                
-                float wet_sample = stage_input;
+
+                // The final output of the filter chain is our wet signal.
+                float wet_sample = current_stage_input;
                 float dry_sample = inChannels[ch][i];
+
+                // Mix the dry and wet signals.
                 outChannels[ch][i] = (dry_sample * (1.0f - _mix)) + (wet_sample * _mix);
             }
         }
     }
+
 
     // --- Member Variables ---
     int _sampleRate;
@@ -170,9 +209,15 @@ private:
 
     float _lfoPhase;
     std::vector<float> _lfoBuffer;
+    
+    // For Chorus/Flanger
     std::vector<std::vector<float>> _delayBuffer;
     int _writeHead;
-    std::vector<std::vector<float>> _phaserZ;
+    
+    // For Phaser: A 3D vector to hold state for each stage, state variable, and channel.
+    // Dims: [stage_idx][state_var_idx][channel_idx]
+    // state_var_idx: 0 for previous_input (x[n-1]), 1 for previous_output (y[n-1])
+    std::vector<std::vector<std::vector<float>>> _phaserZ;
 };
 
 // ===================================================
