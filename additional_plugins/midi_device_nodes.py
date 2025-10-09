@@ -120,7 +120,7 @@ class MIDIInputNodeItem(NodeItem):
 
     @Slot()
     def _populate_device_combobox(self):
-        with self.node_logic._lock:  # FIX: Correctly acquire the lock from the logic object
+        with self.node_logic._lock:
             current_selection = self.node_logic._port_name
 
         with QSignalBlocker(self.device_combo):

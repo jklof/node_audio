@@ -133,7 +133,7 @@ class WaveShaperNode(Node):
         if not isinstance(signal, torch.Tensor):
             return {"out": None}
 
-        # --- CORRECTED: State update logic to prevent calling setters from audio thread ---
+        # State update logic to prevent calling setters from audio thread
         state_to_emit = None
         ui_update_needed = False
         with self._lock:
@@ -164,7 +164,6 @@ class WaveShaperNode(Node):
         # Emit signal to UI AFTER the lock is released
         if state_to_emit:
             self.ui_update_callback(state_to_emit)
-        # --- END CORRECTION ---
 
         # All processing is now done with PyTorch
         driven_signal = signal * drive

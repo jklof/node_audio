@@ -183,14 +183,16 @@ class CompressorNode(Node):
             clipped_value = np.clip(float(value), MIN_THRESHOLD_DB, MAX_THRESHOLD_DB)
             if self._threshold_db != clipped_value:
                 self._threshold_db = clipped_value
-        self.ui_update_callback(self.get_current_state_snapshot())
+            state = self._get_state_snapshot_locked()
+        self.ui_update_callback(state)
 
     def set_ratio(self, value: float):
         with self._lock:
             clipped_value = np.clip(float(value), MIN_RATIO, MAX_RATIO)
             if self._ratio != clipped_value:
                 self._ratio = clipped_value
-        self.ui_update_callback(self.get_current_state_snapshot())
+            state = self._get_state_snapshot_locked()
+        self.ui_update_callback(state)
 
     def set_attack_ms(self, value: float):
         with self._lock:
@@ -198,7 +200,8 @@ class CompressorNode(Node):
             if self._attack_ms != clipped_value:
                 self._attack_ms = clipped_value
                 self._params_dirty = True
-        self.ui_update_callback(self.get_current_state_snapshot())
+            state = self._get_state_snapshot_locked()
+        self.ui_update_callback(state)
 
     def set_release_ms(self, value: float):
         with self._lock:
@@ -206,14 +209,16 @@ class CompressorNode(Node):
             if self._release_ms != clipped_value:
                 self._release_ms = clipped_value
                 self._params_dirty = True
-        self.ui_update_callback(self.get_current_state_snapshot())
+            state = self._get_state_snapshot_locked()
+        self.ui_update_callback(state)
 
     def set_knee_db(self, value: float):
         with self._lock:
             clipped_value = np.clip(float(value), MIN_KNEE_DB, MAX_KNEE_DB)
             if self._knee_db != clipped_value:
                 self._knee_db = clipped_value
-        self.ui_update_callback(self.get_current_state_snapshot())
+            state = self._get_state_snapshot_locked()
+        self.ui_update_callback(state)
 
     def _get_state_snapshot_locked(self) -> Dict:
         return {

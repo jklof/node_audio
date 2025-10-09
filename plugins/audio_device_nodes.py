@@ -342,16 +342,12 @@ class BaseAudioNode(Node):
     def _update_status_message(self, message: str):
         self._current_status_message = message
 
-    def _get_current_state_snapshot_locked(self) -> Dict:
+    def _get_state_snapshot_locked(self) -> Dict:
         return {
             "status": self._current_status_message,
             "user_selected_device_identifier": self._user_selected_device_identifier,
             "channels": self.channels,
         }
-
-    def get_current_state_snapshot(self) -> Dict:
-        with self._lock:
-            return self._get_current_state_snapshot_locked()
 
     def refresh_device_list(self):
         logger.info(f"[{self.name}] Logic: Refreshing device list.")
@@ -397,7 +393,7 @@ class BaseAudioNode(Node):
                     logger.warning(f"[{self.name}] Reverting to Default.")
                     self._set_initial_default_device_selection()
 
-        state = self._get_current_state_snapshot_locked()
+        state = self.get_current_state_snapshot()
         state["device_list_refreshed"] = True
         self.ui_update_callback(state)
 
@@ -432,7 +428,7 @@ class BaseAudioNode(Node):
             self.stop()
             self.start()
         else:
-            self.ui_update_callback(self._get_current_state_snapshot_locked())
+            self.ui_update_callback(self.get_current_state_snapshot())
 
     def start(self):
         is_input_node = self._get_is_input_node()
@@ -484,7 +480,7 @@ class BaseAudioNode(Node):
                     self._active_device_info = None
                     self._reset_channels_on_failure()
 
-        self.ui_update_callback(self._get_current_state_snapshot_locked())
+        self.ui_update_callback(self.get_current_state_snapshot())
 
     def stop(self):
         logger.debug(f"[{self.name}] Stopping audio stream...")
@@ -507,7 +503,7 @@ class BaseAudioNode(Node):
             self._active_device_info = None
             self._update_status_message("Inactive")
             self._post_stream_stop_actions()
-        self.ui_update_callback(self._get_current_state_snapshot_locked())
+        self.ui_update_callback(self.get_current_state_snapshot())
         logger.debug(f"[{self.name}] Audio stream stop completed")
 
     def remove(self):
@@ -559,9 +555,6 @@ class BaseAudioNode(Node):
                 self._set_initial_default_device_selection()
             self._buffer.clear()
             self._update_status_message("Deserialized - Inactive")
-
-        # Emit after deserialization to sync UI
-        self.ui_update_callback(self._get_current_state_snapshot_locked())
 
 
 # ==============================================================================

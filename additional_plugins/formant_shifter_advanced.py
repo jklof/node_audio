@@ -265,7 +265,7 @@ class FormantShifterAdvancedNode(Node):
                 ui_update_needed = True
 
             if ui_update_needed:
-                state_to_emit = self._get_current_state_snapshot_locked()
+                state_to_emit = self._get_state_snapshot_locked()
 
             # Compute processing parameters
             formant_ratio = 2.0 ** (effective_formant_shift / 12.0)

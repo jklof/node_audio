@@ -247,7 +247,10 @@ class OscillatorNode(Node):
 
     def serialize_extra(self) -> dict:
         with self._lock:
-            return self._get_state_snapshot_locked()
+            state = self._get_state_snapshot_locked()
+            # Convert the enum to its string name for JSON serialization
+            state["waveform"] = state["waveform"].name
+            return state
 
     def deserialize_extra(self, data: dict):
         with self._lock:

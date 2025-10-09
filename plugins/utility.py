@@ -190,7 +190,7 @@ class RunningAverageNodeItem(NodeItem):
 
 
 # ============================================================
-# Logic for the RunningAverageNode (CORRECTED)
+# Logic for the RunningAverageNode
 # ============================================================
 class RunningAverageNode(Node):
     NODE_TYPE = "Running Average"

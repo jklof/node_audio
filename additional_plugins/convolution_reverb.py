@@ -320,7 +320,6 @@ class ConvolutionReverbNode(Node):
                 self._input_fft_history = torch.roll(self._input_fft_history, shifts=1, dims=0)
                 self._input_fft_history[0] = input_fft
 
-                # --- MODIFIED: TRUE STEREO CONVOLUTION LOGIC ---
                 input_history_fft = self._input_fft_history
                 ir_partitions_fft = self._ir_partitions_fft
                 num_in_channels = input_history_fft.shape[1]
@@ -357,7 +356,6 @@ class ConvolutionReverbNode(Node):
                 dry_mix = 1.0 - self._current_mix
                 wet_mix = self._current_mix
                 output_signal = (dry_mix_signal * dry_mix) + (wet_signal * wet_mix)
-                # --- END MODIFICATION ---
 
         return {"out": output_signal}
 

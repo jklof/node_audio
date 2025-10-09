@@ -92,6 +92,7 @@ class Node:
         self.pos = (0.0, 0.0)
         self.error_state: str | None = None  # Attribute to hold error messages
         self.ui_update_callback = lambda state_dict: None  # No-op callback by default
+        self.graph_invalidation_callback = lambda: None  # No-op callback for structural changes
         self._lock = threading.Lock()
 
     def clear_error_state(self):
@@ -128,7 +129,14 @@ class Node:
         pass
 
     def remove(self):
+        """
+        Called by the Engine just before a node is removed from the graph.
+        This is the primary cleanup point for a node's resources and callbacks.
+        """
         self.stop()
+        # Nullify callbacks to prevent crashes from zombie objects.
+        self.ui_update_callback = lambda state_dict: None
+        self.graph_invalidation_callback = lambda: None
 
     def to_dict(self):
         node_data = {

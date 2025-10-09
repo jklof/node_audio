@@ -101,7 +101,7 @@ class SpectralShimmerNode(Node):
         with self._lock:
             if self._pitch_shift_st != value:
                 self._pitch_shift_st = value
-                state_to_emit = self._get_current_state_snapshot_locked()
+                state_to_emit = self._get_state_snapshot_locked()
         if state_to_emit:
             self.ui_update_callback(state_to_emit)
 
@@ -112,7 +112,7 @@ class SpectralShimmerNode(Node):
             new_feedback = max(0.0, min(float(value), 1.0))
             if self._feedback != new_feedback:
                 self._feedback = new_feedback
-                state_to_emit = self._get_current_state_snapshot_locked()
+                state_to_emit = self._get_state_snapshot_locked()
         if state_to_emit:
             self.ui_update_callback(state_to_emit)
 
@@ -123,16 +123,12 @@ class SpectralShimmerNode(Node):
             new_mix = max(0.0, min(float(value), 1.0))
             if self._mix != new_mix:
                 self._mix = new_mix
-                state_to_emit = self._get_current_state_snapshot_locked()
+                state_to_emit = self._get_state_snapshot_locked()
         if state_to_emit:
             self.ui_update_callback(state_to_emit)
 
-    def _get_current_state_snapshot_locked(self) -> Dict:
+    def _get_state_snapshot_locked(self) -> Dict:
         return {"pitch_shift": self._pitch_shift_st, "feedback": self._feedback, "mix": self._mix}
-
-    def get_current_state_snapshot(self) -> Dict:
-        with self._lock:
-            return self._get_current_state_snapshot_locked()
 
     def _pitch_shift_frame(self, frame_data: torch.Tensor, ratio: float) -> torch.Tensor:
         """Performs pitch shifting on a spectral frame using linear interpolation."""
@@ -197,7 +193,7 @@ class SpectralShimmerNode(Node):
                     ui_update_needed = True
 
             if ui_update_needed:
-                state_snapshot_to_emit = self._get_current_state_snapshot_locked()
+                state_snapshot_to_emit = self._get_state_snapshot_locked()
 
             num_channels, num_bins = frame.data.shape
             current_frame_params = (frame.fft_size, frame.hop_size, num_channels)
@@ -323,7 +319,7 @@ class SpectralModulatorNode(Node):
         with self._lock:
             if self._rate_hz != value:
                 self._rate_hz = value
-                state_to_emit = self._get_current_state_snapshot_locked()
+                state_to_emit = self._get_state_snapshot_locked()
         if state_to_emit:
             self.ui_update_callback(state_to_emit)
 
@@ -333,7 +329,7 @@ class SpectralModulatorNode(Node):
         with self._lock:
             if self._depth_ms != value:
                 self._depth_ms = value
-                state_to_emit = self._get_current_state_snapshot_locked()
+                state_to_emit = self._get_state_snapshot_locked()
         if state_to_emit:
             self.ui_update_callback(state_to_emit)
 
@@ -344,16 +340,12 @@ class SpectralModulatorNode(Node):
             new_mix = max(0.0, min(float(value), 1.0))
             if self._mix != new_mix:
                 self._mix = new_mix
-                state_to_emit = self._get_current_state_snapshot_locked()
+                state_to_emit = self._get_state_snapshot_locked()
         if state_to_emit:
             self.ui_update_callback(state_to_emit)
 
-    def _get_current_state_snapshot_locked(self) -> Dict:
+    def _get_state_snapshot_locked(self) -> Dict:
         return {"rate": self._rate_hz, "depth": self._depth_ms, "mix": self._mix}
-
-    def get_current_state_snapshot(self) -> Dict:
-        with self._lock:
-            return self._get_current_state_snapshot_locked()
 
     def process(self, input_data: dict) -> dict:
         frame = input_data.get("spectral_frame_in")
@@ -382,7 +374,7 @@ class SpectralModulatorNode(Node):
                     ui_update_needed = True
 
             if ui_update_needed:
-                state_snapshot_to_emit = self._get_current_state_snapshot_locked()
+                state_snapshot_to_emit = self._get_state_snapshot_locked()
 
             lfo_value = 0.0
             lfo_mod_input = input_data.get("mod_in")
@@ -559,7 +551,7 @@ class SpectralReverbNode(Node):
             if value != self._pre_delay_ms:
                 self._pre_delay_ms = value
                 self._params_dirty = True
-                state = self._get_current_state_snapshot_locked()
+                state = self._get_state_snapshot_locked()
         if state:
             self.ui_update_callback(state)
 
@@ -570,7 +562,7 @@ class SpectralReverbNode(Node):
             if value != self._decay_time_s:
                 self._decay_time_s = value
                 self._params_dirty = True
-                state = self._get_current_state_snapshot_locked()
+                state = self._get_state_snapshot_locked()
         if state:
             self.ui_update_callback(state)
 
@@ -581,7 +573,7 @@ class SpectralReverbNode(Node):
             if value != self._hf_damp_hz:
                 self._hf_damp_hz = value
                 self._params_dirty = True
-                state = self._get_current_state_snapshot_locked()
+                state = self._get_state_snapshot_locked()
         if state:
             self.ui_update_callback(state)
 
@@ -592,7 +584,7 @@ class SpectralReverbNode(Node):
             if value != self._lf_damp_hz:
                 self._lf_damp_hz = value
                 self._params_dirty = True
-                state = self._get_current_state_snapshot_locked()
+                state = self._get_state_snapshot_locked()
         if state:
             self.ui_update_callback(state)
 
@@ -604,7 +596,7 @@ class SpectralReverbNode(Node):
             if value != self._diffusion:
                 self._diffusion = value
                 self._params_dirty = True
-                state = self._get_current_state_snapshot_locked()
+                state = self._get_state_snapshot_locked()
         if state:
             self.ui_update_callback(state)
 
@@ -616,7 +608,7 @@ class SpectralReverbNode(Node):
             if value != self._width:
                 self._width = value
                 self._params_dirty = True
-                state = self._get_current_state_snapshot_locked()
+                state = self._get_state_snapshot_locked()
         if state:
             self.ui_update_callback(state)
 
@@ -627,11 +619,11 @@ class SpectralReverbNode(Node):
             value = max(0.0, min(float(value), 1.0))
             if value != self._mix:
                 self._mix = value
-                state = self._get_current_state_snapshot_locked()
+                state = self._get_state_snapshot_locked()
         if state:
             self.ui_update_callback(state)
 
-    def _get_current_state_snapshot_locked(self) -> Dict:
+    def _get_state_snapshot_locked(self) -> Dict:
         return {
             "pre_delay_ms": self._pre_delay_ms,
             "decay_time": self._decay_time_s,
@@ -641,10 +633,6 @@ class SpectralReverbNode(Node):
             "width": self._width,
             "mix": self._mix,
         }
-
-    def get_current_state_snapshot(self) -> Dict:
-        with self._lock:
-            return self._get_current_state_snapshot_locked()
 
     def _recalculate_params(self, frame: SpectralFrame):
         t60 = self._decay_time_s
@@ -717,7 +705,7 @@ class SpectralReverbNode(Node):
 
             if self._params_dirty:
                 self._recalculate_params(frame)
-                state_snapshot_to_emit = self._get_current_state_snapshot_locked()
+                state_snapshot_to_emit = self._get_state_snapshot_locked()
 
             # --- Pre-delay Logic ---
             self._pre_delay_buffer.append(frame.data)

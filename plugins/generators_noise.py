@@ -138,7 +138,7 @@ class NoiseGeneratorNode(Node):
                 logger.info(f"[{self.name}] Changing noise type to: {noise_type.value}")
                 self._noise_type = noise_type
                 # No need to re-init filters, just use the correct one
-                state_to_emit = self._get_current_state_snapshot_locked()
+                state_to_emit = self._get_state_snapshot_locked()
         if state_to_emit:
             self.ui_update_callback(state_to_emit)
 
@@ -149,7 +149,7 @@ class NoiseGeneratorNode(Node):
             new_level = np.clip(float(level), 0.0, 1.0)
             if self._level != new_level:
                 self._level = new_level
-                state_to_emit = self._get_current_state_snapshot_locked()
+                state_to_emit = self._get_state_snapshot_locked()
         if state_to_emit:
             self.ui_update_callback(state_to_emit)
 
@@ -161,7 +161,7 @@ class NoiseGeneratorNode(Node):
                 new_level = np.clip(float(level_socket), 0.0, 1.0)
                 if abs(self._level - new_level) > 1e-6:
                     self._level = new_level
-                    state_snapshot_to_emit = self._get_current_state_snapshot_locked()
+                    state_snapshot_to_emit = self._get_state_snapshot_locked()
             noise_type = self._noise_type
             level = self._level
 

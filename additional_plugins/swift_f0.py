@@ -38,7 +38,7 @@ import torchaudio.transforms as T
 # --- Node System Imports ---
 from node_system import Node
 from ui_elements import NodeItem, NODE_CONTENT_PADDING
-from constants import DEFAULT_SAMPLERATE, DEFAULT_BLOCKSIZE, DEFAULT_DTYPE
+from constants import DEFAULT_SAMPLERATE, DEFAULT_BLOCKSIZE, DEFAULT_DTYPE, MIDIPacket
 
 # --- Qt Imports ---
 from PySide6.QtCore import Qt, Slot
@@ -127,7 +127,7 @@ class SwiftF0NodeItem(NodeItem):
 
 
 # ==============================================================================
-# 2. Node Logic Class (SwiftF0Node) - CORRECTED
+# 2. Node Logic Class (SwiftF0Node)
 # ==============================================================================
 class SwiftF0Node(Node):
     NODE_TYPE = "SwiftF0 Pitch/Note"
@@ -140,7 +140,7 @@ class SwiftF0Node(Node):
 
         self.add_input("in", data_type=torch.Tensor)
         self.add_output("f0_hz", data_type=float)
-        self.add_output("msg_out", data_type=object)
+        self.add_output("msg_out", data_type=MIDIPacket)
 
         self._resampler = T.Resample(orig_freq=DEFAULT_SAMPLERATE, new_freq=ANALYSIS_SAMPLERATE, dtype=torch.float32)
 
@@ -163,11 +163,11 @@ class SwiftF0Node(Node):
         self._ui_update_thread: Optional[threading.Thread] = None
         self._stop_ui_thread_event = threading.Event()
 
-    def _get_current_state_snapshot(self) -> Dict:
+    def _get_state_snapshot_locked(self) -> Dict:
         return {
             "f0_hz": self._latest_f0_hz,
             "confidence": self._latest_confidence,
-            "midi_note": self._latest_midi_note,  # Kept for potential future use
+            "midi_note": self._latest_midi_note,
             "gate": self._latest_gate,
         }
 
@@ -231,18 +231,26 @@ class SwiftF0Node(Node):
     def process(self, input_data: dict) -> dict:
         """This function runs in the real-time audio thread. It must be FAST."""
         audio_in = input_data.get("in")
-        msg_to_send = None
+        packet_to_send = None
 
         if isinstance(audio_in, torch.Tensor) and audio_in.numel() > 0:
             mono_tensor = torch.mean(audio_in, dim=0) if audio_in.ndim > 1 else audio_in
             self._audio_in_queue.put(mono_tensor)
 
+        # --- Drain the entire queue and package messages into a MIDIPacket ---
+        messages_this_tick = []
         try:
-            msg_to_send = self._midi_out_queue.get_nowait()
+            while True:
+                msg = self._midi_out_queue.get_nowait()
+                # A sample offset of 0 is reasonable as the analysis is asynchronous
+                messages_this_tick.append((0, msg))
         except queue.Empty:
-            msg_to_send = None
+            pass  # The queue is now empty
 
-        return {"f0_hz": self._latest_f0_hz, "msg_out": msg_to_send}
+        if messages_this_tick:
+            packet_to_send = MIDIPacket(messages=messages_this_tick)
+
+        return {"f0_hz": self._latest_f0_hz, "msg_out": packet_to_send}
 
     def _ui_updater_loop(self):
         while not self._stop_ui_thread_event.is_set():

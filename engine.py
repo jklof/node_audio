@@ -435,6 +435,7 @@ class Engine:
     # --- Private methods to perform the actual mutation, called by the command processor ---
     def _add_node_locked(self, new_node: Node):
         """Adds a node to the graph. Assumes lock is held."""
+        new_node.graph_invalidation_callback = self._emit_graph_changed
         self.graph.nodes[new_node.id] = new_node
         if isinstance(new_node, IClockProvider) and self.graph.selected_clock_node_id is None:
             self.graph.selected_clock_node_id = new_node.id
@@ -532,6 +533,7 @@ class Engine:
                     logger.warning(f"Could not find node class for type '{node_type}'. Skipping.")
                     continue
                 new_node = node_class(name=node_data["name"], node_id=node_data["id"])
+                new_node.graph_invalidation_callback = self._emit_graph_changed
                 new_node.pos = tuple(node_data.get("pos", (0, 0)))
                 new_node.deserialize_extra(node_data)
                 self.graph.nodes[new_node.id] = new_node

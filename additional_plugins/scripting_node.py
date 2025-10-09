@@ -294,33 +294,13 @@ class CodeNodeItem(NodeItem):
 
     @Slot(dict)
     def _on_state_updated_from_logic(self, state: dict):
+
+        # Call the parent implementation. The parent method will handle title updates,
+        # error state, and, most importantly, call update_geometry(). By the time
+        # this runs, the central sync mechanism will have already fixed the sockets.
         super()._on_state_updated_from_logic(state)
 
-        # 1. First, check if the sockets have changed. If so, reconcile them.
-        if state.get("sockets_changed", False):
-            # Get the current set of UI sockets and the desired set from the logic
-            current_ui_sockets = set(self._socket_items.keys())
-            desired_logic_sockets = set(self.node_logic.inputs.values()) | set(self.node_logic.outputs.values())
-
-            sockets_to_remove = current_ui_sockets - desired_logic_sockets
-            sockets_to_add = desired_logic_sockets - current_ui_sockets
-
-            # Remove UI items for sockets that no longer exist in the logic
-            for logic_socket in sockets_to_remove:
-                socket_item = self._socket_items.pop(logic_socket, None)
-                label_item = self._socket_labels.pop(logic_socket, None)
-                if socket_item and socket_item.scene():
-                    self.scene().removeItem(socket_item)
-                if label_item and label_item.scene():
-                    self.scene().removeItem(label_item)
-
-            # Create new UI items for sockets that were added to the logic
-            for logic_socket in sockets_to_add:
-                self._socket_items[logic_socket] = SocketItem(logic_socket, self)
-                label = QGraphicsTextItem(logic_socket.name, self)
-                label.setDefaultTextColor(Qt.GlobalColor.lightGray)
-                self._socket_labels[logic_socket] = label
-
+        # 3. Handle CodeNode-specific updates that don't affect geometry directly.
         status, error = state.get("status", "OK"), state.get("error", "")
         error_lineno = state.get("error_lineno", -1)
 
@@ -341,23 +321,19 @@ class CodeNodeItem(NodeItem):
                 selection.cursor = cursor
                 self.code_editor.setExtraSelections([selection])
                 self.code_editor.setTextCursor(cursor)
-            self.set_error_display_state(error)
+            # The error outline is handled by the super() call
         else:
             self.status_label.setText("Status: OK")
             self.status_label.setStyleSheet("color: lightgreen;")
-            self.set_error_display_state(None)
+            # The error outline is cleared by the super() call
 
+        # Handle connection deletion requests, which don't affect this node's geometry.
         conn_ids_to_delete = state.get("connections_to_delete", [])
         if conn_ids_to_delete:
             view = self.scene().views()[0] if self.scene() and self.scene().views() else None
             if view:
                 for conn_id in conn_ids_to_delete:
                     view.connectionDeletionRequested.emit(conn_id)
-
-        # If sockets were changed, we MUST refresh the geometry now that the
-        # child items have been updated.
-        if state.get("sockets_changed", False):
-            self.update_geometry()
 
     @Slot()
     def updateFromLogic(self):
@@ -394,8 +370,8 @@ class CodeNode(Node):
         return TYPE_MAP.get(type_str, object)
 
     def apply_code(self, code: str, is_init: bool = False):
-        sockets_changed = False
         connections_to_delete_ids = []
+        sockets_were_changed = False
 
         with self._lock:
             self._code = code
@@ -414,7 +390,7 @@ class CodeNode(Node):
                 current_input_names = set(self.inputs.keys())
                 desired_input_names = set(parsed_inputs.keys())
                 if current_input_names != desired_input_names:
-                    sockets_changed = True
+                    sockets_were_changed = True
                     inputs_to_remove = current_input_names - desired_input_names
                     for name in inputs_to_remove:
                         for conn in self.inputs[name].connections:
@@ -424,7 +400,7 @@ class CodeNode(Node):
                 current_output_names = set(self.outputs.keys())
                 desired_output_names = set(parsed_outputs.keys())
                 if current_output_names != desired_output_names:
-                    sockets_changed = True
+                    sockets_were_changed = True
                     outputs_to_remove = current_output_names - desired_output_names
                     for name in outputs_to_remove:
                         for conn in self.outputs[name].connections:
@@ -435,12 +411,12 @@ class CodeNode(Node):
                     dtype = self._str_to_type(type_str)
                     if name not in self.inputs or self.inputs[name].data_type != dtype:
                         self.add_input(name, dtype)
-                        sockets_changed = True
+                        sockets_were_changed = True
                 for name, type_str in parsed_outputs.items():
                     dtype = self._str_to_type(type_str)
                     if name not in self.outputs or self.outputs[name].data_type != dtype:
                         self.add_output(name, dtype)
-                        sockets_changed = True
+                        sockets_were_changed = True
 
                 self._compiled_code = compile(self._code, f"<{self.name}>", "exec")
                 self.clear_error_state()
@@ -461,17 +437,18 @@ class CodeNode(Node):
                 self._last_error_lineno = -1
                 logger.error(f"[{self.name}] Code apply failed: {e}", exc_info=True)
 
-            state_to_emit = self._get_current_state_snapshot_locked()
-            state_to_emit["sockets_changed"] = sockets_changed
+            state_to_emit = self._get_state_snapshot_locked()
             state_to_emit["connections_to_delete"] = connections_to_delete_ids
 
+        # First, send the local state update for status, errors, and connection deletions.
         self.ui_update_callback(state_to_emit)
 
-    def get_current_state_snapshot(self) -> Dict:
-        with self._lock:
-            return self._get_current_state_snapshot_locked()
+        # If the sockets were structurally changed, trigger the global graph invalidation.
+        # This will cause NodeGraphScene to run its central sync logic.
+        if sockets_were_changed and not is_init:
+            self.graph_invalidation_callback()
 
-    def _get_current_state_snapshot_locked(self) -> Dict:
+    def _get_state_snapshot_locked(self) -> Dict:
         return {
             "code": self._code,
             "status": self._status,
@@ -483,6 +460,8 @@ class CodeNode(Node):
         if self.error_state is not None:
             return {name: None for name in self.outputs}
 
+        state_to_emit = None
+
         with self._lock:
             if self._compiled_code is None:
                 return {name: None for name in self.outputs}
@@ -493,7 +472,7 @@ class CodeNode(Node):
                 self._state = execution_scope.get("state", self._state)
                 if self._status == "Error":
                     self._status, self._last_error, self._last_error_lineno = "OK", "", -1
-                    self.ui_update_callback(self._get_current_state_snapshot_locked())
+                    state_to_emit = self._get_state_snapshot_locked()
             return {name: execution_scope.get(name) for name in self.outputs}
         except Exception as e:
             lineno = -1
@@ -508,7 +487,10 @@ class CodeNode(Node):
                 self._status = "Error"
                 self._last_error = f"Runtime: {str(e).replace(chr(10), ' ')}"
                 self._last_error_lineno = lineno
-                self.ui_update_callback(self._get_current_state_snapshot_locked())
+                state_to_emit = self._get_state_snapshot_locked()
+
+            if state_to_emit:
+                self.ui_update_callback(state_to_emit)
 
             raise e
 
