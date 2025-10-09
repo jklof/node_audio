@@ -10,10 +10,12 @@ from constants import DEFAULT_SAMPLERATE, DEFAULT_BLOCKSIZE, DEFAULT_CHANNELS
 float_pp = ctypes.POINTER(ctypes.POINTER(ctypes.c_float))
 
 
+# --- MODIFIED: Added VIBRATO ---
 class ModulationEffectType(Enum):
     CHORUS = "Chorus"
     FLANGER = "Flanger"
     PHASER = "Phaser"
+    VIBRATO = "Vibrato"
 
 
 # UI Class (can reuse the existing one)
@@ -42,13 +44,23 @@ class ModulationFXNodeItem(ParameterNodeItem):
     def _on_state_updated_from_logic(self, state: dict):
         super()._on_state_updated_from_logic(state)
         mode = state.get("mode")
+
+        # --- MODIFIED: Update visibility logic ---
         is_feedback_visible = mode in [ModulationEffectType.FLANGER, ModulationEffectType.PHASER]
+        is_mix_visible = mode not in [ModulationEffectType.VIBRATO]
+
         feedback_control = self._controls.get("feedback")
         if feedback_control:
             feedback_control["widget"].setVisible(is_feedback_visible)
             feedback_control["label"].setVisible(is_feedback_visible)
-            self.container_widget.adjustSize()
-            self.update_geometry()
+
+        mix_control = self._controls.get("mix")
+        if mix_control:
+            mix_control["widget"].setVisible(is_mix_visible)
+            mix_control["label"].setVisible(is_mix_visible)
+
+        self.container_widget.adjustSize()
+        self.update_geometry()
 
 
 # Logic Class
@@ -56,7 +68,7 @@ class ModulationFXNode(FFINodeBase):
     NODE_TYPE = "Modulation FX"
     UI_CLASS = ModulationFXNodeItem
     CATEGORY = "Effects"
-    DESCRIPTION = "High-performance Chorus, Flanger, and Phaser effects."
+    DESCRIPTION = "High-performance Chorus, Flanger, Phaser, and Vibrato effects."
 
     LIB_NAME = "modulation_processor"  # Assumes the compiled library is named modulation_processor.dll/so/dylib
     API = {
@@ -103,7 +115,12 @@ class ModulationFXNode(FFINodeBase):
         if not self.dsp_handle:
             return
 
-        mode_map = {ModulationEffectType.CHORUS: 0, ModulationEffectType.FLANGER: 1, ModulationEffectType.PHASER: 2}
+        mode_map = {
+            ModulationEffectType.CHORUS: 0,
+            ModulationEffectType.FLANGER: 1,
+            ModulationEffectType.PHASER: 2,
+            ModulationEffectType.VIBRATO: 3,
+        }
         mode_int = mode_map.get(self._mode, 0)
 
         self.lib.set_parameters(self.dsp_handle, mode_int, self._rate_hz, self._depth, self._feedback, self._mix)

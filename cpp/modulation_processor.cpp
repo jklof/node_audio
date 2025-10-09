@@ -15,14 +15,15 @@ constexpr float PI = 3.14159265358979323846f;
 // A small constant for floating point comparisons and preventing division by zero
 constexpr float EPSILON = 1e-9f;
 
-// Enum to be shared with Python (values must match)
+// --- MODIFIED: Added VIBRATO ---
 enum class ModulationEffectType {
     CHORUS = 0,
     FLANGER = 1,
-    PHASER = 2
+    PHASER = 2,
+    VIBRATO = 3
 };
 
-// --- Define the number of phaser stages ---
+// --- NEW: Define the number of phaser stages ---
 constexpr int PHASER_STAGES = 6;
 
 
@@ -46,7 +47,7 @@ public:
 
         _delayBuffer.resize(_maxChannels, std::vector<float>(_bufferSizeSamples, 0.0f));
         
-        // --- Resize phaser state buffer for IIR filters ---
+        // --- MODIFIED: Resize phaser state buffer for IIR filters ---
         // Each of the 6 stages needs 2 state variables per channel:
         // z[0] = x[n-1] (previous input)
         // z[1] = y[n-1] (previous output)
@@ -61,7 +62,7 @@ public:
         for (auto& channel_buffer : _delayBuffer) {
             std::fill(channel_buffer.begin(), channel_buffer.end(), 0.0f);
         }
-        // --- reset the 3D phaser state buffer ---
+        // --- MODIFIED: Correctly reset the 3D phaser state buffer ---
         for (auto& stage_buffer : _phaserZ) {
             for (auto& state_vec : stage_buffer) {
                 std::fill(state_vec.begin(), state_vec.end(), 0.0f);
@@ -100,6 +101,7 @@ public:
             if (_lfoPhase >= 1.0f) _lfoPhase -= 1.0f;
         }
 
+        // --- MODIFIED: Added Vibrato case ---
         switch (_mode) {
             case ModulationEffectType::CHORUS:
                 processDelayEffect(inChannels, outChannels, numChannels, numSamples, 25.0f, 20.0f);
@@ -109,6 +111,9 @@ public:
                 break;
             case ModulationEffectType::PHASER:
                 processPhaser(inChannels, outChannels, numChannels, numSamples);
+                break;
+            case ModulationEffectType::VIBRATO:
+                processVibrato(inChannels, outChannels, numChannels, numSamples);
                 break;
         }
     }
@@ -143,7 +148,41 @@ private:
         }
     }
 
-    // --- Phaser Implementation ---
+    // --- Vibrato Implementation ---
+    void processVibrato(float** inChannels, float** outChannels, int numChannels, int numSamples) {
+        const float centerDelayMs = 10.0f; // Center delay for vibrato, can be smaller
+        const float depthMs = 5.0f;       // Depth of pitch modulation
+        
+        const float center_delay_samples = centerDelayMs / 1000.0f * _sampleRate;
+        const float depth_samples = (depthMs * _depth) / 1000.0f * _sampleRate;
+
+        for (int i = 0; i < numSamples; ++i) {
+            float current_delay_samps = center_delay_samples + _lfoBuffer[i] * depth_samples;
+            
+            float read_head_float = static_cast<float>(_writeHead) - current_delay_samps;
+            int index_floor = static_cast<int>(floorf(read_head_float));
+            float fraction = read_head_float - index_floor;
+
+            for (int ch = 0; ch < numChannels; ++ch) {
+                int wrapped_floor = (index_floor % _bufferSizeSamples + _bufferSizeSamples) % _bufferSizeSamples;
+                int wrapped_ceil = ((index_floor + 1) % _bufferSizeSamples + _bufferSizeSamples) % _bufferSizeSamples;
+
+                float sample1 = _delayBuffer[ch][wrapped_floor];
+                float sample2 = _delayBuffer[ch][wrapped_ceil];
+                float wet_sample = sample1 * (1.0f - fraction) + sample2 * fraction;
+                
+                // For vibrato, output is 100% wet signal
+                outChannels[ch][i] = wet_sample;
+                
+                // Write the dry input to the delay line (no feedback for vibrato)
+                _delayBuffer[ch][_writeHead] = inChannels[ch][i];
+            }
+            _writeHead = (_writeHead + 1) % _bufferSizeSamples;
+        }
+    }
+
+
+    // --- NEW: Professional Phaser Implementation ---
     void processPhaser(float** inChannels, float** outChannels, int numChannels, int numSamples) {
         const float min_freq = 100.0f;
         const float max_freq = 4000.0f;
