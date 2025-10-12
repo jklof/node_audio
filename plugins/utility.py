@@ -59,7 +59,8 @@ class ValueNode(Node):
 
     def process(self, input_data: dict) -> dict:
         # The decorator handles everything. We just need to output the internal value.
-        return {"out": self._value}
+        with self._lock:
+            return {"out": self._value}
 
 
 # ============================================================
@@ -101,7 +102,8 @@ class DialNode(Node):
         self.add_output("out", data_type=float)
 
     def process(self, input_data: dict) -> dict:
-        return {"out": self._value}
+        with self._lock:
+            return {"out": self._value}
 
 
 # ============================================================
@@ -152,9 +154,10 @@ class RunningAverageNode(Node):
 
         self._update_params_from_sockets(input_data)
 
-        current_time_s = self._time
-        alpha = 1.0 - np.exp(-TICK_DURATION_S / (current_time_s + EPSILON))
+        with self._lock:
+            current_time_s = self._time
 
+        alpha = 1.0 - np.exp(-TICK_DURATION_S / (current_time_s + EPSILON))
         try:
             self._current_average += alpha * (float(input_value) - self._current_average)
         except (ValueError, TypeError):
@@ -163,7 +166,7 @@ class RunningAverageNode(Node):
         return {"out": self._current_average}
 
     def start(self):
-        with self._lock:
+        with self._lock:  # may not need lock here?
             self._current_average = 0.0
         super().start()
 
@@ -264,7 +267,8 @@ class DialHzNode(Node):
 
     def process(self, input_data: dict) -> dict:
         self._update_params_from_sockets(input_data)
-        return {"freq_out": self._frequency}
+        with self._lock:
+            return {"freq_out": self._frequency}
 
 
 # ==============================================================================
@@ -313,5 +317,8 @@ class GainNode(Node):
 
         self._update_params_from_sockets(input_data)
 
-        amplitude_factor = 10.0 ** (self._gain_db / 20.0)
+        with self._lock:
+            gain_db = self._gain_db
+
+        amplitude_factor = 10.0 ** (gain_db / 20.0)
         return {"out": signal * amplitude_factor}
