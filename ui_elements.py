@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QDial,
     QComboBox,
+    QDoubleSpinBox,
 )
 from PySide6.QtGui import (
     QPainter,
@@ -30,7 +31,6 @@ from PySide6.QtGui import (
 from PySide6.QtCore import Qt, QRectF, QPointF, Signal, Slot, QTimer, QObject, Signal, QSignalBlocker
 from typing import Any
 
-# Import the interface to check against
 from node_system import IClockProvider
 from constants import SOCKET_TYPE_COLORS
 
@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 
 # --- Constants ---
 SOCKET_SIZE = 12
-NODE_WIDTH = 120  # Default minimum width
+NODE_WIDTH = 120
 HEADER_HEIGHT = 20
 SOCKET_Y_SPACING = 25
 NODE_CONTENT_PADDING = 5
@@ -222,13 +222,15 @@ class NodeItem(QGraphicsObject):
 
             max_input_label_width = 0
             for socket in self.node_logic.inputs.values():
-                label = self._socket_labels[socket]
-                max_input_label_width = max(max_input_label_width, label.boundingRect().width())
+                if socket in self._socket_labels:
+                    label = self._socket_labels[socket]
+                    max_input_label_width = max(max_input_label_width, label.boundingRect().width())
 
             max_output_label_width = 0
             for socket in self.node_logic.outputs.values():
-                label = self._socket_labels[socket]
-                max_output_label_width = max(max_output_label_width, label.boundingRect().width())
+                if socket in self._socket_labels:
+                    label = self._socket_labels[socket]
+                    max_output_label_width = max(max_output_label_width, label.boundingRect().width())
 
             sockets_and_labels_width = (
                 SOCKET_SIZE + max_input_label_width + max_output_label_width + (NODE_CONTENT_PADDING * 4)
@@ -240,6 +242,7 @@ class NodeItem(QGraphicsObject):
 
             self._width = max(
                 NODE_WIDTH,
+                self._width,  # Keep user-resized width
                 title_width + NODE_CONTENT_PADDING * 2,
                 content_width + NODE_CONTENT_PADDING * 2,
                 sockets_and_labels_width,
@@ -250,22 +253,24 @@ class NodeItem(QGraphicsObject):
 
             y_in = HEADER_HEIGHT + SOCKET_Y_SPACING / 2
             for logic_socket in self.node_logic.inputs.values():
-                socket_item = self._socket_items[logic_socket]
-                label_item = self._socket_labels[logic_socket]
-                socket_item.setPos(0, y_in)
-                label_item.setPos(SOCKET_SIZE, y_in - label_item.boundingRect().height() / 2)
-                y_in += SOCKET_Y_SPACING
+                if logic_socket in self._socket_items:
+                    socket_item = self._socket_items[logic_socket]
+                    label_item = self._socket_labels[logic_socket]
+                    socket_item.setPos(0, y_in)
+                    label_item.setPos(SOCKET_SIZE, y_in - label_item.boundingRect().height() / 2)
+                    y_in += SOCKET_Y_SPACING
 
             y_out = HEADER_HEIGHT + SOCKET_Y_SPACING / 2
             for logic_socket in self.node_logic.outputs.values():
-                socket_item = self._socket_items[logic_socket]
-                label_item = self._socket_labels[logic_socket]
-                socket_item.setPos(self._width, y_out)
-                label_item.setPos(
-                    self._width - SOCKET_SIZE - label_item.boundingRect().width(),
-                    y_out - label_item.boundingRect().height() / 2,
-                )
-                y_out += SOCKET_Y_SPACING
+                if logic_socket in self._socket_items:
+                    socket_item = self._socket_items[logic_socket]
+                    label_item = self._socket_labels[logic_socket]
+                    socket_item.setPos(self._width, y_out)
+                    label_item.setPos(
+                        self._width - SOCKET_SIZE - label_item.boundingRect().width(),
+                        y_out - label_item.boundingRect().height() / 2,
+                    )
+                    y_out += SOCKET_Y_SPACING
 
             # Determine height needed for sockets area
             sockets_area_height = max(y_in, y_out) - SOCKET_Y_SPACING / 2
@@ -521,7 +526,7 @@ class ConnectionItem(QGraphicsPathItem):
 class ParameterNodeItem(NodeItem):
     """
     Generic NodeItem base class that creates UI controls from a parameter configuration.
-    Supports sliders, dials, and combo boxes.
+    Supports sliders, dials, spinboxes, and combo boxes.
     """
 
     def __init__(self, node_logic, parameters: list[dict], width=200, **kwargs):
@@ -530,7 +535,6 @@ class ParameterNodeItem(NodeItem):
         self.parameters = parameters
         self._controls = {}
 
-        # Create container widget
         self.container_widget = QWidget()
         main_layout = QVBoxLayout(self.container_widget)
         main_layout.setContentsMargins(
@@ -538,35 +542,48 @@ class ParameterNodeItem(NodeItem):
         )
         main_layout.setSpacing(5)
 
-        # Create controls from parameters list
         for param in self.parameters:
-            control_type = param.get("type", "slider")  # default if not specified
+            control_type = param.get("type", "slider")
             if control_type == "slider":
                 self._create_slider_control(param, main_layout)
             elif control_type == "dial":
                 self._create_dial_control(param, main_layout)
             elif control_type == "combobox":
                 self._create_combobox_control(param, main_layout)
+            elif control_type == "spinbox":
+                self._create_spinbox_control(param, main_layout)
 
         self.setContentWidget(self.container_widget)
-
-        # initial uppdate, pull state from logic Node
         self.updateFromLogic()
 
+    def _create_spinbox_control(self, param: dict, layout: QVBoxLayout):
+        key, name = param["key"], param["name"]
+        label = QLabel(f"{name}: ...")
+        spinbox = QDoubleSpinBox()
+
+        # Configure the spinbox from parameter dictionary
+        spinbox.setMinimum(param.get("min", -1e9))
+        spinbox.setMaximum(param.get("max", 1e9))
+        spinbox.setDecimals(param.get("decimals", 2))
+        spinbox.setSingleStep(param.get("step", 0.1))
+
+        layout.addWidget(label)
+        layout.addWidget(spinbox)
+
+        self._controls[key] = {**param, "widget": spinbox, "label": label, "type": "spinbox"}
+        spinbox.valueChanged.connect(lambda value, k=key: self._on_generic_spinbox_change(k))
+
     def _create_slider_control(self, param: dict, layout: QVBoxLayout):
-        """Creates a slider and its label."""
         key, name = param["key"], param["name"]
         label = QLabel(f"{name}: ...")
         slider = QSlider(Qt.Orientation.Horizontal)
         slider.setRange(0, 1000)
         layout.addWidget(label)
         layout.addWidget(slider)
-
         self._controls[key] = {**param, "widget": slider, "label": label, "type": "slider"}
         slider.valueChanged.connect(lambda value, k=key: self._on_generic_slider_change(k))
 
     def _create_dial_control(self, param: dict, layout: QVBoxLayout):
-        """Creates a dial and its label."""
         key, name = param["key"], param["name"]
         label = QLabel(f"{name}: ...")
         dial = QDial()
@@ -574,12 +591,10 @@ class ParameterNodeItem(NodeItem):
         dial.setNotchesVisible(True)
         layout.addWidget(label)
         layout.addWidget(dial)
-
         self._controls[key] = {**param, "widget": dial, "label": label, "type": "dial"}
         dial.valueChanged.connect(lambda value, k=key: self._on_generic_slider_change(k))
 
     def _create_combobox_control(self, param: dict, layout: QVBoxLayout):
-        """Creates a combo box and its label."""
         key, name = param["key"], param["name"]
         label = QLabel(f"{name}:")
         combo = QComboBox()
@@ -587,12 +602,10 @@ class ParameterNodeItem(NodeItem):
             combo.addItem(text, userData=data)
         layout.addWidget(label)
         layout.addWidget(combo)
-
         self._controls[key] = {**param, "widget": combo, "label": label, "type": "combobox"}
         combo.currentIndexChanged.connect(lambda idx, k=key: self._on_generic_combobox_change(k))
 
     def _map_slider_to_logical(self, key: str, value: int) -> float:
-        """Maps slider/dial value (0-1000) to logical parameter value."""
         info = self._controls[key]
         norm = value / 1000.0
         if info.get("is_log", False):
@@ -603,7 +616,6 @@ class ParameterNodeItem(NodeItem):
             return info["min"] + norm * (info["max"] - info["min"])
 
     def _map_logical_to_slider(self, key: str, value: float) -> int:
-        """Maps logical parameter value to slider/dial value (0-1000)."""
         info = self._controls[key]
         if info.get("is_log", False):
             log_min, log_max = np.log10(info["min"]), np.log10(info["max"])
@@ -621,8 +633,15 @@ class ParameterNodeItem(NodeItem):
             return int(round(norm * 1000.0))
 
     @Slot(str)
+    def _on_generic_spinbox_change(self, key: str):
+        control = self._controls[key]["widget"]
+        logical_val = control.value()  # QDoubleSpinBox directly returns the float value
+        setter_name = f"set_{key}"
+        if hasattr(self.node_logic, setter_name):
+            getattr(self.node_logic, setter_name)(logical_val)
+
+    @Slot(str)
     def _on_generic_slider_change(self, key: str):
-        """Generic handler for slider/dial value changes."""
         control = self._controls[key]["widget"]
         logical_val = self._map_slider_to_logical(key, control.value())
         setter_name = f"set_{key}"
@@ -631,7 +650,6 @@ class ParameterNodeItem(NodeItem):
 
     @Slot(str)
     def _on_generic_combobox_change(self, key: str):
-        """Generic handler for combobox selection changes."""
         combo = self._controls[key]["widget"]
         data = combo.currentData()
         setter_name = f"set_{key}"
@@ -640,30 +658,36 @@ class ParameterNodeItem(NodeItem):
 
     @Slot(dict)
     def _on_state_updated_from_logic(self, state: dict):
-        """Updates all controls based on the incoming state dictionary."""
-
-        # Call parent to handle title, error state, and geometry
         super()._on_state_updated_from_logic(state)
-
         for key, info in self._controls.items():
             value = state.get(key)
+            if value is None:
+                continue
+
             widget = info["widget"]
             label = info["label"]
             control_type = info["type"]
             is_connected = key in self.node_logic.inputs and self.node_logic.inputs[key].connections
 
             widget.setEnabled(not is_connected)
+            label_text = info["name"]
 
             with QSignalBlocker(widget):
                 if control_type in ("slider", "dial"):
                     widget.setValue(self._map_logical_to_slider(key, value))
                     label_text = f"{info['name']}: {info['format'].format(value)}"
+
+                elif control_type == "spinbox":
+                    widget.setValue(value)
+                    # Use the 'decimals' from the param dict for formatting
+                    decimals = info.get("decimals", 2)
+                    label_text = f"{info['name']}: {value:.{decimals}f}"
+
                 elif control_type == "combobox":
                     index = widget.findData(value)
                     if index != -1:
                         widget.setCurrentIndex(index)
-                    label_text = f"{info['name']}"
 
-            if is_connected and control_type != "combobox":
+            if is_connected:
                 label_text += " (ext)"
             label.setText(label_text)
