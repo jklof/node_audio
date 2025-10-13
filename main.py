@@ -8,7 +8,7 @@ from PySide6.QtGui import QAction, QIcon, QPixmap
 from PySide6.QtCore import Slot, QTimer, Qt, QSettings, QByteArray
 
 from plugin_loader import scan_and_load_plugins, finalize_plugins
-from engine import Engine
+from engine import Engine, EngineState
 from app_controller import AppController
 from graph_view import NodeGraphWidget
 from ui_icons import create_icon, create_colored_logo
@@ -42,7 +42,7 @@ class MainWindow(QMainWindow):
         self.engine.signals.processingStateChanged.connect(self.update_ui_for_processing_state)
         self.engine.signals.graphChanged.connect(self.update_clock_display)
 
-        self.update_ui_for_processing_state(False)
+        self.update_ui_for_processing_state(EngineState.STOPPED)
         self.update_clock_display(self.engine._create_graph_snapshot_locked())
 
         self._load_settings()
@@ -185,11 +185,24 @@ class MainWindow(QMainWindow):
         self.controller.reload_all_plugins(self.plugin_dirs)
         self.statusBar().showMessage("Plugins reloaded.", 5000)
 
-    @Slot(bool)
-    def update_ui_for_processing_state(self, is_processing: bool):
-        self.start_action.setEnabled(not is_processing)
-        self.stop_action.setEnabled(is_processing)
-        self.statusBar().showMessage("Processing..." if is_processing else "Stopped.")
+    @Slot(EngineState)
+    def update_ui_for_processing_state(self, state: EngineState):
+        if state == EngineState.RUNNING:
+            self.start_action.setEnabled(False)
+            self.stop_action.setEnabled(True)
+            self.statusBar().showMessage("Processing...")
+        elif state == EngineState.STOPPED:
+            self.start_action.setEnabled(True)
+            self.stop_action.setEnabled(False)
+            self.statusBar().showMessage("Stopped.")
+        elif state == EngineState.STARTING:
+            self.start_action.setEnabled(False)
+            self.stop_action.setEnabled(False)
+            self.statusBar().showMessage("Starting...")
+        elif state == EngineState.STOPPING:
+            self.start_action.setEnabled(False)
+            self.stop_action.setEnabled(False)
+            self.statusBar().showMessage("Stopping...")
 
     @Slot(dict)
     def update_clock_display(self, graph_snapshot: dict):

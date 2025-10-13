@@ -166,8 +166,7 @@ class RunningAverageNode(Node):
         return {"out": self._current_average}
 
     def start(self):
-        with self._lock:  # may not need lock here?
-            self._current_average = 0.0
+        self._current_average = 0.0
         super().start()
 
 

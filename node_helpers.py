@@ -1,5 +1,6 @@
 from PySide6.QtCore import Slot
 import numpy as np
+from enum import Enum
 
 
 class Parameter:
@@ -12,7 +13,7 @@ class Parameter:
 def managed_parameters(cls):
     """
     A class decorator that injects boilerplate for thread-safe parameter handling,
-    with corrected serialization logic.
+    with corrected serialization logic that is robust to plugin reloads.
     """
     managed_params = {name: attr for name, attr in cls.__dict__.items() if isinstance(attr, Parameter)}
 
@@ -27,7 +28,11 @@ def managed_parameters(cls):
 
                 state_to_emit = None
                 with instance._lock:
-                    if getattr(instance, f"_{param_name}") != value:
+                    # Special handling for Enum comparison
+                    is_enum = isinstance(getattr(instance, f"_{param_name}"), Enum)
+                    current_val = getattr(instance, f"_{param_name}")
+
+                    if (is_enum and current_val != value) or (not is_enum and current_val != value):
                         setattr(instance, f"_{param_name}", value)
                         # Call on_change callback if it exists
                         if param_info.on_change and hasattr(instance, param_info.on_change):
@@ -38,7 +43,10 @@ def managed_parameters(cls):
 
             return setter
 
-        slot_setter = Slot(type(param.default))(make_setter(name, param))
+        # Determine the type hint for the slot from the parameter's default value
+        slot_type = type(param.default)
+        # For enums, the slot receives the enum member itself, not a string
+        slot_setter = Slot(slot_type)(make_setter(name, param))
         setattr(cls, f"set_{name}", slot_setter)
 
     # --- 2. Override __init__ to create internal attributes (e.g., self._gain_db) ---
@@ -55,21 +63,46 @@ def managed_parameters(cls):
     def _get_state_snapshot_locked(self):
         return {name: getattr(self, f"_{name}") for name in managed_params}
 
+    # =========================================================================
+    # --- serialize_extra ---
+    # =========================================================================
     def serialize_extra(self):
+        """
+        CORRECTED: Serializes Enum members to their string names to ensure
+        the state is reload-safe.
+        """
         with self._lock:
-            return self._get_state_snapshot_locked()
+            state = self._get_state_snapshot_locked()
+            for key, value in state.items():
+                if isinstance(value, Enum):
+                    state[key] = value.name  # Store the name (e.g., 'SINE')
+            return state
 
     # =========================================================================
-    # --- CORRECTED deserialize_extra ---
+    # --- deserialize_extra ---
     # =========================================================================
     def deserialize_extra(self, data: dict):
         """
-        CORRECTED: Directly sets internal state without emitting UI signals.
-        Relies on the engine's final graph sync to update the UI once.
+        CORRECTED: Correctly deserializes Enum members from their string names,
+        making the process robust to plugin reloads.
         """
         with self._lock:
             for name, param in managed_params.items():
-                value = data.get(name, param.default)
+                value = data.get(name)
+
+                # If value is not in saved data, use the default
+                if value is None:
+                    value = param.default
+
+                # Check if this parameter is an Enum
+                elif isinstance(param.default, Enum) and isinstance(value, str):
+                    enum_class = type(param.default)
+                    try:
+                        # Look up the member in the (potentially new) Enum class
+                        value = enum_class[value]
+                    except KeyError:
+                        # Fall back to default if the name no longer exists
+                        value = param.default
 
                 # Apply clipping logic directly, just like the setter
                 if param.clip:
@@ -78,7 +111,7 @@ def managed_parameters(cls):
                 # Set the internal attribute, bypassing the public setter
                 setattr(self, f"_{name}", value)
 
-                # CRITICAL: Still call the on_change hook for side effects (e.g., setting a dirty flag)
+                # Still call the on_change hook for side effects
                 if param.on_change and hasattr(self, param.on_change):
                     getattr(self, param.on_change)()
 

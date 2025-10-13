@@ -133,10 +133,13 @@ class Node:
         Called by the Engine just before a node is removed from the graph.
         This is the primary cleanup point for a node's resources and callbacks.
         """
-        self.stop()
-        # Nullify callbacks to prevent crashes from zombie objects.
+        # Nullify callbacks FIRST to prevent any subsequent methods
+        # (like self.stop()) from trying to call a deleted UI object.
         self.ui_update_callback = lambda state_dict: None
         self.graph_invalidation_callback = lambda: None
+
+        # Now, it is safe to perform cleanup operations.
+        self.stop()
 
     def to_dict(self):
         node_data = {
