@@ -9,6 +9,7 @@ from collections import deque
 from node_system import Node
 from constants import SpectralFrame, DEFAULT_DTYPE, DEFAULT_COMPLEX_DTYPE
 from ui_elements import ParameterNodeItem, NodeItem, NODE_CONTENT_PADDING
+from node_helpers import managed_parameters, Parameter
 
 # --- Qt Imports ---
 from PySide6.QtCore import Qt, Signal, Slot, QObject, QSignalBlocker
@@ -69,66 +70,33 @@ class SpectralShimmerNodeItem(ParameterNodeItem):
 # ==============================================================================
 # 3. Node Logic Class (SpectralShimmerNode)
 # ==============================================================================
+@managed_parameters
 class SpectralShimmerNode(Node):
     NODE_TYPE = "Spectral Shimmer"
     UI_CLASS = SpectralShimmerNodeItem
     CATEGORY = "Spectral"
     DESCRIPTION = "A pitch-shifting feedback effect for creating ethereal textures."
 
+    # --- Declarative managed parameters ---
+    pitch_shift = Parameter(default=12.0)
+    feedback = Parameter(default=0.75, clip=(0.0, 1.0))
+    mix = Parameter(default=0.5, clip=(0.0, 1.0))
+
     def __init__(self, name: str, node_id: Optional[str] = None):
         super().__init__(name, node_id)
 
-        # --- Setup Sockets ---
+        # --- Setup Sockets (matching parameter keys) ---
         self.add_input("spectral_frame_in", data_type=SpectralFrame)
         self.add_input("pitch_shift", data_type=float)
         self.add_input("feedback", data_type=float)
         self.add_input("mix", data_type=float)
         self.add_output("spectral_frame_out", data_type=SpectralFrame)
 
-        # --- Internal State ---
-        self._pitch_shift_st: float = 12.0
-        self._feedback: float = 0.75
-        self._mix: float = 0.5
-
         # --- DSP Buffers & State ---
         self._shimmer_buffer: Optional[torch.Tensor] = None
         self._last_frame_params: tuple = (0, 0, 0)
 
-    # --- Parameter Setter Slots ---
-    @Slot(float)
-    def set_pitch_shift(self, value: float):
-        state_to_emit = None
-        with self._lock:
-            if self._pitch_shift_st != value:
-                self._pitch_shift_st = value
-                state_to_emit = self._get_state_snapshot_locked()
-        if state_to_emit:
-            self.ui_update_callback(state_to_emit)
-
-    @Slot(float)
-    def set_feedback(self, value: float):
-        state_to_emit = None
-        with self._lock:
-            new_feedback = max(0.0, min(float(value), 1.0))
-            if self._feedback != new_feedback:
-                self._feedback = new_feedback
-                state_to_emit = self._get_state_snapshot_locked()
-        if state_to_emit:
-            self.ui_update_callback(state_to_emit)
-
-    @Slot(float)
-    def set_mix(self, value: float):
-        state_to_emit = None
-        with self._lock:
-            new_mix = max(0.0, min(float(value), 1.0))
-            if self._mix != new_mix:
-                self._mix = new_mix
-                state_to_emit = self._get_state_snapshot_locked()
-        if state_to_emit:
-            self.ui_update_callback(state_to_emit)
-
-    def _get_state_snapshot_locked(self) -> Dict:
-        return {"pitch_shift": self._pitch_shift_st, "feedback": self._feedback, "mix": self._mix}
+    # Manual setters, snapshot, and serialization methods are now handled by the decorator.
 
     def _pitch_shift_frame(self, frame_data: torch.Tensor, ratio: float) -> torch.Tensor:
         """Performs pitch shifting on a spectral frame using linear interpolation."""
@@ -169,31 +137,14 @@ class SpectralShimmerNode(Node):
         if not isinstance(frame, SpectralFrame):
             return {"spectral_frame_out": None}
 
-        state_snapshot_to_emit = None
+        # Update parameters from input sockets and notify UI if changed.
+        self._update_params_from_sockets(input_data)
+
         with self._lock:
-            ui_update_needed = False
-            # --- Update state from sockets if connected ---
-            pitch_socket = input_data.get("pitch_shift")
-            if pitch_socket is not None and self._pitch_shift_st != float(pitch_socket):
-                self._pitch_shift_st = float(pitch_socket)
-                ui_update_needed = True
-
-            feedback_socket = input_data.get("feedback")
-            if feedback_socket is not None:
-                new_feedback = max(0.0, min(float(feedback_socket), 1.0))
-                if self._feedback != new_feedback:
-                    self._feedback = new_feedback
-                    ui_update_needed = True
-
-            mix_socket = input_data.get("mix")
-            if mix_socket is not None:
-                new_mix = max(0.0, min(float(mix_socket), 1.0))
-                if self._mix != new_mix:
-                    self._mix = new_mix
-                    ui_update_needed = True
-
-            if ui_update_needed:
-                state_snapshot_to_emit = self._get_state_snapshot_locked()
+            # Read the managed parameters for this processing block
+            pitch_shift_st = self._pitch_shift
+            feedback_val = self._feedback
+            mix_val = self._mix
 
             num_channels, num_bins = frame.data.shape
             current_frame_params = (frame.fft_size, frame.hop_size, num_channels)
@@ -201,14 +152,11 @@ class SpectralShimmerNode(Node):
                 self._last_frame_params = current_frame_params
                 self._shimmer_buffer = torch.zeros((num_channels, num_bins), dtype=DEFAULT_COMPLEX_DTYPE)
 
-            pitch_ratio = 2 ** (self._pitch_shift_st / 12.0)
+            pitch_ratio = 2 ** (pitch_shift_st / 12.0)
             shifted_tail = self._pitch_shift_frame(self._shimmer_buffer, pitch_ratio)
-            wet_signal = shifted_tail * self._feedback
+            wet_signal = shifted_tail * feedback_val
             self._shimmer_buffer = frame.data + wet_signal
-            output_fft = (frame.data * (1.0 - self._mix)) + (wet_signal * self._mix)
-
-        if state_snapshot_to_emit:
-            self.ui_update_callback(state_snapshot_to_emit)
+            output_fft = (frame.data * (1.0 - mix_val)) + (wet_signal * mix_val)
 
         output_frame = SpectralFrame(
             data=output_fft,
@@ -224,15 +172,6 @@ class SpectralShimmerNode(Node):
         with self._lock:
             self._shimmer_buffer = None
             self._last_frame_params = (0, 0, 0)
-
-    def serialize_extra(self) -> dict:
-        return self.get_current_state_snapshot()
-
-    def deserialize_extra(self, data: dict):
-        with self._lock:
-            self._pitch_shift_st = data.get("pitch_shift", 12.0)
-            self._feedback = data.get("feedback", 0.75)
-            self._mix = data.get("mix", 0.5)
 
 
 # ==============================================================================
@@ -272,8 +211,8 @@ class SpectralModulatorNodeItem(ParameterNodeItem):
         ]
         super().__init__(node_logic, parameters, width=self.NODE_SPECIFIC_WIDTH)
 
-    def updateFromLogic(self):
-        super().updateFromLogic()
+    def _on_state_updated_from_logic(self, state: dict):
+        super()._on_state_updated_from_logic(state)
         # Custom logic to disable rate control if mod_in is connected
         is_mod_ext = self.node_logic.inputs["mod_in"].connections
         self._controls["rate"]["widget"].setEnabled(not is_mod_ext)
@@ -287,16 +226,22 @@ class SpectralModulatorNodeItem(ParameterNodeItem):
 # ==============================================================================
 # 3. Node Logic Class (SpectralModulatorNode)
 # ==============================================================================
+@managed_parameters
 class SpectralModulatorNode(Node):
     NODE_TYPE = "Spectral Modulator"
     UI_CLASS = SpectralModulatorNodeItem
     CATEGORY = "Spectral"
     DESCRIPTION = "Applies phase modulation to a spectral frame, with internal or external LFO."
 
+    # --- Declarative managed parameters ---
+    rate = Parameter(default=1.5)
+    depth = Parameter(default=5.0)
+    mix = Parameter(default=0.5, clip=(0.0, 1.0))
+
     def __init__(self, name: str, node_id: Optional[str] = None):
         super().__init__(name, node_id)
 
-        # --- Setup Sockets ---
+        # --- Setup Sockets (matching parameter keys) ---
         self.add_input("spectral_frame_in", data_type=SpectralFrame)
         self.add_input("mod_in", data_type=float)
         self.add_input("rate", data_type=float)
@@ -304,77 +249,23 @@ class SpectralModulatorNode(Node):
         self.add_input("mix", data_type=float)
         self.add_output("spectral_frame_out", data_type=SpectralFrame)
 
-        # --- Internal State ---
-        self._rate_hz: float = 1.5
-        self._depth_ms: float = 5.0
-        self._mix: float = 0.5
-
         # --- DSP State ---
         self._lfo_phase: float = 0.0
 
-    # --- Parameter Setter Slots ---
-    @Slot(float)
-    def set_rate(self, value: float):
-        state_to_emit = None
-        with self._lock:
-            if self._rate_hz != value:
-                self._rate_hz = value
-                state_to_emit = self._get_state_snapshot_locked()
-        if state_to_emit:
-            self.ui_update_callback(state_to_emit)
-
-    @Slot(float)
-    def set_depth(self, value: float):
-        state_to_emit = None
-        with self._lock:
-            if self._depth_ms != value:
-                self._depth_ms = value
-                state_to_emit = self._get_state_snapshot_locked()
-        if state_to_emit:
-            self.ui_update_callback(state_to_emit)
-
-    @Slot(float)
-    def set_mix(self, value: float):
-        state_to_emit = None
-        with self._lock:
-            new_mix = max(0.0, min(float(value), 1.0))
-            if self._mix != new_mix:
-                self._mix = new_mix
-                state_to_emit = self._get_state_snapshot_locked()
-        if state_to_emit:
-            self.ui_update_callback(state_to_emit)
-
-    def _get_state_snapshot_locked(self) -> Dict:
-        return {"rate": self._rate_hz, "depth": self._depth_ms, "mix": self._mix}
+    # Manual setters, snapshot, and serialization methods are now handled by the decorator.
 
     def process(self, input_data: dict) -> dict:
         frame = input_data.get("spectral_frame_in")
         if not isinstance(frame, SpectralFrame):
             return {"spectral_frame_out": None}
 
-        state_snapshot_to_emit = None
+        self._update_params_from_sockets(input_data)
+
         with self._lock:
-            ui_update_needed = False
-            # --- Update state from parameter sockets if connected ---
-            rate_socket = input_data.get("rate")
-            if rate_socket is not None and self._rate_hz != float(rate_socket):
-                self._rate_hz = float(rate_socket)
-                ui_update_needed = True
-
-            depth_socket = input_data.get("depth")
-            if depth_socket is not None and self._depth_ms != float(depth_socket):
-                self._depth_ms = float(depth_socket)
-                ui_update_needed = True
-
-            mix_socket = input_data.get("mix")
-            if mix_socket is not None:
-                new_mix = max(0.0, min(float(mix_socket), 1.0))
-                if self._mix != new_mix:
-                    self._mix = new_mix
-                    ui_update_needed = True
-
-            if ui_update_needed:
-                state_snapshot_to_emit = self._get_state_snapshot_locked()
+            # Read the managed parameters for this processing block
+            rate_hz = self._rate
+            depth_ms = self._depth
+            mix_val = self._mix
 
             lfo_value = 0.0
             lfo_mod_input = input_data.get("mod_in")
@@ -383,11 +274,11 @@ class SpectralModulatorNode(Node):
                 lfo_value = float(lfo_mod_input)
             else:
                 frame_duration_s = frame.hop_size / frame.sample_rate
-                phase_increment = 2 * torch.pi * self._rate_hz * frame_duration_s
+                phase_increment = 2 * torch.pi * rate_hz * frame_duration_s
                 self._lfo_phase = (self._lfo_phase + phase_increment) % (2 * torch.pi)
                 lfo_value = torch.sin(torch.tensor(self._lfo_phase)).item()
 
-            delay_s = (self._depth_ms / 1000.0) * lfo_value
+            delay_s = (depth_ms / 1000.0) * lfo_value
             freqs = torch.fft.rfftfreq(frame.fft_size, d=1.0 / frame.sample_rate)
             phase_shifts_rad = 2 * torch.pi * freqs * delay_s
 
@@ -396,11 +287,7 @@ class SpectralModulatorNode(Node):
 
             # Broadcasting will apply the 1D phasor to each channel in the 2D frame data
             wet_signal = frame.data * phasor
-            output_fft = (frame.data * (1.0 - self._mix)) + (wet_signal * self._mix)
-
-        # --- Emit state update AFTER releasing lock ---
-        if state_snapshot_to_emit:
-            self.ui_update_callback(state_snapshot_to_emit)
+            output_fft = (frame.data * (1.0 - mix_val)) + (wet_signal * mix_val)
 
         output_frame = SpectralFrame(
             data=output_fft,
@@ -415,15 +302,6 @@ class SpectralModulatorNode(Node):
     def start(self):
         with self._lock:
             self._lfo_phase = 0.0
-
-    def serialize_extra(self) -> dict:
-        return self.get_current_state_snapshot()
-
-    def deserialize_extra(self, data: dict):
-        with self._lock:
-            self._rate_hz = data.get("rate", 1.5)
-            self._depth_ms = data.get("depth", 5.0)
-            self._mix = data.get("mix", 0.5)
 
 
 # ==============================================================================
@@ -506,11 +384,21 @@ class SpectralReverbNodeItem(ParameterNodeItem):
 # ==============================================================================
 # 3. Node Logic Class (SpectralReverbNode)
 # ==============================================================================
+@managed_parameters
 class SpectralReverbNode(Node):
     NODE_TYPE = "Spectral Reverb"
     UI_CLASS = SpectralReverbNodeItem
     CATEGORY = "Spectral"
     DESCRIPTION = "Algorithmic reverb that applies frequency-dependent decay to spectral frames."
+
+    # --- Declarative managed parameters with on_change hook ---
+    pre_delay_ms = Parameter(default=20.0, on_change="_mark_params_dirty")
+    decay_time = Parameter(default=2.5, on_change="_mark_params_dirty")
+    hf_damp = Parameter(default=4000.0, on_change="_mark_params_dirty")
+    lf_damp = Parameter(default=150.0, on_change="_mark_params_dirty")
+    diffusion = Parameter(default=1.0, clip=(0.0, 1.0), on_change="_mark_params_dirty")
+    width = Parameter(default=1.0, clip=(0.0, 1.0), on_change="_mark_params_dirty")
+    mix = Parameter(default=0.5, clip=(0.0, 1.0))
 
     def __init__(self, name: str, node_id: Optional[str] = None):
         super().__init__(name, node_id)
@@ -526,15 +414,6 @@ class SpectralReverbNode(Node):
         self.add_input("mix", data_type=float)
         self.add_output("spectral_frame_out", data_type=SpectralFrame)
 
-        # --- Internal State ---
-        self._pre_delay_ms: float = 20.0
-        self._decay_time_s: float = 2.5
-        self._hf_damp_hz: float = 4000.0
-        self._lf_damp_hz: float = 150.0
-        self._diffusion: float = 1.0
-        self._width: float = 1.0
-        self._mix: float = 0.5
-
         # --- DSP Buffers & State (Using torch.Tensor) ---
         self._reverb_fft_buffer: Optional[torch.Tensor] = None
         self._decay_factors: Optional[torch.Tensor] = None
@@ -543,126 +422,48 @@ class SpectralReverbNode(Node):
         self._last_frame_params: tuple = (0, 0)
         self._params_dirty: bool = True
 
-    # --- Parameter Setter Slots ---
-    @Slot(float)
-    def set_pre_delay_ms(self, value: float):
-        state = None
-        with self._lock:
-            if value != self._pre_delay_ms:
-                self._pre_delay_ms = value
-                self._params_dirty = True
-                state = self._get_state_snapshot_locked()
-        if state:
-            self.ui_update_callback(state)
-
-    @Slot(float)
-    def set_decay_time(self, value: float):
-        state = None
-        with self._lock:
-            if value != self._decay_time_s:
-                self._decay_time_s = value
-                self._params_dirty = True
-                state = self._get_state_snapshot_locked()
-        if state:
-            self.ui_update_callback(state)
-
-    @Slot(float)
-    def set_hf_damp(self, value: float):
-        state = None
-        with self._lock:
-            if value != self._hf_damp_hz:
-                self._hf_damp_hz = value
-                self._params_dirty = True
-                state = self._get_state_snapshot_locked()
-        if state:
-            self.ui_update_callback(state)
-
-    @Slot(float)
-    def set_lf_damp(self, value: float):
-        state = None
-        with self._lock:
-            if value != self._lf_damp_hz:
-                self._lf_damp_hz = value
-                self._params_dirty = True
-                state = self._get_state_snapshot_locked()
-        if state:
-            self.ui_update_callback(state)
-
-    @Slot(float)
-    def set_diffusion(self, value: float):
-        state = None
-        with self._lock:
-            value = max(0.0, min(float(value), 1.0))
-            if value != self._diffusion:
-                self._diffusion = value
-                self._params_dirty = True
-                state = self._get_state_snapshot_locked()
-        if state:
-            self.ui_update_callback(state)
-
-    @Slot(float)
-    def set_width(self, value: float):
-        state = None
-        with self._lock:
-            value = max(0.0, min(float(value), 1.0))
-            if value != self._width:
-                self._width = value
-                self._params_dirty = True
-                state = self._get_state_snapshot_locked()
-        if state:
-            self.ui_update_callback(state)
-
-    @Slot(float)
-    def set_mix(self, value: float):
-        state = None
-        with self._lock:
-            value = max(0.0, min(float(value), 1.0))
-            if value != self._mix:
-                self._mix = value
-                state = self._get_state_snapshot_locked()
-        if state:
-            self.ui_update_callback(state)
-
-    def _get_state_snapshot_locked(self) -> Dict:
-        return {
-            "pre_delay_ms": self._pre_delay_ms,
-            "decay_time": self._decay_time_s,
-            "hf_damp": self._hf_damp_hz,
-            "lf_damp": self._lf_damp_hz,
-            "diffusion": self._diffusion,
-            "width": self._width,
-            "mix": self._mix,
-        }
+    def _mark_params_dirty(self):
+        """
+        Callback method for the decorator. Called when a parameter with
+        on_change="_mark_params_dirty" is modified. The lock is held.
+        """
+        self._params_dirty = True
 
     def _recalculate_params(self, frame: SpectralFrame):
-        t60 = self._decay_time_s
+        # Read parameters via their internal names
+        t60 = self._decay_time
+        hf_damp_hz = self._hf_damp
+        lf_damp_hz = self._lf_damp
+        diffusion_val = self._diffusion
+        width_val = self._width
+        pre_delay_ms_val = self._pre_delay_ms
+
         freqs = torch.fft.rfftfreq(frame.fft_size, d=1.0 / frame.sample_rate)
         num_bins = freqs.shape[0]
 
         # --- Damping Logic ---
-        hf_damp_factor = torch.clamp((self._hf_damp_hz - freqs) / self._hf_damp_hz, 0.1, 1.0)
-        hf_damp_factor[freqs < self._hf_damp_hz] = 1.0
-        lf_damp_factor = torch.clamp(freqs / self._lf_damp_hz, 0.1, 1.0)
-        lf_damp_factor[freqs > self._lf_damp_hz] = 1.0
+        hf_damp_factor = torch.clamp((hf_damp_hz - freqs) / hf_damp_hz, 0.1, 1.0)
+        hf_damp_factor[freqs < hf_damp_hz] = 1.0
+        lf_damp_factor = torch.clamp(freqs / lf_damp_hz, 0.1, 1.0)
+        lf_damp_factor[freqs > lf_damp_hz] = 1.0
         damped_t60 = t60 * hf_damp_factor * lf_damp_factor
 
         frames_per_second = frame.sample_rate / frame.hop_size
         magnitudes = 10.0 ** (-3.0 / (damped_t60 * frames_per_second + EPSILON))
 
         # --- Stereo Width & Diffusion Logic ---
-        phase_shift_amount = self._diffusion * torch.pi
+        phase_shift_amount = diffusion_val * torch.pi
         random_phases_1 = (torch.rand(num_bins) * 2 - 1) * phase_shift_amount
         random_phases_2 = (torch.rand(num_bins) * 2 - 1) * phase_shift_amount
         phases_L = random_phases_1
-        phases_R = random_phases_1 * (1.0 - self._width) + random_phases_2 * self._width
+        phases_R = random_phases_1 * (1.0 - width_val) + random_phases_2 * width_val
 
         decay_L = torch.polar(magnitudes, phases_L).to(DEFAULT_COMPLEX_DTYPE)
         decay_R = torch.polar(magnitudes, phases_R).to(DEFAULT_COMPLEX_DTYPE)
-        # Stack to create (2, num_bins) tensor
         self._decay_factors = torch.stack([decay_L, decay_R], dim=0)
 
         # --- Recalculate Pre-delay Buffer ---
-        pre_delay_s = self._pre_delay_ms / 1000.0
+        pre_delay_s = pre_delay_ms_val / 1000.0
         frame_duration_s = frame.hop_size / frame.sample_rate
         self._pre_delay_frames = int(round(pre_delay_s / (frame_duration_s + EPSILON)))
         if self._pre_delay_buffer.maxlen != self._pre_delay_frames:
@@ -676,24 +477,10 @@ class SpectralReverbNode(Node):
         if not isinstance(frame, SpectralFrame):
             return {"spectral_frame_out": None}
 
-        state_snapshot_to_emit = None
-        with self._lock:
-            # --- Update parameters from input sockets ---
-            param_map = {
-                "pre_delay_ms": "_pre_delay_ms",
-                "decay_time": "_decay_time_s",
-                "hf_damp": "_hf_damp_hz",
-                "lf_damp": "_lf_damp_hz",
-                "diffusion": "_diffusion",
-                "width": "_width",
-                "mix": "_mix",
-            }
-            for socket_name, attr_name in param_map.items():
-                socket_val = input_data.get(socket_name)
-                if socket_val is not None and getattr(self, attr_name) != socket_val:
-                    setattr(self, attr_name, float(socket_val))
-                    self._params_dirty = True
+        # The decorator's helper handles socket updates and marks params dirty via on_change
+        self._update_params_from_sockets(input_data)
 
+        with self._lock:
             # --- Initialize/Reset buffers on format change ---
             num_channels, num_bins = frame.data.shape
             current_frame_params = (frame.fft_size, frame.hop_size)
@@ -705,7 +492,8 @@ class SpectralReverbNode(Node):
 
             if self._params_dirty:
                 self._recalculate_params(frame)
-                state_snapshot_to_emit = self._get_state_snapshot_locked()
+
+            mix_val = self._mix  # Read the mix parameter
 
             # --- Pre-delay Logic ---
             self._pre_delay_buffer.append(frame.data)
@@ -717,17 +505,13 @@ class SpectralReverbNode(Node):
             # --- Handle Mono Input and ensure stereo processing ---
             dry_signal = frame.data
             if num_channels == 1:
-                delayed_frame_data = delayed_frame_data.repeat(2, 1)  # (1, bins) -> (2, bins)
+                delayed_frame_data = delayed_frame_data.repeat(2, 1)
                 dry_signal = dry_signal.repeat(2, 1)
 
             # --- Core DSP Algorithm ---
             wet_signal = self._reverb_fft_buffer * self._decay_factors
             self._reverb_fft_buffer = delayed_frame_data + wet_signal
-            # Broadcasting handles mono dry signal against stereo wet signal
-            output_fft = (dry_signal * (1.0 - self._mix)) + (wet_signal * self._mix)
-
-        if state_snapshot_to_emit:
-            self.ui_update_callback(state_snapshot_to_emit)
+            output_fft = (dry_signal * (1.0 - mix_val)) + (wet_signal * mix_val)
 
         output_frame = SpectralFrame(
             data=output_fft,
@@ -744,18 +528,4 @@ class SpectralReverbNode(Node):
             self._reverb_fft_buffer = None
             self._last_frame_params = (0, 0)
             self._pre_delay_buffer.clear()
-            self._params_dirty = True
-
-    def serialize_extra(self) -> dict:
-        return self.get_current_state_snapshot()
-
-    def deserialize_extra(self, data: dict):
-        with self._lock:
-            self._pre_delay_ms = data.get("pre_delay_ms", 20.0)
-            self._decay_time_s = data.get("decay_time", 2.5)
-            self._hf_damp_hz = data.get("hf_damp", 4000.0)
-            self._lf_damp_hz = data.get("lf_damp", 150.0)
-            self._diffusion = data.get("diffusion", 1.0)
-            self._width = data.get("width", 1.0)
-            self._mix = data.get("mix", 0.5)
             self._params_dirty = True

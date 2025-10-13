@@ -1,7 +1,7 @@
 import numpy as np
 import threading
 import logging
-from typing import Dict, Optional
+from typing import Dict, Optional, Deque
 
 # --- Node System Imports ---
 from node_system import Node
@@ -11,6 +11,9 @@ from constants import DEFAULT_SAMPLERATE, DEFAULT_BLOCKSIZE, DEFAULT_DTYPE
 # --- Qt Imports ---
 from PySide6.QtCore import Qt, Signal, Slot, QObject, QSignalBlocker
 from PySide6.QtWidgets import QWidget, QLabel, QSlider, QVBoxLayout, QPushButton, QSizePolicy
+
+# --- Helper Imports ---
+from node_helpers import managed_parameters, Parameter
 
 # --- Logging ---
 logger = logging.getLogger(__name__)
@@ -73,11 +76,18 @@ class ADSRNodeItem(ParameterNodeItem):
 # ==============================================================================
 # 3. ADSR Node Logic Class
 # ==============================================================================
+@managed_parameters
 class ADSRNode(Node):
     NODE_TYPE = "ADSR Envelope"
     UI_CLASS = ADSRNodeItem
     CATEGORY = "Modulation"
     DESCRIPTION = "Generates a control signal based on a gate input."
+
+    # --- Declarative managed parameters ---
+    attack = Parameter(default=0.01, clip=(0.0, 5.0))
+    decay = Parameter(default=0.2, clip=(0.0, 5.0))
+    sustain = Parameter(default=0.7, clip=(0.0, 1.0))
+    release = Parameter(default=0.5, clip=(0.0, 5.0))
 
     def __init__(self, name: str, node_id: Optional[str] = None):
         super().__init__(name, node_id)
@@ -91,97 +101,23 @@ class ADSRNode(Node):
         self.add_output("out", data_type=float)
 
         # --- Internal State ---
-
-        # User-configurable parameters (defaults)
-        self._attack_s: float = 0.01
-        self._decay_s: float = 0.2
-        self._sustain_level: float = 0.7
-        self._release_s: float = 0.5
-
-        # Envelope state machine
         self._state: str = "idle"
         self._current_level: float = 0.0
         self._previous_gate: bool = False
 
-    # --- Thread-safe setters for UI interaction ---
-    @Slot(float)
-    def set_attack(self, value: float):
-        state_to_emit = None
-        with self._lock:
-            self._attack_s = float(value)
-            state_to_emit = self._get_state_snapshot_locked()
-        if state_to_emit:
-            self.ui_update_callback(state_to_emit)
-
-    @Slot(float)
-    def set_decay(self, value: float):
-        state_to_emit = None
-        with self._lock:
-            self._decay_s = float(value)
-            state_to_emit = self._get_state_snapshot_locked()
-        if state_to_emit:
-            self.ui_update_callback(state_to_emit)
-
-    @Slot(float)
-    def set_sustain(self, value: float):
-        state_to_emit = None
-        with self._lock:
-            self._sustain_level = float(value)
-            state_to_emit = self._get_state_snapshot_locked()
-        if state_to_emit:
-            self.ui_update_callback(state_to_emit)
-
-    @Slot(float)
-    def set_release(self, value: float):
-        state_to_emit = None
-        with self._lock:
-            self._release_s = float(value)
-            state_to_emit = self._get_state_snapshot_locked()
-        if state_to_emit:
-            self.ui_update_callback(state_to_emit)
-
-    def _get_state_snapshot_locked(self) -> Dict:
-        return {
-            "attack": self._attack_s,
-            "decay": self._decay_s,
-            "sustain": self._sustain_level,
-            "release": self._release_s,
-        }
+    # Manual setters, _get_state_snapshot_locked, serialize_extra, and deserialize_extra
+    # are now automatically handled by the @managed_parameters decorator.
 
     def process(self, input_data: dict) -> dict:
-        state_snapshot_to_emit = None
+        # --- Update parameters from sockets. This also handles UI updates. ---
+        self._update_params_from_sockets(input_data)
+
         with self._lock:
-            ui_update_needed = False
-
-            # --- Prioritize socket inputs over internal state ---
-            attack_socket_val = input_data.get("attack")
-            attack_s = float(attack_socket_val) if attack_socket_val is not None else self._attack_s
-
-            decay_socket_val = input_data.get("decay")
-            decay_s = float(decay_socket_val) if decay_socket_val is not None else self._decay_s
-
-            sustain_socket_val = input_data.get("sustain")
-            sustain_level = float(sustain_socket_val) if sustain_socket_val is not None else self._sustain_level
-
-            release_socket_val = input_data.get("release")
-            release_s = float(release_socket_val) if release_socket_val is not None else self._release_s
-
-            # --- Check for changes from sockets to update UI ---
-            if self._attack_s != attack_s:
-                self._attack_s = attack_s
-                ui_update_needed = True
-            if self._decay_s != decay_s:
-                self._decay_s = decay_s
-                ui_update_needed = True
-            if self._sustain_level != sustain_level:
-                self._sustain_level = sustain_level
-                ui_update_needed = True
-            if self._release_s != release_s:
-                self._release_s = release_s
-                ui_update_needed = True
-
-            if ui_update_needed:
-                state_snapshot_to_emit = self._get_state_snapshot_locked()
+            # --- Get a consistent snapshot of the managed parameters ---
+            attack_s = self._attack
+            decay_s = self._decay
+            sustain_level = self._sustain
+            release_s = self._release
 
             gate = bool(input_data.get("gate", False))
 
@@ -246,9 +182,6 @@ class ADSRNode(Node):
 
             output_value = self._current_level
 
-        if state_snapshot_to_emit:
-            self.ui_update_callback(state_snapshot_to_emit)
-
         return {"out": float(output_value)}
 
     def start(self):
@@ -258,18 +191,6 @@ class ADSRNode(Node):
             self._state = "idle"
             self._current_level = 0.0
             self._previous_gate = False
-
-    def serialize_extra(self) -> dict:
-        """Save the node's user-configured parameters."""
-        return self.get_current_state_snapshot()
-
-    def deserialize_extra(self, data: dict):
-        """Load the node's parameters from a file."""
-        with self._lock:
-            self._attack_s = data.get("attack", 0.01)
-            self._decay_s = data.get("decay", 0.2)
-            self._sustain_level = data.get("sustain", 0.7)
-            self._release_s = data.get("release", 0.5)
 
 
 # ==============================================================================
@@ -374,12 +295,16 @@ class LFONodeItem(ParameterNodeItem):
 # ==============================================================================
 # 7. LFO Node Logic Class
 # ==============================================================================
+@managed_parameters
 class LFONode(Node):
     NODE_TYPE = "LFO"
     CATEGORY = "Modulation"
     DESCRIPTION = "Low-frequency oscillator for modulation (sine, square, saw)."
     UI_CLASS = LFONodeItem
     IS_CLOCK_SOURCE = False  # Driven by graph ticks
+
+    # --- Declarative managed parameters ---
+    frequency = Parameter(default=1.0, clip=(0.01, 20.0))
 
     def __init__(self, name, node_id=None):
         super().__init__(name, node_id)
@@ -393,58 +318,27 @@ class LFONode(Node):
         self.samplerate = DEFAULT_SAMPLERATE
         self.blocksize = DEFAULT_BLOCKSIZE
 
-        self._frequency_hz = 1.0
         self._phase = 0.0  # [0, 1) range
 
-        logger.debug(f"LFO [{self.name}] initialized at {self._frequency_hz} Hz")
+        logger.debug(f"LFO [{self.name}] initialized.")
 
-    # -----------------
-    # UI thread methods (thread-safe)
-    # -----------------
-    @Slot(float)
-    def set_frequency(self, freq: float):
-        state_to_emit = None
-        with self._lock:
-            new_freq = max(0.001, float(freq))  # Avoid 0 Hz
-            if self._frequency_hz != new_freq:
-                self._frequency_hz = new_freq
-                state_to_emit = {"frequency": self._frequency_hz}
-        if state_to_emit:
-            self.ui_update_callback(state_to_emit)
+    # Manual setter, _get_state_snapshot_locked, serialize_extra, and deserialize_extra
+    # are now automatically handled by the @managed_parameters decorator.
 
-    def _get_state_snapshot_locked(self) -> Dict:
-        return {"frequency": self._frequency_hz}
-
-    # -----------------
-    # Worker thread method
-    # -----------------
     def process(self, input_data: dict) -> dict:
-        state_snapshot_to_emit = None
+        # --- Update parameters from sockets. This also handles UI updates. ---
+        self._update_params_from_sockets(input_data)
+
         with self._lock:
-            ui_update_needed = False
-
-            # --- Prioritize socket inputs over internal state ---
-            frequency_socket = input_data.get("frequency")
-            if frequency_socket is not None:
-                new_freq = max(0.001, float(frequency_socket))  # Avoid 0 Hz
-                if self._frequency_hz != new_freq:
-                    self._frequency_hz = new_freq
-                    ui_update_needed = True
-
-            if ui_update_needed:
-                state_snapshot_to_emit = {"frequency": self._frequency_hz}
-
-            sync_trigger = input_data.get("sync_control")
-            freq = self._frequency_hz
-
-        if state_snapshot_to_emit:
-            self.ui_update_callback(state_snapshot_to_emit)
+            # Get a consistent snapshot of the managed parameter
+            freq = self._frequency
 
         # phase increment calculation.
         # The phase must advance by the number of samples in one processing block (tick).
         phase_increment = (freq / self.samplerate) * self.blocksize
 
         # --- sync trigger ---
+        sync_trigger = input_data.get("sync_control")
         if sync_trigger is not None and sync_trigger:
             self._phase = 0.0
         else:
@@ -458,12 +352,3 @@ class LFONode(Node):
         saw_val = (2.0 * phase) - 1.0  # Ramps from -1.0 to 1.0
 
         return {"sine_out": sine_val, "square_out": square_val, "saw_out": saw_val}
-
-    def serialize_extra(self):
-        with self._lock:
-            return {"frequency": self._frequency_hz, "phase": self._phase}
-
-    def deserialize_extra(self, data):
-        with self._lock:
-            self._frequency_hz = float(data.get("frequency", 1.0))
-            self._phase = float(data.get("phase", 0.0))

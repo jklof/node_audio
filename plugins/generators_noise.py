@@ -1,7 +1,6 @@
 import torch
 import numpy as np
 import scipy.signal
-import threading
 import logging
 from enum import Enum
 from typing import Dict
@@ -10,9 +9,9 @@ from typing import Dict
 from node_system import Node
 from constants import DEFAULT_DTYPE, DEFAULT_SAMPLERATE, DEFAULT_BLOCKSIZE, DEFAULT_CHANNELS
 
-# --- UI and Qt Imports ---
+# --- UI and Helper Imports ---
 from ui_elements import ParameterNodeItem
-from PySide6.QtCore import Slot
+from node_helpers import managed_parameters, Parameter
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -69,15 +68,24 @@ class NoiseGeneratorNodeItem(ParameterNodeItem):
 
 
 # ==============================================================================
-# Noise Generator Logic Node (Unchanged logic, only import was missing)
+# Noise Generator Logic Node
 # ==============================================================================
+@managed_parameters
 class NoiseGeneratorNode(Node):
     NODE_TYPE = "Noise Generator"
     UI_CLASS = NoiseGeneratorNodeItem
     CATEGORY = "Generators"
     DESCRIPTION = "Generates various types of noise (White, Pink, Brown, Blue, Violet)."
 
+    # --- Declarative managed parameters ---
+    # The decorator automatically creates thread-safe setters (e.g., set_noise_type, set_level),
+    # serialization, deserialization, and the UI update callback mechanism.
+    noise_type = Parameter(default=NoiseType.WHITE)
+    level = Parameter(default=0.5, clip=(0.0, 1.0))
+
     def __init__(self, name, node_id=None):
+        # The decorator handles initializing self._noise_type and self._level.
+        # The original __init__ is called after the parameters are set up.
         super().__init__(name, node_id)
         self.add_input("level", data_type=float)
         self.add_output("out", data_type=torch.Tensor)
@@ -85,8 +93,6 @@ class NoiseGeneratorNode(Node):
         self.samplerate = DEFAULT_SAMPLERATE
         self.blocksize = DEFAULT_BLOCKSIZE
         self.channels = DEFAULT_CHANNELS
-        self._noise_type: NoiseType = NoiseType.WHITE
-        self._level: float = 0.5
 
         # Filter states and coefficients will be NumPy arrays for SciPy
         self._filter_coeffs = {}
@@ -115,58 +121,26 @@ class NoiseGeneratorNode(Node):
             NoiseType.VIOLET: (b_violet, a_violet),
         }
 
-        # --- FIXED: Correctly initialize a 2D NumPy array for filter states ---
         # Each channel needs its own independent state.
         for nt, (b, a) in self._filter_coeffs.items():
-            # 1. Get the initial state for a single channel.
             zi_single = scipy.signal.lfilter_zi(b, a)
-            # 2. Create a 2D array of shape (num_channels, filter_order)
-            #    by repeating the single-channel state for each channel.
-            #    This ensures each channel has a separate copy of the state.
             self._filter_states[nt] = np.array([zi_single] * self.channels)
 
         logger.debug(f"[{self.name}] Filters initialized for {self.channels} channels at {self.samplerate}Hz.")
 
-    def _get_state_snapshot_locked(self) -> Dict:
-        return {"noise_type": self._noise_type, "level": self._level}
-
-    @Slot(NoiseType)
-    def set_noise_type(self, noise_type: NoiseType):
-        state_to_emit = None
-        with self._lock:
-            if self._noise_type != noise_type:
-                logger.info(f"[{self.name}] Changing noise type to: {noise_type.value}")
-                self._noise_type = noise_type
-                # No need to re-init filters, just use the correct one
-                state_to_emit = self._get_state_snapshot_locked()
-        if state_to_emit:
-            self.ui_update_callback(state_to_emit)
-
-    @Slot(float)
-    def set_level(self, level: float):
-        state_to_emit = None
-        with self._lock:
-            new_level = np.clip(float(level), 0.0, 1.0)
-            if self._level != new_level:
-                self._level = new_level
-                state_to_emit = self._get_state_snapshot_locked()
-        if state_to_emit:
-            self.ui_update_callback(state_to_emit)
+    # Boilerplate methods like set_noise_type, set_level, _get_state_snapshot_locked,
+    # serialize_extra, and deserialize_extra are now automatically handled by the
+    # @managed_parameters decorator and can be removed.
 
     def process(self, input_data: dict) -> dict:
-        state_snapshot_to_emit = None
+        # The injected helper method handles updating parameters from sockets,
+        # including clipping, side-effects, and emitting a single UI update signal if needed.
+        self._update_params_from_sockets(input_data)
+
+        # Create a consistent snapshot of parameters for this processing block.
         with self._lock:
-            level_socket = input_data.get("level")
-            if level_socket is not None:
-                new_level = np.clip(float(level_socket), 0.0, 1.0)
-                if abs(self._level - new_level) > 1e-6:
-                    self._level = new_level
-                    state_snapshot_to_emit = self._get_state_snapshot_locked()
             noise_type = self._noise_type
             level = self._level
-
-        if state_snapshot_to_emit:
-            self.ui_update_callback(state_snapshot_to_emit)
 
         # Generate white noise directly as a torch tensor
         white_noise = torch.rand(self.channels, self.blocksize, dtype=DEFAULT_DTYPE) * 2.0 - 1.0
@@ -180,39 +154,41 @@ class NoiseGeneratorNode(Node):
             with self._lock:  # Lock only when accessing shared filter state
                 b, a = self._filter_coeffs[noise_type]
                 zi = self._filter_states[noise_type]
-                # The lfilter function with axis=1 and a 2D zi array correctly
-                # processes each channel independently.
                 processed_signal_np, zf = scipy.signal.lfilter(b, a, white_noise_np, axis=1, zi=zi)
                 self._filter_states[noise_type] = zf
 
             # Convert back to a torch tensor
             processed_signal = torch.from_numpy(processed_signal_np.astype(np.float32))
 
-        # Apply level and clipping
-        output_block = torch.clamp(processed_signal * level, -1.0, 1.0)
+        # Apply level
+        output_block = processed_signal * level
 
         return {"out": output_block}
 
     def start(self):
         with self._lock:
+            # It's good practice to reset filter states when processing starts
             self._init_filter_coeffs_and_states()
         logger.debug(f"[{self.name}] started, filter states reset.")
 
+    # The decorator will generate a serialize_extra that saves 'noise_type' and 'level'.
+    # We only need to add the 'channels' key, which is not a managed parameter.
     def serialize_extra(self) -> dict:
         with self._lock:
-            return {
-                "noise_type": self._noise_type.name,
-                "level": self._level,
-                "channels": self.channels,
-            }
+            # Get the state from the decorator's injected method
+            state = self._get_state_snapshot_locked()
+            # Add any non-managed parameters
+            state["channels"] = self.channels
+            # The decorator's serialize method will handle converting the Enum to a string
+            return state
 
+    # The decorator will handle loading 'noise_type' and 'level'.
+    # We just need to load our custom 'channels' data.
     def deserialize_extra(self, data: dict):
+        # Let the decorator handle its own parameters first
+        super().deserialize_extra(data)
+        # Now, handle any custom data
         with self._lock:
-            noise_type_name = data.get("noise_type", NoiseType.WHITE.name)
-            try:
-                self._noise_type = NoiseType[noise_type_name]
-            except KeyError:
-                self._noise_type = NoiseType.WHITE
-            self._level = np.clip(float(data.get("level", 0.5)), 0.0, 1.0)
             self.channels = int(data.get("channels", DEFAULT_CHANNELS))
+        # Re-initialize filters since channel count might have changed
         self._init_filter_coeffs_and_states()
