@@ -10,6 +10,7 @@ from typing import Dict, Optional
 from node_system import Node
 from constants import DEFAULT_SAMPLERATE, DEFAULT_DTYPE
 from ui_elements import ParameterNodeItem, NODE_CONTENT_PADDING
+from node_helpers import managed_parameters, Parameter
 
 # --- UI and Qt Imports ---
 from PySide6.QtWidgets import QWidget, QLabel, QComboBox, QSlider, QVBoxLayout
@@ -91,28 +92,43 @@ class LinearPhaseEQNodeItem(ParameterNodeItem):
 # ==============================================================================
 # 2. Logic Class for the Linear Phase EQ Node
 # ==============================================================================
+@managed_parameters
 class LinearPhaseEQNode(Node):
     NODE_TYPE = "Linear Phase EQ"
     UI_CLASS = LinearPhaseEQNodeItem
     CATEGORY = "Filters"
     DESCRIPTION = "Applies a linear-phase (FIR) filter to an audio signal."
 
+    # --- Declarative managed parameters ---
+    # The decorator will create setters (e.g., set_filter_type) and handle state.
+    # The on_change hook is used to set the dirty flag, preserving the optimization.
+    filter_type = Parameter(default="Low Pass", on_change="_mark_params_dirty")
+    cutoff_freq = Parameter(default=1000.0, on_change="_mark_params_dirty", clip=(20.0, 20000.0))
+    q = Parameter(default=1.0, on_change="_mark_params_dirty", clip=(0.1, 10.0))
+
     def __init__(self, name: str, node_id: Optional[str] = None):
+        # The decorator's __init__ wrapper will initialize self._filter_type,
+        # self._cutoff_freq, and self._q before this is called.
         super().__init__(name, node_id)
         self.add_input("in", data_type=torch.Tensor)
         self.add_input("cutoff_freq", data_type=float)
         self.add_input("q", data_type=float)
         self.add_output("out", data_type=torch.Tensor)
 
-        self._filter_type: str = "Low Pass"
-        self._cutoff_freq: float = 1000.0
-        self._q: float = 1.0
         self._params_dirty: bool = True
         self._coeffs: Optional[torch.Tensor] = None
         self._history_buffer: Optional[torch.Tensor] = None
         self._expected_channels: Optional[int] = None
 
+    def _mark_params_dirty(self):
+        """Callback for the decorator to set the dirty flag when a parameter changes."""
+        self._params_dirty = True
+
     def _recalculate_coeffs(self):
+        """
+        Calculates the FIR filter coefficients based on the current parameters.
+        This method remains unchanged.
+        """
         nyquist = DEFAULT_SAMPLERATE / 2.0
         taps = None
         if self._filter_type in ["Low Pass", "High Pass"]:
@@ -145,54 +161,24 @@ class LinearPhaseEQNode(Node):
         self._params_dirty = False
         logger.info(f"[{self.name}] Recalculated FIR coefficients for {self._filter_type}.")
 
-    # --- Public methods for UI interaction ---
-    @Slot(str)
-    def set_filter_type(self, f_type: str):
-        state_snapshot_to_emit = None
-        with self._lock:
-            if self._filter_type != f_type:
-                self._filter_type = f_type
-                self._params_dirty = True
-                state_snapshot_to_emit = self._get_state_snapshot_locked()
-        if state_snapshot_to_emit:
-            self.ui_update_callback(state_snapshot_to_emit)
-
-    @Slot(float)
-    def set_cutoff_freq(self, freq: float):
-        state_snapshot_to_emit = None
-        with self._lock:
-            new_freq = max(20.0, min(float(freq), DEFAULT_SAMPLERATE / 2 - 1))
-            if self._cutoff_freq != new_freq:
-                self._cutoff_freq = new_freq
-                self._params_dirty = True
-                state_snapshot_to_emit = self._get_state_snapshot_locked()
-        if state_snapshot_to_emit:
-            self.ui_update_callback(state_snapshot_to_emit)
-
-    @Slot(float)
-    def set_q(self, q: float):
-        state_snapshot_to_emit = None
-        with self._lock:
-            new_q = max(0.1, float(q))
-            if self._q != new_q:
-                self._q = new_q
-                self._params_dirty = True
-                state_snapshot_to_emit = self._get_state_snapshot_locked()
-        if state_snapshot_to_emit:
-            self.ui_update_callback(state_snapshot_to_emit)
+    # --- The manual @Slot setters (set_filter_type, etc.) are no longer needed. ---
+    # The @managed_parameters decorator creates them automatically.
 
     def _get_state_snapshot_locked(self) -> Dict:
-        """Gathers the current state. ASSUMES THE CALLER HOLDS THE LOCK."""
-        # MODIFIED: Changed "freq" key to "cutoff_freq" to match parameter key
-        is_freq_ext = "cutoff_freq" in self.inputs and self.inputs["cutoff_freq"].connections
-        is_q_ext = "q" in self.inputs and self.inputs["q"].connections
-        return {
+        """
+        Overrides the decorator's injected method to add UI-specific state keys
+        for disabling controls when sockets are connected.
+        """
+        # 1. Re-implement the base functionality from the decorator
+        state = {
             "filter_type": self._filter_type,
             "cutoff_freq": self._cutoff_freq,
             "q": self._q,
-            "is_cutoff_freq_ext": is_freq_ext,
-            "is_q_ext": is_q_ext,
         }
+        # 2. Add the custom keys needed by the UI
+        state["is_cutoff_freq_ext"] = "cutoff_freq" in self.inputs and self.inputs["cutoff_freq"].connections
+        state["is_q_ext"] = "q" in self.inputs and self.inputs["q"].connections
+        return state
 
     # --- Processing methods ---
     def start(self):
@@ -207,18 +193,14 @@ class LinearPhaseEQNode(Node):
             return {"out": None}
 
         num_channels, _ = signal.shape
-        state_snapshot_to_emit = None
+
+        # The decorator's helper method handles socket updates, marks params dirty via the
+        # on_change hook, and emits a UI update signal if any value changed.
+        self._update_params_from_sockets(input_data)
 
         with self._lock:
-            freq_socket = input_data.get("cutoff_freq")
-            if freq_socket is not None and self._cutoff_freq != float(freq_socket):
-                self._cutoff_freq = max(20.0, min(float(freq_socket), DEFAULT_SAMPLERATE / 2 - 1))
-                self._params_dirty = True
-            q_socket = input_data.get("q")
-            if q_socket is not None and self._q != float(q_socket):
-                self._q = max(0.1, float(q_socket))
-                self._params_dirty = True
-
+            # This block is now simpler, only handling channel count changes and
+            # checking the dirty flag that the helper function may have set.
             if self._expected_channels != num_channels:
                 self._expected_channels = num_channels
                 self._history_buffer = torch.zeros((num_channels, NUM_TAPS - 1), dtype=DEFAULT_DTYPE)
@@ -226,7 +208,6 @@ class LinearPhaseEQNode(Node):
 
             if self._params_dirty:
                 self._recalculate_coeffs()
-                state_snapshot_to_emit = self._get_state_snapshot_locked()
 
             if self._coeffs is None or self._history_buffer is None:
                 return {"out": signal}
@@ -237,18 +218,7 @@ class LinearPhaseEQNode(Node):
             filtered_signal = filtered_batched.squeeze(0)
             self._history_buffer = signal[:, -(NUM_TAPS - 1) :]
 
-        if state_snapshot_to_emit:
-            self.ui_update_callback(state_snapshot_to_emit)
-
         return {"out": filtered_signal}
 
-    def serialize_extra(self) -> Dict:
-        with self._lock:
-            return {"filter_type": self._filter_type, "cutoff_freq": self._cutoff_freq, "q": self._q}
-
-    def deserialize_extra(self, data: Dict):
-        with self._lock:
-            self._filter_type = data.get("filter_type", "Low Pass")
-            self._cutoff_freq = data.get("cutoff_freq", 1000.0)
-            self._q = data.get("q", 1.0)
-            self._params_dirty = True
+    # The serialize_extra and deserialize_extra methods are no longer needed.
+    # The @managed_parameters decorator injects them automatically.

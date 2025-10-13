@@ -8,10 +8,10 @@ from typing import Dict
 # --- Node System Imports ---
 from node_system import Node
 from constants import DEFAULT_SAMPLERATE, DEFAULT_BLOCKSIZE, DEFAULT_DTYPE
-from ui_elements import ParameterNodeItem, NodeItem, NODE_CONTENT_PADDING
+from ui_elements import ParameterNodeItem
+from node_helpers import managed_parameters, Parameter  # <--- IMPORT a
 
 # --- UI and Qt Imports ---
-from PySide6.QtWidgets import QWidget, QLabel, QSlider, QVBoxLayout
 from PySide6.QtCore import Qt, Slot, QSignalBlocker
 
 EPSILON = 1e-9
@@ -21,11 +21,12 @@ logger = logging.getLogger(__name__)
 
 
 # ==============================================================================
-# 1. UI Class for the AutoGain Node
+# 1. UI Class for the AutoGain Node (No changes needed)
 # ==============================================================================
 class AutoGainNodeItem(ParameterNodeItem):
     """
     UI for the AutoGainNode with intuitive controls for professional leveling.
+    This class requires no changes as it already uses the declarative ParameterNodeItem.
     """
 
     NODE_SPECIFIC_WIDTH = 220
@@ -63,77 +64,56 @@ class AutoGainNodeItem(ParameterNodeItem):
 
 
 # ==============================================================================
-# 2. Logic Class for the AutoGain Node (Professional Leveler Algorithm)
+# 2. Logic Class for the AutoGain Node (REFACTORED)
 # ==============================================================================
+@managed_parameters  # <--- DECORATOR APPLIED
 class AutoGainNode(Node):
     NODE_TYPE = "Auto Gain"
     UI_CLASS = AutoGainNodeItem
     CATEGORY = "Effects"
     DESCRIPTION = "Automatically calculates gain to match a target signal level (RMS)."
 
+    # --- Declarative managed parameters ---
+    # The decorator automatically creates thread-safe setters (e.g., set_target_db),
+    # serialization, deserialization, and the UI update callback mechanism.
+    target_db = Parameter(default=-14.0)
+    averaging_time_s = Parameter(default=3.0, on_change="_recalculate_deque_size")
+    gain_smoothing_ms = Parameter(default=500.0)
+
     def __init__(self, name, node_id=None):
         super().__init__(name, node_id)
         self.add_input("in", data_type=torch.Tensor)
+        # Sockets that match parameter names will be automatically updated by the helper
         self.add_input("target_db", data_type=float)
         self.add_input("averaging_time_s", data_type=float)
         self.add_input("gain_smoothing_ms", data_type=float)
         self.add_output("gain_out", data_type=float)
 
-        # --- Internal state parameters ---
-        self._target_db: float = -14.0
-        self._averaging_time_s: float = 3.0
-        self._gain_smoothing_ms: float = 500.0
-
-        # --- DSP State ---
+        # --- DSP State (not a managed parameter) ---
         self._current_gain_db: float = -70.0  # Start silent
         self._rms_history: deque = deque(maxlen=1)
+        # Initial deque sizing based on the default parameter value
         self._recalculate_deque_size()
 
     def _recalculate_deque_size(self):
-        """Calculates the required size of the history buffer based on averaging time."""
+        """
+        Calculates the required size of the history buffer.
+        This is now called by the on_change hook of the averaging_time_s parameter.
+        The decorator ensures this is called within a lock.
+        """
         num_blocks = int((self._averaging_time_s * DEFAULT_SAMPLERATE) / (DEFAULT_BLOCKSIZE + EPSILON))
         new_maxlen = max(1, num_blocks)
         if self._rms_history.maxlen != new_maxlen:
+            # Recreate the deque with the new size, preserving existing data
             self._rms_history = deque(self._rms_history, maxlen=new_maxlen)
 
-    def _get_state_snapshot_locked(self) -> Dict:
-        return {
-            "target_db": self._target_db,
-            "averaging_time_s": self._averaging_time_s,
-            "gain_smoothing_ms": self._gain_smoothing_ms,
-        }
-
-    # --- Thread-safe setters ---
-    @Slot(float)
-    def set_target_db(self, value: float):
-        state_to_emit = None
-        with self._lock:
-            if self._target_db != value:
-                self._target_db = value
-                state_to_emit = self._get_state_snapshot_locked()
-        if state_to_emit:
-            self.ui_update_callback(state_to_emit)
-
-    @Slot(float)
-    def set_averaging_time_s(self, value: float):
-        state_to_emit = None
-        with self._lock:
-            if self._averaging_time_s != value:
-                self._averaging_time_s = value
-                self._recalculate_deque_size()
-                state_to_emit = self._get_state_snapshot_locked()
-        if state_to_emit:
-            self.ui_update_callback(state_to_emit)
-
-    @Slot(float)
-    def set_gain_smoothing_ms(self, value: float):
-        state_to_emit = None
-        with self._lock:
-            if self._gain_smoothing_ms != value:
-                self._gain_smoothing_ms = value
-                state_to_emit = self._get_state_snapshot_locked()
-        if state_to_emit:
-            self.ui_update_callback(state_to_emit)
+    # The following methods are now automatically generated by the @managed_parameters decorator:
+    # - set_target_db(self, value: float)
+    # - set_averaging_time_s(self, value: float)
+    # - set_gain_smoothing_ms(self, value: float)
+    # - _get_state_snapshot_locked(self) -> Dict
+    # - serialize_extra(self) -> dict
+    # - deserialize_extra(self, data: dict)
 
     def process(self, input_data: dict) -> dict:
         signal = input_data.get("in")
@@ -141,32 +121,14 @@ class AutoGainNode(Node):
             # Return a gain of 1.0 (0 dB) if there is no valid input signal.
             return {"gain_out": 1.0}
 
-        state_snapshot_to_emit = None
+        # --- REFACTORED: The decorator provides this helper method ---
+        # It handles updating parameters from sockets and emitting a single UI update if needed.
+        self._update_params_from_sockets(input_data)
+
+        # Acquire the lock once to get a consistent snapshot of parameters for this tick's DSP.
         with self._lock:
-            ui_update_needed = False
-            # Update parameters from sockets
-            target_db_socket = input_data.get("target_db")
-            if target_db_socket is not None and self._target_db != float(target_db_socket):
-                self._target_db = float(target_db_socket)
-                ui_update_needed = True
-            avg_time_socket = input_data.get("averaging_time_s")
-            if avg_time_socket is not None and self._averaging_time_s != float(avg_time_socket):
-                self._averaging_time_s = float(avg_time_socket)
-                self._recalculate_deque_size()
-                ui_update_needed = True
-            gain_smooth_socket = input_data.get("gain_smoothing_ms")
-            if gain_smooth_socket is not None and self._gain_smoothing_ms != float(gain_smooth_socket):
-                self._gain_smoothing_ms = float(gain_smooth_socket)
-                ui_update_needed = True
-
-            if ui_update_needed:
-                state_snapshot_to_emit = self._get_state_snapshot_locked()
-
             target_db = self._target_db
             gain_smoothing_ms = self._gain_smoothing_ms
-
-        if state_snapshot_to_emit:
-            self.ui_update_callback(state_snapshot_to_emit)
 
         # --- STAGE 1: Long-Term Loudness Measurement ---
         mono_signal = torch.mean(signal, dim=0)
@@ -199,12 +161,3 @@ class AutoGainNode(Node):
             self._recalculate_deque_size()
             self._rms_history.clear()
         super().start()
-
-    def serialize_extra(self) -> dict:
-        with self._lock:
-            return self._get_state_snapshot_locked()
-
-    def deserialize_extra(self, data: dict):
-        self.set_target_db(data.get("target_db", -14.0))
-        self.set_averaging_time_s(data.get("averaging_time_s", 3.0))
-        self.set_gain_smoothing_ms(data.get("gain_smoothing_ms", 500.0))

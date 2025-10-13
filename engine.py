@@ -85,6 +85,10 @@ class Engine:
         logger.info("Engine: Processing thread has been successfully stopped and joined.")
 
     def tick(self):
+        """
+        Called by the active IClockProvider from a high-priority thread (e.g., audio callback).
+        This method must be lightweight and non-blocking.
+        """
         # Only release the semaphore if the engine is actively running
         if self._state == EngineState.RUNNING:
             self._tick_semaphore.release()
@@ -144,6 +148,14 @@ class Engine:
             elif command == "load_graph":
                 self._load_graph_locked(payload["graph_data"])
 
+            # --- New command to synchronize UI state after a file load ---
+            elif command == "_sync_ui_after_load":
+                logger.info("Engine: Executing post-load UI sync command.")
+                for node in self.graph.nodes.values():
+                    # This call is now safe because the graphChanged signal has been processed
+                    # by the UI thread, meaning all NodeItems exist and callbacks are connected.
+                    node.ui_update_callback(node.get_current_state_snapshot())
+
     def _processing_loop(self):
         next_update_time = 0.0
         processing_stats = {}
@@ -164,6 +176,7 @@ class Engine:
 
             if is_running:
                 # --- State: RUNNING ---
+                # This will block until tick() is called from the audio thread.
                 acquired = self._tick_semaphore.acquire(timeout=0.1)
                 if not acquired:
                     continue
@@ -518,12 +531,17 @@ class Engine:
             json.dump(graph_data, f, indent=4)
 
     def load_graph_from_file(self, file_path: str):
-        """Reads a graph file and queues a command to load it."""
+        """
+        Reads a graph file, queues a load command, and then queues a UI sync command.
+        """
         try:
             with open(file_path, "r") as f:
                 graph_data = json.load(f)
             # Queue a single, atomic "load" command.
             self._queue_command("load_graph", graph_data=graph_data)
+            # --- Queue a subsequent command to ensure UI is fully updated ---
+            self._queue_command("_sync_ui_after_load")
+
         except (IOError, json.JSONDecodeError) as e:
             logger.error(f"Failed to read or parse graph file {file_path}: {e}")
             self.signals.processingError.emit(f"Could not load file: {e}")

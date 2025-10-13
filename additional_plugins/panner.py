@@ -12,6 +12,9 @@ from constants import DEFAULT_DTYPE, DEFAULT_BLOCKSIZE
 from ui_elements import ParameterNodeItem, NODE_CONTENT_PADDING
 from PySide6.QtCore import Qt, Slot
 
+# --- Helper Imports ---
+from node_helpers import managed_parameters, Parameter
+
 # --- Configure logging ---
 logger = logging.getLogger(__name__)
 
@@ -21,7 +24,7 @@ MAX_PAN = 1.0  # Hard Right
 
 
 # ==============================================================================
-# 1. UI Class for the Panner Node (REFACTORED)
+# 1. UI Class for the Panner Node (UNCHANGED)
 # ==============================================================================
 class PannerNodeItem(ParameterNodeItem):
     """
@@ -81,37 +84,33 @@ class PannerNodeItem(ParameterNodeItem):
 
 
 # ==============================================================================
-# 2. Logic Class for the Panner Node (Unchanged)
+# 2. Logic Class for the Panner Node (REFACTORED)
 # ==============================================================================
+@managed_parameters
 class PannerNode(Node):
     NODE_TYPE = "Panner"
     UI_CLASS = PannerNodeItem
     CATEGORY = "Utility"
     DESCRIPTION = "Positions a mono signal in the stereo field using constant power panning."
 
+    # --- Declarative managed parameter ---
+    # The decorator automatically creates:
+    # - self._pan initialized to 0.0
+    # - a thread-safe @Slot set_pan(self, value) method that handles clipping
+    # - _get_state_snapshot_locked(), serialize_extra(), deserialize_extra()
+    # - _update_params_from_sockets()
+    pan = Parameter(default=0.0, clip=(MIN_PAN, MAX_PAN))
+
     def __init__(self, name: str, node_id: str | None = None):
         super().__init__(name, node_id)
         self.add_input("in", data_type=torch.Tensor)
-        self.add_input("pan", data_type=float)
+        self.add_input("pan", data_type=float)  # Socket name must match parameter key
         self.add_output("out", data_type=torch.Tensor)
 
-        self._pan = 0.0  # -1.0 (L) to 1.0 (R)
+        # self._pan attribute is now handled by the decorator
 
-    @Slot(float)
-    def set_pan(self, value: float):
-        """Thread-safe setter for the pan parameter."""
-        state_to_emit = None
-        with self._lock:
-            clipped_value = np.clip(float(value), MIN_PAN, MAX_PAN).item()
-            if self._pan != clipped_value:
-                self._pan = clipped_value
-                state_to_emit = self._get_state_snapshot_locked()
-        if state_to_emit:
-            self.ui_update_callback(state_to_emit)
-
-    def _get_state_snapshot_locked(self) -> Dict:
-        """Returns a copy of the current parameters for UI or serialization."""
-        return {"pan": self._pan}
+    # The set_pan, _get_state_snapshot_locked, serialize_extra, and deserialize_extra
+    # methods are now redundant and have been removed.
 
     def process(self, input_data: dict) -> dict:
         in_signal = input_data.get("in")
@@ -119,22 +118,14 @@ class PannerNode(Node):
             # Create a silent stereo block if there's no input
             return {"out": torch.zeros((2, DEFAULT_BLOCKSIZE), dtype=DEFAULT_DTYPE)}
 
-        state_snapshot_to_emit = None
+        # --- REFACTORED: Update parameters from sockets using the injected helper method ---
+        self._update_params_from_sockets(input_data)
+
+        # Create a consistent snapshot of the parameter for this processing block
         with self._lock:
-            # Check for external pan control from the input socket
-            pan_socket_val = input_data.get("pan")
-            if pan_socket_val is not None:
-                new_pan = np.clip(float(pan_socket_val), MIN_PAN, MAX_PAN).item()
-                if self._pan != new_pan:
-                    self._pan = new_pan
-                    state_snapshot_to_emit = self._get_state_snapshot_locked()
+            pan_value = self._pan  # Read the managed parameter
 
-            pan_value = self._pan
-
-        if state_snapshot_to_emit:
-            self.ui_update_callback(state_snapshot_to_emit)
-
-        # --- DSP Processing ---
+        # --- DSP Processing (unchanged) ---
 
         # 1. Ensure input signal is mono for panning
         if in_signal.shape[0] > 1:
@@ -159,11 +150,3 @@ class PannerNode(Node):
         stereo_out = torch.cat((left_channel, right_channel), dim=0)
 
         return {"out": stereo_out}
-
-    def serialize_extra(self) -> dict:
-        with self._lock:
-            return self._get_state_snapshot_locked()
-
-    def deserialize_extra(self, data: dict):
-        # Use the public setter to ensure the UI is updated on load
-        self.set_pan(data.get("pan", 0.0))

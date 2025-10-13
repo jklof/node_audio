@@ -9,6 +9,7 @@ from typing import Dict, Optional
 from node_system import Node
 from constants import DEFAULT_SAMPLERATE, DEFAULT_DTYPE
 from ui_elements import ParameterNodeItem
+from node_helpers import managed_parameters, Parameter  # <-- IMPORTED
 
 # --- UI and Qt Imports ---
 from PySide6.QtCore import Slot
@@ -18,18 +19,17 @@ logger = logging.getLogger(__name__)
 
 
 # ==============================================================================
-# 1. UI Class for the Biquad (IIR) Filter Node (REFACTORED)
+# 1. UI Class for the Biquad (IIR) Filter Node (NO CHANGES NEEDED)
 # ==============================================================================
 class BiquadFilterNodeItem(ParameterNodeItem):
     """
-    Refactored UI for the BiquadFilterNode.
-    This class now leverages ParameterNodeItem to declaratively create its UI.
+    The UI for this node does not need any changes. It relies on a state dictionary
+    with specific keys, which the refactored logic node will continue to provide.
     """
 
     NODE_SPECIFIC_WIDTH = 200
 
     def __init__(self, node_logic: "BiquadFilterNode"):
-        # Define the parameters and their control types for this node
         parameters = [
             {
                 "key": "filter_type",
@@ -68,66 +68,67 @@ class BiquadFilterNodeItem(ParameterNodeItem):
                 "format": "{:+.1f} dB",
             },
         ]
-
-        # The parent class now handles the creation of all specified controls.
         super().__init__(node_logic, parameters, width=self.NODE_SPECIFIC_WIDTH)
 
     @Slot(dict)
     def _on_state_updated_from_logic(self, state: dict):
-        """
-        Overrides the parent method to add custom logic for showing/hiding controls.
-        """
-        # First, let the parent class handle all standard UI updates.
         super()._on_state_updated_from_logic(state)
-
-        # Now, add the custom logic.
         filter_type = state.get("filter_type", "Low Pass")
-
-        # Determine which controls should be visible based on the filter type
         q_visible = filter_type in ["Low Pass", "High Pass", "Band Pass", "Notch", "Peaking"]
         gain_visible = filter_type in ["Peaking", "Low Shelf", "High Shelf"]
-
-        # Access the widgets created by the parent class and set their visibility
         self._controls["q"]["label"].setVisible(q_visible)
         self._controls["q"]["widget"].setVisible(q_visible)
         self._controls["gain_db"]["label"].setVisible(gain_visible)
         self._controls["gain_db"]["widget"].setVisible(gain_visible)
-
-        # Request a geometry update to resize the node based on visible content
         self.container_widget.adjustSize()
         self.update_geometry()
 
 
 # ==============================================================================
-# 2. Logic Class for the Biquad (IIR) Filter Node (UPDATED)
+# 2. Logic Class for the Biquad (IIR) Filter Node (REFACTORED)
 # ==============================================================================
+@managed_parameters
 class BiquadFilterNode(Node):
     NODE_TYPE = "Biquad Filter (IIR)"
     UI_CLASS = BiquadFilterNodeItem
     CATEGORY = "Filters"
     DESCRIPTION = "Applies a highly efficient IIR filter (EQ)."
 
+    # --- REFACTORED: Declarative managed parameters ---
+    # The decorator automatically creates thread-safe setters, serialization, and state management.
+    # The on_change hook cleanly handles the logic for dirtying the filter coefficients.
+    filter_type = Parameter(default="Low Pass", on_change="_mark_params_dirty")
+    cutoff_freq = Parameter(default=1000.0, clip=(20.0, 20000.0), on_change="_mark_params_dirty")
+    q = Parameter(default=0.707, clip=(0.1, 10.0), on_change="_mark_params_dirty")
+    gain_db = Parameter(default=0.0, clip=(-24.0, 24.0), on_change="_mark_params_dirty")
+
     def __init__(self, name: str, node_id: Optional[str] = None):
         super().__init__(name, node_id)
         self.add_input("in", data_type=torch.Tensor)
+        # Sockets now match parameter names for automatic modulation updates.
         self.add_input("cutoff_freq", data_type=float)
         self.add_input("q", data_type=float)
         self.add_input("gain_db", data_type=float)
         self.add_output("out", data_type=torch.Tensor)
 
-        self._filter_type: str = "Low Pass"
-        self._cutoff_freq: float = 1000.0
-        self._q: float = 0.707
-        self._gain_db: float = 0.0
-        self._params_dirty: bool = True
+        # REFACTORED: Internal state initialization is handled by the decorator.
 
+        # --- DSP State ---
+        self._params_dirty: bool = True
         self._b_coeffs: Optional[np.ndarray] = None
         self._a_coeffs: Optional[np.ndarray] = None
         self._zi: Optional[np.ndarray] = None
         self._expected_channels: Optional[int] = None
 
+    def _mark_params_dirty(self):
+        """Callback for the decorator to invalidate coefficient cache."""
+        self._params_dirty = True
+        self._zi = None  # Force re-initialization of filter state
+
     def _recalculate_coeffs(self):
+        """(Unchanged) Calculates the filter coefficients based on internal state."""
         sr = DEFAULT_SAMPLERATE
+        # Use the decorator-managed internal attributes
         freq, q, gain_db = self._cutoff_freq, self._q, self._gain_db
         A = 10 ** (gain_db / 40.0)
         w0 = 2 * np.pi * freq / sr
@@ -135,42 +136,44 @@ class BiquadFilterNode(Node):
         sin_w0 = np.sin(w0)
         alpha = sin_w0 / (2 * q)
         b0, b1, b2, a0, a1, a2 = 0.0, 0.0, 0.0, 1.0, 0.0, 0.0
-        if self._filter_type == "Low Pass":
+
+        filter_type = self._filter_type  # Read the enum member directly
+        if filter_type == "Low Pass":
             b0 = (1 - cos_w0) / 2
             b1 = 1 - cos_w0
             b2 = (1 - cos_w0) / 2
             a0 = 1 + alpha
             a1 = -2 * cos_w0
             a2 = 1 - alpha
-        elif self._filter_type == "High Pass":
+        elif filter_type == "High Pass":
             b0 = (1 + cos_w0) / 2
             b1 = -(1 + cos_w0)
             b2 = (1 + cos_w0) / 2
             a0 = 1 + alpha
             a1 = -2 * cos_w0
             a2 = 1 - alpha
-        elif self._filter_type == "Band Pass":
+        elif filter_type == "Band Pass":
             b0 = alpha
             b1 = 0
             b2 = -alpha
             a0 = 1 + alpha
             a1 = -2 * cos_w0
             a2 = 1 - alpha
-        elif self._filter_type == "Notch":
+        elif filter_type == "Notch":
             b0 = 1
             b1 = -2 * cos_w0
             b2 = 1
             a0 = 1 + alpha
             a1 = -2 * cos_w0
             a2 = 1 - alpha
-        elif self._filter_type == "Peaking":
+        elif filter_type == "Peaking":
             b0 = 1 + alpha * A
             b1 = -2 * cos_w0
             b2 = 1 - alpha * A
             a0 = 1 + alpha / A
             a1 = -2 * cos_w0
             a2 = 1 - alpha / A
-        elif self._filter_type == "Low Shelf":
+        elif filter_type == "Low Shelf":
             beta = np.sqrt(A) * alpha * 2
             b0 = A * ((A + 1) - (A - 1) * cos_w0 + beta)
             b1 = 2 * A * ((A - 1) - (A + 1) * cos_w0)
@@ -178,7 +181,7 @@ class BiquadFilterNode(Node):
             a0 = (A + 1) + (A - 1) * cos_w0 + beta
             a1 = -2 * ((A - 1) + (A + 1) * cos_w0)
             a2 = (A + 1) + (A - 1) * cos_w0 - beta
-        elif self._filter_type == "High Shelf":
+        elif filter_type == "High Shelf":
             beta = np.sqrt(A) * alpha * 2
             b0 = A * ((A + 1) + (A - 1) * cos_w0 + beta)
             b1 = -2 * A * ((A - 1) + (A + 1) * cos_w0)
@@ -189,53 +192,21 @@ class BiquadFilterNode(Node):
         self._b_coeffs = np.array([b0 / a0, b1 / a0, b2 / a0], dtype=np.float32)
         self._a_coeffs = np.array([a0 / a0, a1 / a0, a2 / a0], dtype=np.float32)
         self._params_dirty = False
-        logger.info(f"[{self.name}] Recalculated IIR coefficients for {self._filter_type}.")
+        logger.info(f"[{self.name}] Recalculated IIR coefficients for {filter_type}.")
 
-    @Slot(str)
-    def set_filter_type(self, f_type: str):
-        with self._lock:
-            if self._filter_type != f_type:
-                self._filter_type = f_type
-                self._params_dirty = True
-        self.ui_update_callback(self.get_current_state_snapshot())
-
-    @Slot(float)
-    def set_cutoff_freq(self, freq: float):
-        with self._lock:
-            new_freq = max(20.0, min(float(freq), DEFAULT_SAMPLERATE / 2 - 1))
-            if self._cutoff_freq != new_freq:
-                self._cutoff_freq = new_freq
-                self._params_dirty = True
-        self.ui_update_callback(self.get_current_state_snapshot())
-
-    @Slot(float)
-    def set_q(self, q: float):
-        with self._lock:
-            new_q = max(0.1, float(q))
-            if self._q != new_q:
-                self._q = new_q
-                self._params_dirty = True
-        self.ui_update_callback(self.get_current_state_snapshot())
-
-    @Slot(float)
-    def set_gain_db(self, gain: float):
-        with self._lock:
-            if self._gain_db != float(gain):
-                self._gain_db = float(gain)
-                self._params_dirty = True
-        self.ui_update_callback(self.get_current_state_snapshot())
+    # --- REFACTORED: All manual setters and serialization methods are now removed. ---
 
     def _get_state_snapshot_locked(self) -> Dict:
-        """Updated to use keys that match the ParameterNodeItem."""
-        return {
-            "filter_type": self._filter_type,
-            "cutoff_freq": self._cutoff_freq,
-            "q": self._q,
-            "gain_db": self._gain_db,
-            "is_cutoff_freq_ext": "cutoff_freq" in self.inputs and self.inputs["cutoff_freq"].connections,
-            "is_q_ext": "q" in self.inputs and self.inputs["q"].connections,
-            "is_gain_db_ext": "gain_db" in self.inputs and self.inputs["gain_db"].connections,
-        }
+        """
+        Overrides the decorator-injected method to add UI-specific flags.
+        """
+        # Get the base state from the decorator's logic
+        state = super()._get_state_snapshot_locked()
+        # Add the connection status flags required by the UI
+        state["is_cutoff_freq_ext"] = "cutoff_freq" in self.inputs and self.inputs["cutoff_freq"].connections
+        state["is_q_ext"] = "q" in self.inputs and self.inputs["q"].connections
+        state["is_gain_db_ext"] = "gain_db" in self.inputs and self.inputs["gain_db"].connections
+        return state
 
     def start(self):
         with self._lock:
@@ -249,33 +220,20 @@ class BiquadFilterNode(Node):
             return {"out": None}
 
         num_channels, _ = signal_tensor.shape
-        state_snapshot_to_emit = None
+
+        # REFACTORED: Update parameters from sockets with a single helper method call.
+        # This also handles UI updates if any parameter changed.
+        self._update_params_from_sockets(input_data)
 
         with self._lock:
-            freq_socket = input_data.get("cutoff_freq")
-            q_socket = input_data.get("q")
-            gain_socket = input_data.get("gain_db")
-
-            if freq_socket is not None and self._cutoff_freq != float(freq_socket):
-                self._cutoff_freq = float(freq_socket)
-                self._params_dirty = True
-            if q_socket is not None and self._q != float(q_socket):
-                self._q = float(q_socket)
-                self._params_dirty = True
-            if gain_socket is not None and self._gain_db != float(gain_socket):
-                self._gain_db = float(gain_socket)
-                self._params_dirty = True
-
             if self._params_dirty:
                 self._recalculate_coeffs()
-                self._zi = None
-                state_snapshot_to_emit = self._get_state_snapshot_locked()
 
             if self._expected_channels != num_channels:
                 self._expected_channels = num_channels
-                self._zi = None
+                self._zi = None  # Force re-initialization of filter state for new channel count
 
-            if self._zi is None:
+            if self._zi is None and self._b_coeffs is not None and self._a_coeffs is not None:
                 zi_single_channel = scipy.signal.lfilter_zi(self._b_coeffs, self._a_coeffs)
                 self._zi = np.tile(zi_single_channel, (num_channels, 1)).astype(np.float32)
 
@@ -289,24 +247,7 @@ class BiquadFilterNode(Node):
 
         with self._lock:
             self._zi = zf_next_np
-        if state_snapshot_to_emit:
-            self.ui_update_callback(state_snapshot_to_emit)
 
         return {"out": torch.from_numpy(filtered_signal_np.astype(np.float32))}
 
-    def serialize_extra(self) -> Dict:
-        with self._lock:
-            return {
-                "filter_type": self._filter_type,
-                "cutoff_freq": self._cutoff_freq,
-                "q": self._q,
-                "gain_db": self._gain_db,
-            }
-
-    def deserialize_extra(self, data: Dict):
-        with self._lock:
-            self._filter_type = data.get("filter_type", "Low Pass")
-            self._cutoff_freq = data.get("cutoff_freq", 1000.0)
-            self._q = data.get("q", 0.707)
-            self._gain_db = data.get("gain_db", 0.0)
-            self._params_dirty = True
+    # serialize_extra and deserialize_extra are now handled by the decorator.

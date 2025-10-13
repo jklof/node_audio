@@ -14,6 +14,9 @@ from ui_elements import ParameterNodeItem, NodeItem, NODE_CONTENT_PADDING
 from PySide6.QtWidgets import QWidget, QSlider, QLabel, QVBoxLayout
 from PySide6.QtCore import Qt, Signal, Slot, QObject, QSignalBlocker
 
+# --- Helper Imports for Refactoring ---
+from node_helpers import managed_parameters, Parameter
+
 # --- Configure logging ---
 logger = logging.getLogger(__name__)
 
@@ -87,13 +90,22 @@ class CompressorNodeItem(ParameterNodeItem):
 
 
 # ==============================================================================
-# 2. Logic Class for the Compressor Node
+# 2. Logic Class for the Compressor Node (REFACTORED)
 # ==============================================================================
+@managed_parameters
 class CompressorNode(Node):
     NODE_TYPE = "Compressor"
     UI_CLASS = CompressorNodeItem
     CATEGORY = "Effects"
     DESCRIPTION = "Reduces the dynamic range of a signal."
+
+    # --- 1. Declarative Managed Parameters ---
+    # The decorator uses these to generate setters, state management, and serialization.
+    threshold_db = Parameter(default=-20.0, clip=(MIN_THRESHOLD_DB, MAX_THRESHOLD_DB))
+    ratio = Parameter(default=4.0, clip=(MIN_RATIO, MAX_RATIO))
+    attack_ms = Parameter(default=5.0, clip=(MIN_ATTACK_MS, MAX_ATTACK_MS), on_change="_mark_coeffs_dirty")
+    release_ms = Parameter(default=100.0, clip=(MIN_RELEASE_MS, MAX_RELEASE_MS), on_change="_mark_coeffs_dirty")
+    knee_db = Parameter(default=6.0, clip=(MIN_KNEE_DB, MAX_KNEE_DB))
 
     def __init__(self, name: str, node_id: Optional[str] = None):
         super().__init__(name, node_id)
@@ -103,17 +115,12 @@ class CompressorNode(Node):
         self.add_input("attack_ms", data_type=float)
         self.add_input("release_ms", data_type=float)
         self.add_input("knee_db", data_type=float)
-        self.add_input("sidechain_in", data_type=torch.Tensor)  # Can be None if not connected
+        self.add_input("sidechain_in", data_type=torch.Tensor)
         self.add_output("out", data_type=torch.Tensor)
 
-        self._threshold_db = -20.0
-        self._ratio = 4.0
-        self._attack_ms = 5.0
-        self._release_ms = 100.0
-        self._knee_db = 6.0
+        # --- Internal DSP State (Not managed parameters) ---
         self._samplerate = DEFAULT_SAMPLERATE
         self._envelope = 0.0
-
         self._delay_samples = SIDECHAIN_DOWNSAMPLE_FACTOR // 2
         self._delay_buffer = torch.zeros((DEFAULT_CHANNELS, self._delay_samples), dtype=DEFAULT_DTYPE)
 
@@ -136,6 +143,10 @@ class CompressorNode(Node):
         self._gain_below = None
         self._gain_inside = None
         self._gain_above = None
+
+    def _mark_coeffs_dirty(self):
+        """Callback for the decorator when time-based parameters change."""
+        self._params_dirty = True
 
     def _update_coefficients(self):
         """Recalculates time-based coefficients only when parameters change."""
@@ -177,63 +188,11 @@ class CompressorNode(Node):
         self._last_signal_shape = signal_shape
         logger.debug(f"[{self.name}] Resized internal buffers for shape {signal_shape}")
 
-    # --- Parameter Setters ---
-    def set_threshold_db(self, value: float):
-        with self._lock:
-            clipped_value = np.clip(float(value), MIN_THRESHOLD_DB, MAX_THRESHOLD_DB)
-            if self._threshold_db != clipped_value:
-                self._threshold_db = clipped_value
-            state = self._get_state_snapshot_locked()
-        self.ui_update_callback(state)
-
-    def set_ratio(self, value: float):
-        with self._lock:
-            clipped_value = np.clip(float(value), MIN_RATIO, MAX_RATIO)
-            if self._ratio != clipped_value:
-                self._ratio = clipped_value
-            state = self._get_state_snapshot_locked()
-        self.ui_update_callback(state)
-
-    def set_attack_ms(self, value: float):
-        with self._lock:
-            clipped_value = np.clip(float(value), MIN_ATTACK_MS, MAX_ATTACK_MS)
-            if self._attack_ms != clipped_value:
-                self._attack_ms = clipped_value
-                self._params_dirty = True
-            state = self._get_state_snapshot_locked()
-        self.ui_update_callback(state)
-
-    def set_release_ms(self, value: float):
-        with self._lock:
-            clipped_value = np.clip(float(value), MIN_RELEASE_MS, MAX_RELEASE_MS)
-            if self._release_ms != clipped_value:
-                self._release_ms = clipped_value
-                self._params_dirty = True
-            state = self._get_state_snapshot_locked()
-        self.ui_update_callback(state)
-
-    def set_knee_db(self, value: float):
-        with self._lock:
-            clipped_value = np.clip(float(value), MIN_KNEE_DB, MAX_KNEE_DB)
-            if self._knee_db != clipped_value:
-                self._knee_db = clipped_value
-            state = self._get_state_snapshot_locked()
-        self.ui_update_callback(state)
-
-    def _get_state_snapshot_locked(self) -> Dict:
-        return {
-            "threshold_db": self._threshold_db,
-            "ratio": self._ratio,
-            "attack_ms": self._attack_ms,
-            "release_ms": self._release_ms,
-            "knee_db": self._knee_db,
-        }
-
     def start(self):
         with self._lock:
             self._envelope = 0.0
             self._delay_buffer.zero_()
-            self._last_signal_shape = None  # Force buffer reallocation on first run
+            self._last_signal_shape = None
             self._params_dirty = True
 
     @staticmethod
@@ -252,7 +211,7 @@ class CompressorNode(Node):
             coeff = attack_coeff if target > env else release_coeff
             env = target + coeff * (env - target)
             envelope_out[i] = env
-        return env  # Return only the final envelope state
+        return env
 
     def process(self, input_data: dict) -> dict:
         signal = input_data.get("in")
@@ -261,48 +220,13 @@ class CompressorNode(Node):
 
         sidechain_signal = input_data.get("sidechain_in")
 
+        # --- 3. Refactored Parameter Update Logic ---
+        # A single call to the injected helper method handles all socket updates,
+        # clipping, side-effects (via on_change), and UI state emission.
+        self._update_params_from_sockets(input_data)
+
         with torch.no_grad():
-            # --- State update logic ---
             with self._lock:
-                # Socket updates can still happen here. We read them and update the internal state.
-                ui_update_needed = False
-                threshold_socket_val = input_data.get("threshold_db")
-                if threshold_socket_val is not None:
-                    clipped_val = np.clip(float(threshold_socket_val), MIN_THRESHOLD_DB, MAX_THRESHOLD_DB)
-                    if self._threshold_db != clipped_val:
-                        self._threshold_db = clipped_val
-                        ui_update_needed = True
-                ratio_socket_val = input_data.get("ratio")
-                if ratio_socket_val is not None:
-                    clipped_val = np.clip(float(ratio_socket_val), MIN_RATIO, MAX_RATIO)
-                    if self._ratio != clipped_val:
-                        self._ratio = clipped_val
-                        ui_update_needed = True
-                attack_socket_val = input_data.get("attack_ms")
-                if attack_socket_val is not None:
-                    clipped_val = np.clip(float(attack_socket_val), MIN_ATTACK_MS, MAX_ATTACK_MS)
-                    if self._attack_ms != clipped_val:
-                        self._attack_ms = clipped_val
-                        self._params_dirty = True
-                        ui_update_needed = True
-                release_socket_val = input_data.get("release_ms")
-                if release_socket_val is not None:
-                    clipped_val = np.clip(float(release_socket_val), MIN_RELEASE_MS, MAX_RELEASE_MS)
-                    if self._release_ms != clipped_val:
-                        self._release_ms = clipped_val
-                        self._params_dirty = True
-                        ui_update_needed = True
-                knee_socket_val = input_data.get("knee_db")
-                if knee_socket_val is not None:
-                    clipped_val = np.clip(float(knee_socket_val), MIN_KNEE_DB, MAX_KNEE_DB)
-                    if self._knee_db != clipped_val:
-                        self._knee_db = clipped_val
-                        ui_update_needed = True
-
-                # If any socket caused a change, emit the new state to the UI
-                if ui_update_needed:
-                    self.ui_update_callback(self._get_state_snapshot_locked())
-
                 # Copy locked parameters to local variables for this tick's processing
                 threshold_db, ratio, knee_db, initial_envelope = (
                     self._threshold_db,
@@ -388,16 +312,3 @@ class CompressorNode(Node):
             output_signal = delayed_signal * self._gain_reduction_linear
 
             return {"out": output_signal}
-
-    def serialize_extra(self) -> dict:
-        with self._lock:
-            return self._get_state_snapshot_locked()
-
-    def deserialize_extra(self, data: dict):
-        with self._lock:
-            self._threshold_db = data.get("threshold_db", -20.0)
-            self._ratio = data.get("ratio", 4.0)
-            self._attack_ms = data.get("attack_ms", 5.0)
-            self._release_ms = data.get("release_ms", 100.0)
-            self._knee_db = data.get("knee_db", 6.0)
-            self._params_dirty = True
