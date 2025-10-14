@@ -3,7 +3,7 @@ from typing import Dict, Optional, Tuple
 
 from node_system import Node
 from ui_elements import NodeItem, NODE_CONTENT_PADDING, HEADER_HEIGHT, SOCKET_Y_SPACING, SOCKET_SIZE
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QPlainTextEdit
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QPlainTextEdit, QPushButton, QCheckBox, QHBoxLayout
 from PySide6.QtCore import Slot, QSignalBlocker, Qt, QPointF, QRectF
 from PySide6.QtGui import QPen, QColor
 
@@ -32,15 +32,30 @@ class SimpleTextNodeItem(NodeItem):
         self.container_widget = QWidget()
         main_layout = QVBoxLayout(self.container_widget)
         main_layout.setContentsMargins(0, 0, 0, 0)
-        main_layout.setSpacing(0)
+        main_layout.setSpacing(5)  # Add some spacing for the new controls
 
         self.editor = QPlainTextEdit()
         self.editor.setPlaceholderText("Enter text or connect a text source...")
         main_layout.addWidget(self.editor)
 
+        # --- New controls ---
+        controls_layout = QHBoxLayout()
+        self.concat_checkbox = QCheckBox("Concatenate")
+        self.concat_checkbox.setToolTip("If checked, incoming text is appended. Otherwise, it replaces existing text.")
+        self.clear_button = QPushButton("Clear")
+
+        controls_layout.addWidget(self.concat_checkbox)
+        controls_layout.addStretch()
+        controls_layout.addWidget(self.clear_button)
+        main_layout.addLayout(controls_layout)
+        # --- End of new controls ---
+
         self.setContentWidget(self.container_widget)
 
         self.editor.textChanged.connect(self._on_text_changed)
+        self.concat_checkbox.toggled.connect(self._on_concatenate_toggled)
+        self.clear_button.clicked.connect(self._on_clear_clicked)
+
         self.setAcceptHoverEvents(True)
         self.updateFromLogic()
 
@@ -136,6 +151,14 @@ class SimpleTextNodeItem(NodeItem):
     def _on_text_changed(self):
         self.node_logic.set_text(self.editor.toPlainText())
 
+    @Slot(bool)
+    def _on_concatenate_toggled(self, checked: bool):
+        self.node_logic.set_concatenate_mode(checked)
+
+    @Slot()
+    def _on_clear_clicked(self):
+        self.node_logic.clear_text()
+
     @Slot(dict)
     def _on_state_updated_from_logic(self, state: Dict):
         super()._on_state_updated_from_logic(state)
@@ -143,6 +166,11 @@ class SimpleTextNodeItem(NodeItem):
         with QSignalBlocker(self.editor):
             if self.editor.toPlainText() != new_text:
                 self.editor.setPlainText(new_text)
+
+        new_concat_mode = state.get("concatenate_mode", False)
+        with QSignalBlocker(self.concat_checkbox):
+            if self.concat_checkbox.isChecked() != new_concat_mode:
+                self.concat_checkbox.setChecked(new_concat_mode)
 
 
 class SimpleTextNode(Node):
@@ -155,8 +183,9 @@ class SimpleTextNode(Node):
         super().__init__(name, node_id)
         # --- Manually define state attributes ---
         self._text: str = ""
+        self._concatenate_mode: bool = False
         self.ui_size: Optional[Tuple[float, float]] = None
-        
+
         self.add_input("text_in", data_type=str)
         self.add_output("text_out", data_type=str)
 
@@ -168,37 +197,68 @@ class SimpleTextNode(Node):
             if self._text != new_text:
                 self._text = new_text
                 state_to_emit = self._get_state_snapshot_locked()
-        
+
         if state_to_emit:
-            # This callback is thread-safe and marshals the call to the main thread
+            self.ui_update_callback(state_to_emit)
+
+    @Slot(bool)
+    def set_concatenate_mode(self, enabled: bool):
+        """A thread-safe Qt Slot to update the concatenate mode from the UI."""
+        state_to_emit = None
+        with self._lock:
+            if self._concatenate_mode != enabled:
+                self._concatenate_mode = enabled
+                state_to_emit = self._get_state_snapshot_locked()
+
+        if state_to_emit:
+            self.ui_update_callback(state_to_emit)
+
+    @Slot()
+    def clear_text(self):
+        """A thread-safe Qt Slot to clear the text from the UI."""
+        state_to_emit = None
+        with self._lock:
+            if self._text != "":
+                self._text = ""
+                state_to_emit = self._get_state_snapshot_locked()
+
+        if state_to_emit:
             self.ui_update_callback(state_to_emit)
 
     def _get_state_snapshot_locked(self) -> Dict:
         """Returns a snapshot of the current state while the lock is held."""
-        return {"text": self._text}
+        return {"text": self._text, "concatenate_mode": self._concatenate_mode}
 
     def process(self, input_data: dict) -> dict:
         incoming_text = input_data.get("text_in")
         state_to_emit = None
-        
+
         with self._lock:
-            if incoming_text is not None and self._text != incoming_text:
-                self._text = str(incoming_text)
-                state_to_emit = self._get_state_snapshot_locked()
-        
+            if incoming_text is not None:
+                if self._concatenate_mode:
+                    new_text = self._text + str(incoming_text)
+                    if self._text != new_text:
+                        self._text = new_text
+                        state_to_emit = self._get_state_snapshot_locked()
+                else:
+                    if self._text != incoming_text:
+                        self._text = str(incoming_text)
+                        state_to_emit = self._get_state_snapshot_locked()
+
         if state_to_emit:
             self.ui_update_callback(state_to_emit)
-            
+
         with self._lock:
             return {"text_out": self._text}
 
     def serialize_extra(self) -> dict:
-        """Manually save both text and UI size."""
+        """Manually save text, UI size, and concatenate mode."""
         with self._lock:
-            return {"text": self._text, "ui_size": self.ui_size}
+            return {"text": self._text, "ui_size": self.ui_size, "concatenate_mode": self._concatenate_mode}
 
     def deserialize_extra(self, data: dict):
-        """Manually load both text and UI size."""
+        """Manually load text, UI size, and concatenate mode."""
         with self._lock:
             self._text = data.get("text", "")
             self.ui_size = data.get("ui_size")
+            self._concatenate_mode = data.get("concatenate_mode", False)

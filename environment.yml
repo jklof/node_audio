@@ -27,3 +27,7 @@ dependencies:
     - pydub
     - pytubefix
     - pylibrb
+    - kokoro-onnx
+    - misaki[en]
+    # - openai-whisper
+    # - webrtcvad-wheels
