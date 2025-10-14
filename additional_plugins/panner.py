@@ -13,7 +13,7 @@ from ui_elements import ParameterNodeItem, NODE_CONTENT_PADDING
 from PySide6.QtCore import Qt, Slot
 
 # --- Helper Imports ---
-from node_helpers import managed_parameters, Parameter
+from node_helpers import with_parameters, Parameter
 
 # --- Configure logging ---
 logger = logging.getLogger(__name__)
@@ -86,7 +86,7 @@ class PannerNodeItem(ParameterNodeItem):
 # ==============================================================================
 # 2. Logic Class for the Panner Node (REFACTORED)
 # ==============================================================================
-@managed_parameters
+@with_parameters
 class PannerNode(Node):
     NODE_TYPE = "Panner"
     UI_CLASS = PannerNodeItem
@@ -103,14 +103,21 @@ class PannerNode(Node):
 
     def __init__(self, name: str, node_id: str | None = None):
         super().__init__(name, node_id)
+
+        self._init_parameters()
+
         self.add_input("in", data_type=torch.Tensor)
         self.add_input("pan", data_type=float)  # Socket name must match parameter key
         self.add_output("out", data_type=torch.Tensor)
 
-        # self._pan attribute is now handled by the decorator
+    def _get_state_snapshot_locked(self) -> dict:
+        return self._get_parameters_state()
 
-    # The set_pan, _get_state_snapshot_locked, serialize_extra, and deserialize_extra
-    # methods are now redundant and have been removed.
+    def serialize_extra(self) -> dict:
+        return self._serialize_parameters()
+
+    def deserialize_extra(self, data: dict):
+        self._deserialize_parameters(data)
 
     def process(self, input_data: dict) -> dict:
         in_signal = input_data.get("in")
@@ -118,8 +125,8 @@ class PannerNode(Node):
             # Create a silent stereo block if there's no input
             return {"out": torch.zeros((2, DEFAULT_BLOCKSIZE), dtype=DEFAULT_DTYPE)}
 
-        # --- REFACTORED: Update parameters from sockets using the injected helper method ---
-        self._update_params_from_sockets(input_data)
+        # --- Update parameters from sockets using the injected helper method ---
+        self._update_parameters_from_sockets(input_data)
 
         # Create a consistent snapshot of the parameter for this processing block
         with self._lock:

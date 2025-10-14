@@ -9,7 +9,7 @@ from collections import deque
 from node_system import Node
 from constants import SpectralFrame, DEFAULT_DTYPE, DEFAULT_COMPLEX_DTYPE
 from ui_elements import ParameterNodeItem, NodeItem, NODE_CONTENT_PADDING
-from node_helpers import managed_parameters, Parameter
+from node_helpers import with_parameters, Parameter
 
 # --- Qt Imports ---
 from PySide6.QtCore import Qt, Signal, Slot, QObject, QSignalBlocker
@@ -70,7 +70,7 @@ class SpectralShimmerNodeItem(ParameterNodeItem):
 # ==============================================================================
 # 3. Node Logic Class (SpectralShimmerNode)
 # ==============================================================================
-@managed_parameters
+@with_parameters
 class SpectralShimmerNode(Node):
     NODE_TYPE = "Spectral Shimmer"
     UI_CLASS = SpectralShimmerNodeItem
@@ -84,6 +84,7 @@ class SpectralShimmerNode(Node):
 
     def __init__(self, name: str, node_id: Optional[str] = None):
         super().__init__(name, node_id)
+        self._init_parameters()
 
         # --- Setup Sockets (matching parameter keys) ---
         self.add_input("spectral_frame_in", data_type=SpectralFrame)
@@ -96,7 +97,14 @@ class SpectralShimmerNode(Node):
         self._shimmer_buffer: Optional[torch.Tensor] = None
         self._last_frame_params: tuple = (0, 0, 0)
 
-    # Manual setters, snapshot, and serialization methods are now handled by the decorator.
+    def _get_state_snapshot_locked(self) -> dict:
+        return self._get_parameters_state()
+
+    def serialize_extra(self) -> dict:
+        return self._serialize_parameters()
+
+    def deserialize_extra(self, data: dict):
+        self._deserialize_parameters(data)
 
     def _pitch_shift_frame(self, frame_data: torch.Tensor, ratio: float) -> torch.Tensor:
         """Performs pitch shifting on a spectral frame using linear interpolation."""
@@ -138,7 +146,7 @@ class SpectralShimmerNode(Node):
             return {"spectral_frame_out": None}
 
         # Update parameters from input sockets and notify UI if changed.
-        self._update_params_from_sockets(input_data)
+        self._update_parameters_from_sockets(input_data)
 
         with self._lock:
             # Read the managed parameters for this processing block
@@ -226,7 +234,7 @@ class SpectralModulatorNodeItem(ParameterNodeItem):
 # ==============================================================================
 # 3. Node Logic Class (SpectralModulatorNode)
 # ==============================================================================
-@managed_parameters
+@with_parameters
 class SpectralModulatorNode(Node):
     NODE_TYPE = "Spectral Modulator"
     UI_CLASS = SpectralModulatorNodeItem
@@ -240,6 +248,7 @@ class SpectralModulatorNode(Node):
 
     def __init__(self, name: str, node_id: Optional[str] = None):
         super().__init__(name, node_id)
+        self._init_parameters()
 
         # --- Setup Sockets (matching parameter keys) ---
         self.add_input("spectral_frame_in", data_type=SpectralFrame)
@@ -252,14 +261,21 @@ class SpectralModulatorNode(Node):
         # --- DSP State ---
         self._lfo_phase: float = 0.0
 
-    # Manual setters, snapshot, and serialization methods are now handled by the decorator.
+    def _get_state_snapshot_locked(self) -> dict:
+        return self._get_parameters_state()
+
+    def serialize_extra(self) -> dict:
+        return self._serialize_parameters()
+
+    def deserialize_extra(self, data: dict):
+        self._deserialize_parameters(data)
 
     def process(self, input_data: dict) -> dict:
         frame = input_data.get("spectral_frame_in")
         if not isinstance(frame, SpectralFrame):
             return {"spectral_frame_out": None}
 
-        self._update_params_from_sockets(input_data)
+        self._update_parameters_from_sockets(input_data)
 
         with self._lock:
             # Read the managed parameters for this processing block
@@ -384,7 +400,7 @@ class SpectralReverbNodeItem(ParameterNodeItem):
 # ==============================================================================
 # 3. Node Logic Class (SpectralReverbNode)
 # ==============================================================================
-@managed_parameters
+@with_parameters
 class SpectralReverbNode(Node):
     NODE_TYPE = "Spectral Reverb"
     UI_CLASS = SpectralReverbNodeItem
@@ -402,6 +418,7 @@ class SpectralReverbNode(Node):
 
     def __init__(self, name: str, node_id: Optional[str] = None):
         super().__init__(name, node_id)
+        self._init_parameters()
 
         # --- Setup Sockets ---
         self.add_input("spectral_frame_in", data_type=SpectralFrame)
@@ -421,6 +438,15 @@ class SpectralReverbNode(Node):
         self._pre_delay_frames: int = 0
         self._last_frame_params: tuple = (0, 0)
         self._params_dirty: bool = True
+
+    def _get_state_snapshot_locked(self) -> dict:
+        return self._get_parameters_state()
+
+    def serialize_extra(self) -> dict:
+        return self._serialize_parameters()
+
+    def deserialize_extra(self, data: dict):
+        self._deserialize_parameters(data)
 
     def _mark_params_dirty(self):
         """
@@ -478,7 +504,7 @@ class SpectralReverbNode(Node):
             return {"spectral_frame_out": None}
 
         # The decorator's helper handles socket updates and marks params dirty via on_change
-        self._update_params_from_sockets(input_data)
+        self._update_parameters_from_sockets(input_data)
 
         with self._lock:
             # --- Initialize/Reset buffers on format change ---

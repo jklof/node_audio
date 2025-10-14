@@ -11,7 +11,7 @@ from constants import DEFAULT_DTYPE, DEFAULT_SAMPLERATE, DEFAULT_BLOCKSIZE, DEFA
 
 # --- UI and Helper Imports ---
 from ui_elements import ParameterNodeItem
-from node_helpers import managed_parameters, Parameter
+from node_helpers import with_parameters, Parameter
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -70,36 +70,38 @@ class NoiseGeneratorNodeItem(ParameterNodeItem):
 # ==============================================================================
 # Noise Generator Logic Node
 # ==============================================================================
-@managed_parameters
+@with_parameters
 class NoiseGeneratorNode(Node):
     NODE_TYPE = "Noise Generator"
     UI_CLASS = NoiseGeneratorNodeItem
     CATEGORY = "Generators"
     DESCRIPTION = "Generates various types of noise (White, Pink, Brown, Blue, Violet)."
 
-    # --- Declarative managed parameters ---
-    # The decorator automatically creates thread-safe setters (e.g., set_noise_type, set_level),
-    # serialization, deserialization, and the UI update callback mechanism.
     noise_type = Parameter(default=NoiseType.WHITE)
     level = Parameter(default=0.5, clip=(0.0, 1.0))
 
     def __init__(self, name, node_id=None):
-        # The decorator handles initializing self._noise_type and self._level.
-        # The original __init__ is called after the parameters are set up.
         super().__init__(name, node_id)
-        self.add_input("level", data_type=float)
-        self.add_output("out", data_type=torch.Tensor)
 
+        self._init_parameters()
+
+        # Custom state
         self.samplerate = DEFAULT_SAMPLERATE
         self.blocksize = DEFAULT_BLOCKSIZE
         self.channels = DEFAULT_CHANNELS
-
-        # Filter states and coefficients will be NumPy arrays for SciPy
         self._filter_coeffs = {}
         self._filter_states = {}
 
+        self.add_input("level", data_type=float)
+        self.add_output("out", data_type=torch.Tensor)
         self._init_filter_coeffs_and_states()
-        logger.info(f"NoiseGeneratorNode [{self.name}] initialized.")
+
+    def _get_state_snapshot_locked(self) -> dict:
+        # Get the state from the helper
+        state = self._get_parameters_state()
+        # Add our custom state
+        state["channels"] = self.channels
+        return state
 
     def _init_filter_coeffs_and_states(self):
         """Initialize SciPy filter coefficients and state arrays."""
@@ -128,23 +130,16 @@ class NoiseGeneratorNode(Node):
 
         logger.debug(f"[{self.name}] Filters initialized for {self.channels} channels at {self.samplerate}Hz.")
 
-    # Boilerplate methods like set_noise_type, set_level, _get_state_snapshot_locked,
-    # serialize_extra, and deserialize_extra are now automatically handled by the
-    # @managed_parameters decorator and can be removed.
-
     def process(self, input_data: dict) -> dict:
-        # The injected helper method handles updating parameters from sockets,
-        # including clipping, side-effects, and emitting a single UI update signal if needed.
-        self._update_params_from_sockets(input_data)
+        # The name of this helper is now _update_parameters_from_sockets
+        self._update_parameters_from_sockets(input_data)
 
-        # Create a consistent snapshot of parameters for this processing block.
         with self._lock:
             noise_type = self._noise_type
             level = self._level
 
         # Generate white noise directly as a torch tensor
         white_noise = torch.rand(self.channels, self.blocksize, dtype=DEFAULT_DTYPE) * 2.0 - 1.0
-
         if noise_type == NoiseType.WHITE:
             processed_signal = white_noise
         else:
@@ -167,28 +162,21 @@ class NoiseGeneratorNode(Node):
 
     def start(self):
         with self._lock:
-            # It's good practice to reset filter states when processing starts
             self._init_filter_coeffs_and_states()
-        logger.debug(f"[{self.name}] started, filter states reset.")
 
-    # The decorator will generate a serialize_extra that saves 'noise_type' and 'level'.
-    # We only need to add the 'channels' key, which is not a managed parameter.
     def serialize_extra(self) -> dict:
+        # Get serialized state for managed params from the helper
+        state = self._serialize_parameters()
+        # Add our custom serialization logic
         with self._lock:
-            # Get the state from the decorator's injected method
-            state = self._get_state_snapshot_locked()
-            # Add any non-managed parameters
             state["channels"] = self.channels
-            # The decorator's serialize method will handle converting the Enum to a string
-            return state
+        return state
 
-    # The decorator will handle loading 'noise_type' and 'level'.
-    # We just need to load our custom 'channels' data.
     def deserialize_extra(self, data: dict):
-        # Let the decorator handle its own parameters first
-        super().deserialize_extra(data)
-        # Now, handle any custom data
+        # Let the helper handle its parameters first
+        self._deserialize_parameters(data)
+        # Now, handle our custom deserialization logic
         with self._lock:
             self.channels = int(data.get("channels", DEFAULT_CHANNELS))
-        # Re-initialize filters since channel count might have changed
-        self._init_filter_coeffs_and_states()
+            # Re-initialize filters since channel count might have changed
+            self._init_filter_coeffs_and_states()

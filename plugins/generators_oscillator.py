@@ -11,7 +11,7 @@ from constants import DEFAULT_DTYPE, DEFAULT_SAMPLERATE, DEFAULT_BLOCKSIZE, DEFA
 
 # --- UI and Helper Imports ---
 from ui_elements import ParameterNodeItem
-from node_helpers import managed_parameters, Parameter
+from node_helpers import with_parameters, Parameter
 from PySide6.QtCore import Slot
 
 # Configure logging
@@ -100,7 +100,7 @@ class OscillatorNodeItem(ParameterNodeItem):
 # ==============================================================================
 # REFACTORED Oscillator Logic Node
 # ==============================================================================
-@managed_parameters
+@with_parameters
 class OscillatorNode(Node):
     NODE_TYPE = "Oscillator"
     UI_CLASS = OscillatorNodeItem
@@ -115,6 +115,7 @@ class OscillatorNode(Node):
 
     def __init__(self, name, node_id=None):
         super().__init__(name, node_id)
+        self._init_parameters()
         # Sockets now match parameter names for automatic modulation updates.
         self.add_input("frequency", data_type=float)
         self.add_input("pulse_width", data_type=float)
@@ -142,6 +143,15 @@ class OscillatorNode(Node):
         self._output_1d_buffer = None
         self._resize_buffers()  # Initialize buffers on creation
 
+    def _get_state_snapshot_locked(self) -> dict:
+        return self._get_parameters_state()
+
+    def serialize_extra(self) -> dict:
+        return self._serialize_parameters()
+
+    def deserialize_extra(self, data: dict):
+        self._deserialize_parameters(data)
+
     def _resize_buffers(self):
         """Initializes or re-initializes all processing buffers."""
         logger.debug(f"[{self.name}] Resizing internal buffers for blocksize {self.blocksize}.")
@@ -150,13 +160,9 @@ class OscillatorNode(Node):
         self._norm_phases_buffer = torch.empty(self.blocksize, dtype=DEFAULT_DTYPE)
         self._output_1d_buffer = torch.empty(self.blocksize, dtype=DEFAULT_DTYPE)
 
-    # All manual setters (set_waveform, set_frequency, set_pulse_width),
-    # _get_state_snapshot_locked, serialize_extra, and deserialize_extra
-    # are now handled by the @managed_parameters decorator and have been removed.
-
     def process(self, input_data: dict) -> dict:
         # Update parameters from input sockets with a single helper method call.
-        self._update_params_from_sockets(input_data)
+        self._update_parameters_from_sockets(input_data)
 
         # Copy managed state to local variables for processing.
         # These attributes (e.g., self._frequency) are managed by the decorator.

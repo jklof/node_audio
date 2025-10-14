@@ -4,10 +4,8 @@ import logging
 from collections import deque
 from node_system import Node
 
-# ParameterNodeItem is now the standard UI for all parameter-driven nodes
-# managed_parameters and Parameter are the core of the boilerplate reduction
 from ui_elements import ParameterNodeItem
-from node_helpers import managed_parameters, Parameter
+from node_helpers import with_parameters, Parameter
 
 from constants import DEFAULT_DTYPE, TICK_DURATION_S
 
@@ -43,7 +41,7 @@ class ValueNodeItem(ParameterNodeItem):
         super().__init__(node_logic, parameters, width=self.NODE_SPECIFIC_WIDTH)
 
 
-@managed_parameters
+@with_parameters
 class ValueNode(Node):
     NODE_TYPE = "Value"
     UI_CLASS = ValueNodeItem
@@ -55,7 +53,17 @@ class ValueNode(Node):
 
     def __init__(self, name: str, node_id: str | None = None):
         super().__init__(name, node_id)
+        self._init_parameters()
         self.add_output("out", data_type=float)
+
+    def _get_state_snapshot_locked(self) -> dict:
+        return self._get_parameters_state()
+
+    def serialize_extra(self) -> dict:
+        return self._serialize_parameters()
+
+    def deserialize_extra(self, data: dict):
+        self._deserialize_parameters(data)
 
     def process(self, input_data: dict) -> dict:
         # The decorator handles everything. We just need to output the internal value.
@@ -87,7 +95,7 @@ class DialNodeItem(ParameterNodeItem):
         super().__init__(node_logic, parameters, width=self.NODE_SPECIFIC_WIDTH)
 
 
-@managed_parameters
+@with_parameters
 class DialNode(Node):
     NODE_TYPE = "Dial (0-1)"
     UI_CLASS = DialNodeItem
@@ -99,7 +107,17 @@ class DialNode(Node):
 
     def __init__(self, name: str, node_id: str | None = None):
         super().__init__(name, node_id)
+        self._init_parameters()
         self.add_output("out", data_type=float)
+
+    def _get_state_snapshot_locked(self) -> dict:
+        return self._get_parameters_state()
+
+    def serialize_extra(self) -> dict:
+        return self._serialize_parameters()
+
+    def deserialize_extra(self, data: dict):
+        self._deserialize_parameters(data)
 
     def process(self, input_data: dict) -> dict:
         with self._lock:
@@ -131,7 +149,7 @@ class RunningAverageNodeItem(ParameterNodeItem):
         super().__init__(node_logic, parameters, width=self.NODE_SPECIFIC_WIDTH)
 
 
-@managed_parameters
+@with_parameters
 class RunningAverageNode(Node):
     NODE_TYPE = "Running Average"
     UI_CLASS = RunningAverageNodeItem
@@ -142,17 +160,27 @@ class RunningAverageNode(Node):
 
     def __init__(self, name: str, node_id: str | None = None):
         super().__init__(name, node_id)
+        self._init_parameters()
         self.add_input("in", data_type=float)
         self.add_input("time", data_type=float)  # Socket name matches parameter
         self.add_output("out", data_type=float)
         self._current_average = 0.0
+
+    def _get_state_snapshot_locked(self) -> dict:
+        return self._get_parameters_state()
+
+    def serialize_extra(self) -> dict:
+        return self._serialize_parameters()
+
+    def deserialize_extra(self, data: dict):
+        self._deserialize_parameters(data)
 
     def process(self, input_data: dict) -> dict:
         input_value = input_data.get("in")
         if input_value is None:
             return {"out": self._current_average}
 
-        self._update_params_from_sockets(input_data)
+        self._update_parameters_from_sockets(input_data)
 
         with self._lock:
             current_time_s = self._time
@@ -250,7 +278,7 @@ class DialHzNodeItem(ParameterNodeItem):
         super().__init__(node_logic, parameters, width=self.NODE_SPECIFIC_WIDTH)
 
 
-@managed_parameters
+@with_parameters
 class DialHzNode(Node):
     NODE_TYPE = "Dial (Hz)"
     UI_CLASS = DialHzNodeItem
@@ -261,11 +289,21 @@ class DialHzNode(Node):
 
     def __init__(self, name: str, node_id: str | None = None):
         super().__init__(name, node_id)
+        self._init_parameters()
         self.add_input("frequency", data_type=float)
         self.add_output("freq_out", data_type=float)
 
+    def _get_state_snapshot_locked(self) -> dict:
+        return self._get_parameters_state()
+
+    def serialize_extra(self) -> dict:
+        return self._serialize_parameters()
+
+    def deserialize_extra(self, data: dict):
+        self._deserialize_parameters(data)
+
     def process(self, input_data: dict) -> dict:
-        self._update_params_from_sockets(input_data)
+        self._update_parameters_from_sockets(input_data)
         with self._lock:
             return {"freq_out": self._frequency}
 
@@ -294,7 +332,7 @@ class GainNodeItem(ParameterNodeItem):
         super().__init__(node_logic, parameters, width=self.NODE_SPECIFIC_WIDTH)
 
 
-@managed_parameters
+@with_parameters
 class GainNode(Node):
     NODE_TYPE = "Gain"
     UI_CLASS = GainNodeItem
@@ -305,16 +343,26 @@ class GainNode(Node):
 
     def __init__(self, name, node_id=None):
         super().__init__(name, node_id)
+        self._init_parameters()
         self.add_input("in", data_type=torch.Tensor)
         self.add_input("gain_db", data_type=float)
         self.add_output("out", data_type=torch.Tensor)
+
+    def _get_state_snapshot_locked(self) -> dict:
+        return self._get_parameters_state()
+
+    def serialize_extra(self) -> dict:
+        return self._serialize_parameters()
+
+    def deserialize_extra(self, data: dict):
+        self._deserialize_parameters(data)
 
     def process(self, input_data: dict) -> dict:
         signal = input_data.get("in")
         if not isinstance(signal, torch.Tensor):
             return {"out": None}
 
-        self._update_params_from_sockets(input_data)
+        self._update_parameters_from_sockets(input_data)
 
         with self._lock:
             gain_db = self._gain_db

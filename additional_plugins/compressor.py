@@ -15,7 +15,7 @@ from PySide6.QtWidgets import QWidget, QSlider, QLabel, QVBoxLayout
 from PySide6.QtCore import Qt, Signal, Slot, QObject, QSignalBlocker
 
 # --- Helper Imports for Refactoring ---
-from node_helpers import managed_parameters, Parameter
+from node_helpers import with_parameters, Parameter
 
 # --- Configure logging ---
 logger = logging.getLogger(__name__)
@@ -92,14 +92,14 @@ class CompressorNodeItem(ParameterNodeItem):
 # ==============================================================================
 # 2. Logic Class for the Compressor Node (REFACTORED)
 # ==============================================================================
-@managed_parameters
+@with_parameters
 class CompressorNode(Node):
     NODE_TYPE = "Compressor"
     UI_CLASS = CompressorNodeItem
     CATEGORY = "Effects"
     DESCRIPTION = "Reduces the dynamic range of a signal."
 
-    # --- 1. Declarative Managed Parameters ---
+    # --- 1. Declarative Parameters ---
     # The decorator uses these to generate setters, state management, and serialization.
     threshold_db = Parameter(default=-20.0, clip=(MIN_THRESHOLD_DB, MAX_THRESHOLD_DB))
     ratio = Parameter(default=4.0, clip=(MIN_RATIO, MAX_RATIO))
@@ -109,6 +109,9 @@ class CompressorNode(Node):
 
     def __init__(self, name: str, node_id: Optional[str] = None):
         super().__init__(name, node_id)
+
+        self._init_parameters()
+
         self.add_input("in", data_type=torch.Tensor)
         self.add_input("threshold_db", data_type=float)
         self.add_input("ratio", data_type=float)
@@ -118,7 +121,7 @@ class CompressorNode(Node):
         self.add_input("sidechain_in", data_type=torch.Tensor)
         self.add_output("out", data_type=torch.Tensor)
 
-        # --- Internal DSP State (Not managed parameters) ---
+        # --- Internal DSP State ---
         self._samplerate = DEFAULT_SAMPLERATE
         self._envelope = 0.0
         self._delay_samples = SIDECHAIN_DOWNSAMPLE_FACTOR // 2
@@ -143,6 +146,15 @@ class CompressorNode(Node):
         self._gain_below = None
         self._gain_inside = None
         self._gain_above = None
+
+    def _get_state_snapshot_locked(self) -> dict:
+        return self._get_parameters_state()
+
+    def serialize_extra(self) -> dict:
+        return self._serialize_parameters()
+
+    def deserialize_extra(self, data: dict):
+        self._deserialize_parameters(data)
 
     def _mark_coeffs_dirty(self):
         """Callback for the decorator when time-based parameters change."""
@@ -223,7 +235,7 @@ class CompressorNode(Node):
         # --- 3. Refactored Parameter Update Logic ---
         # A single call to the injected helper method handles all socket updates,
         # clipping, side-effects (via on_change), and UI state emission.
-        self._update_params_from_sockets(input_data)
+        self._update_parameters_from_sockets(input_data)
 
         with torch.no_grad():
             with self._lock:

@@ -14,7 +14,7 @@ from node_system import Node
 from ui_elements import ParameterNodeItem
 from PySide6.QtWidgets import QVBoxLayout, QLabel, QPushButton
 from PySide6.QtCore import Slot, QObject, Signal
-from node_helpers import managed_parameters, Parameter
+from node_helpers import with_parameters, Parameter
 
 logger = logging.getLogger(__name__)
 
@@ -244,7 +244,7 @@ class SpeechToTextNodeItem(ParameterNodeItem):
 # ==============================================================================
 # Node Logic Class
 # ==============================================================================
-@managed_parameters
+@with_parameters
 class SpeechToTextNode(Node):
     NODE_TYPE = "Speech to Text"
     UI_CLASS = SpeechToTextNodeItem
@@ -258,6 +258,9 @@ class SpeechToTextNode(Node):
 
     def __init__(self, name: str, node_id: Optional[str] = None):
         super().__init__(name, node_id)
+
+        self._init_parameters()
+
         self.add_input("audio_in", data_type=torch.Tensor)
         self.add_output("text_out", data_type=str)
 
@@ -268,6 +271,15 @@ class SpeechToTextNode(Node):
         self._res_q: Deque[Tuple[str, Any]] = collections.deque()
         self._worker: Optional[WhisperWorker] = None
         self._transcribed_text: Deque[str] = collections.deque(maxlen=10)
+
+    def _get_state_snapshot_locked(self) -> dict:
+        return self._get_parameters_state()
+
+    def serialize_extra(self) -> dict:
+        return self._serialize_parameters()
+
+    def deserialize_extra(self, data: dict):
+        self._deserialize_parameters(data)
 
     def get_current_status(self) -> str:
         with self._lock:
@@ -329,6 +341,8 @@ class SpeechToTextNode(Node):
     def process(self, input_data: dict) -> dict:
         self._poll_worker_responses()
         audio = input_data.get("audio_in")
+
+        self._update_parameters_from_sockets(input_data)
 
         if self._worker and self._worker.is_alive() and isinstance(audio, torch.Tensor):
             self._req_q.append((WorkerCommand.PROCESS_AUDIO, audio.clone()))

@@ -7,7 +7,7 @@ from collections import deque
 # --- Node System Imports ---
 from node_system import Node
 from ui_elements import NodeItem, NODE_CONTENT_PADDING, ParameterNodeItem
-from node_helpers import managed_parameters, Parameter
+from node_helpers import with_parameters, Parameter
 from constants import (
     DEFAULT_SAMPLERATE,
     DEFAULT_BLOCKSIZE,
@@ -43,7 +43,7 @@ class STFTNodeItem(ParameterNodeItem):
         super().__init__(node_logic, parameters)
 
 
-@managed_parameters
+@with_parameters
 class STFTNode(Node):
     NODE_TYPE = "STFT"
     UI_CLASS = STFTNodeItem
@@ -54,6 +54,7 @@ class STFTNode(Node):
 
     def __init__(self, name, node_id=None):
         super().__init__(name, node_id)
+        self._init_parameters()
         self.add_input("audio_in", data_type=torch.Tensor)
         self.add_output("spectral_frame_out", data_type=SpectralFrame)
         self._hop_size = DEFAULT_BLOCKSIZE
@@ -63,6 +64,15 @@ class STFTNode(Node):
         self._buffer = torch.tensor([], dtype=DEFAULT_DTYPE)
         self._expected_channels = None
         self._recalculate_params()
+
+    def _get_state_snapshot_locked(self) -> dict:
+        return self._get_parameters_state()
+
+    def serialize_extra(self) -> dict:
+        return self._serialize_parameters()
+
+    def deserialize_extra(self, data: dict):
+        self._deserialize_parameters(data)
 
     def _recalculate_params(self):
         # This method is called from within a locked context, so it's safe.
@@ -265,7 +275,7 @@ class SpectralFilterNodeItem(ParameterNodeItem):
         self.update_geometry()
 
 
-@managed_parameters
+@with_parameters
 class SpectralFilterNode(Node):
     NODE_TYPE = "Spectral Filter"
     CATEGORY = "Spectral"
@@ -278,17 +288,27 @@ class SpectralFilterNode(Node):
 
     def __init__(self, name, node_id=None):
         super().__init__(name, node_id)
+        self._init_parameters()
         self.add_input("spectral_frame_in", data_type=SpectralFrame)
         self.add_input("cutoff_freq_1", data_type=float)
         self.add_input("cutoff_freq_2", data_type=float)
         self.add_output("spectral_frame_out", data_type=SpectralFrame)
+
+    def _get_state_snapshot_locked(self) -> dict:
+        return self._get_parameters_state()
+
+    def serialize_extra(self) -> dict:
+        return self._serialize_parameters()
+
+    def deserialize_extra(self, data: dict):
+        self._deserialize_parameters(data)
 
     def process(self, input_data: dict) -> dict:
         frame = input_data.get("spectral_frame_in")
         if not isinstance(frame, SpectralFrame):
             return {"spectral_frame_out": None}
 
-        self._update_params_from_sockets(input_data)
+        self._update_parameters_from_sockets(input_data)
 
         with self._lock:
             filter_type = self._filter_type

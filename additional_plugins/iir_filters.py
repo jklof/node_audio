@@ -9,7 +9,7 @@ from typing import Dict, Optional
 from node_system import Node
 from constants import DEFAULT_SAMPLERATE, DEFAULT_DTYPE
 from ui_elements import ParameterNodeItem
-from node_helpers import managed_parameters, Parameter  # <-- IMPORTED
+from node_helpers import with_parameters, Parameter
 
 # --- UI and Qt Imports ---
 from PySide6.QtCore import Slot
@@ -87,14 +87,14 @@ class BiquadFilterNodeItem(ParameterNodeItem):
 # ==============================================================================
 # 2. Logic Class for the Biquad (IIR) Filter Node (REFACTORED)
 # ==============================================================================
-@managed_parameters
+@with_parameters
 class BiquadFilterNode(Node):
     NODE_TYPE = "Biquad Filter (IIR)"
     UI_CLASS = BiquadFilterNodeItem
     CATEGORY = "Filters"
     DESCRIPTION = "Applies a highly efficient IIR filter (EQ)."
 
-    # --- REFACTORED: Declarative managed parameters ---
+    # --- Declarative  parameters ---
     # The decorator automatically creates thread-safe setters, serialization, and state management.
     # The on_change hook cleanly handles the logic for dirtying the filter coefficients.
     filter_type = Parameter(default="Low Pass", on_change="_mark_params_dirty")
@@ -104,6 +104,9 @@ class BiquadFilterNode(Node):
 
     def __init__(self, name: str, node_id: Optional[str] = None):
         super().__init__(name, node_id)
+
+        self._init_parameters()
+
         self.add_input("in", data_type=torch.Tensor)
         # Sockets now match parameter names for automatic modulation updates.
         self.add_input("cutoff_freq", data_type=float)
@@ -111,14 +114,21 @@ class BiquadFilterNode(Node):
         self.add_input("gain_db", data_type=float)
         self.add_output("out", data_type=torch.Tensor)
 
-        # REFACTORED: Internal state initialization is handled by the decorator.
-
         # --- DSP State ---
         self._params_dirty: bool = True
         self._b_coeffs: Optional[np.ndarray] = None
         self._a_coeffs: Optional[np.ndarray] = None
         self._zi: Optional[np.ndarray] = None
         self._expected_channels: Optional[int] = None
+
+    def _get_state_snapshot_locked(self) -> dict:
+        return self._get_parameters_state()
+
+    def serialize_extra(self) -> dict:
+        return self._serialize_parameters()
+
+    def deserialize_extra(self, data: dict):
+        self._deserialize_parameters(data)
 
     def _mark_params_dirty(self):
         """Callback for the decorator to invalidate coefficient cache."""
@@ -128,7 +138,6 @@ class BiquadFilterNode(Node):
     def _recalculate_coeffs(self):
         """(Unchanged) Calculates the filter coefficients based on internal state."""
         sr = DEFAULT_SAMPLERATE
-        # Use the decorator-managed internal attributes
         freq, q, gain_db = self._cutoff_freq, self._q, self._gain_db
         A = 10 ** (gain_db / 40.0)
         w0 = 2 * np.pi * freq / sr
@@ -194,20 +203,6 @@ class BiquadFilterNode(Node):
         self._params_dirty = False
         logger.info(f"[{self.name}] Recalculated IIR coefficients for {filter_type}.")
 
-    # --- REFACTORED: All manual setters and serialization methods are now removed. ---
-
-    def _get_state_snapshot_locked(self) -> Dict:
-        """
-        Overrides the decorator-injected method to add UI-specific flags.
-        """
-        # Get the base state from the decorator's logic
-        state = super()._get_state_snapshot_locked()
-        # Add the connection status flags required by the UI
-        state["is_cutoff_freq_ext"] = "cutoff_freq" in self.inputs and self.inputs["cutoff_freq"].connections
-        state["is_q_ext"] = "q" in self.inputs and self.inputs["q"].connections
-        state["is_gain_db_ext"] = "gain_db" in self.inputs and self.inputs["gain_db"].connections
-        return state
-
     def start(self):
         with self._lock:
             self._zi = None
@@ -221,9 +216,7 @@ class BiquadFilterNode(Node):
 
         num_channels, _ = signal_tensor.shape
 
-        # REFACTORED: Update parameters from sockets with a single helper method call.
-        # This also handles UI updates if any parameter changed.
-        self._update_params_from_sockets(input_data)
+        self._update_parameters_from_sockets(input_data)
 
         with self._lock:
             if self._params_dirty:

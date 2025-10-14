@@ -13,7 +13,7 @@ from PySide6.QtCore import Qt, Signal, Slot, QObject, QSignalBlocker
 from PySide6.QtWidgets import QWidget, QLabel, QSlider, QVBoxLayout, QPushButton, QSizePolicy
 
 # --- Helper Imports ---
-from node_helpers import managed_parameters, Parameter
+from node_helpers import with_parameters, Parameter
 
 # --- Logging ---
 logger = logging.getLogger(__name__)
@@ -76,7 +76,7 @@ class ADSRNodeItem(ParameterNodeItem):
 # ==============================================================================
 # 3. ADSR Node Logic Class
 # ==============================================================================
-@managed_parameters
+@with_parameters
 class ADSRNode(Node):
     NODE_TYPE = "ADSR Envelope"
     UI_CLASS = ADSRNodeItem
@@ -91,6 +91,7 @@ class ADSRNode(Node):
 
     def __init__(self, name: str, node_id: Optional[str] = None):
         super().__init__(name, node_id)
+        self._init_parameters()
 
         # --- Define Sockets ---
         self.add_input("gate", data_type=bool)
@@ -105,12 +106,18 @@ class ADSRNode(Node):
         self._current_level: float = 0.0
         self._previous_gate: bool = False
 
-    # Manual setters, _get_state_snapshot_locked, serialize_extra, and deserialize_extra
-    # are now automatically handled by the @managed_parameters decorator.
+    def _get_state_snapshot_locked(self) -> dict:
+        return self._get_parameters_state()
+
+    def serialize_extra(self) -> dict:
+        return self._serialize_parameters()
+
+    def deserialize_extra(self, data: dict):
+        self._deserialize_parameters(data)
 
     def process(self, input_data: dict) -> dict:
         # --- Update parameters from sockets. This also handles UI updates. ---
-        self._update_params_from_sockets(input_data)
+        self._update_parameters_from_sockets(input_data)
 
         with self._lock:
             # --- Get a consistent snapshot of the managed parameters ---
@@ -295,7 +302,7 @@ class LFONodeItem(ParameterNodeItem):
 # ==============================================================================
 # 7. LFO Node Logic Class
 # ==============================================================================
-@managed_parameters
+@with_parameters
 class LFONode(Node):
     NODE_TYPE = "LFO"
     CATEGORY = "Modulation"
@@ -308,6 +315,7 @@ class LFONode(Node):
 
     def __init__(self, name, node_id=None):
         super().__init__(name, node_id)
+        self._init_parameters()
 
         self.add_input("sync_control", data_type=bool)
         self.add_input("frequency", data_type=float)
@@ -322,12 +330,18 @@ class LFONode(Node):
 
         logger.debug(f"LFO [{self.name}] initialized.")
 
-    # Manual setter, _get_state_snapshot_locked, serialize_extra, and deserialize_extra
-    # are now automatically handled by the @managed_parameters decorator.
+    def _get_state_snapshot_locked(self) -> dict:
+        return self._get_parameters_state()
+
+    def serialize_extra(self) -> dict:
+        return self._serialize_parameters()
+
+    def deserialize_extra(self, data: dict):
+        self._deserialize_parameters(data)
 
     def process(self, input_data: dict) -> dict:
         # --- Update parameters from sockets. This also handles UI updates. ---
-        self._update_params_from_sockets(input_data)
+        self._update_parameters_from_sockets(input_data)
 
         with self._lock:
             # Get a consistent snapshot of the managed parameter
