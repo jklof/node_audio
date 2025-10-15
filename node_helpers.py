@@ -114,4 +114,3 @@ def with_parameters(cls):
     setattr(cls, "_deserialize_parameters", _deserialize_parameters)
     setattr(cls, "_update_parameters_from_sockets", _update_parameters_from_sockets)
     return cls
-

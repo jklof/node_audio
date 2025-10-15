@@ -5,7 +5,7 @@ import json
 import time
 import gc
 from collections import deque
-from typing import Type, Any
+from typing import Type, Any, TypeAlias
 from enum import Enum, auto
 
 from PySide6.QtCore import QObject, Signal
@@ -15,6 +15,9 @@ from plugin_loader import registry, scan_and_load_plugins
 from constants import TICK_DURATION_NS
 
 logger = logging.getLogger(__name__)
+
+# Type alias for the processing plan to improve readability
+ProcessingPlan = list[tuple[Node, dict[str, Socket], dict[str, Any]]] | None
 
 # Number of ticks to pre-process to fill the audio buffer before playback starts.
 INITIAL_PRIME_TICKS = 2
@@ -43,7 +46,7 @@ class Engine:
         self.signals = EngineSignals()
         self._lock = threading.Lock()
 
-        self._cached_plan: list[tuple[Node, dict[str, Socket], dict[str, Any]]] | None = None
+        self._cached_plan: ProcessingPlan = None
 
         # -- a thread-safe command queue ---
         self._command_queue = deque()
@@ -222,7 +225,7 @@ class Engine:
 
     def _execute_unlocked_tick(
         self,
-        processing_plan: list[tuple[Node, dict[str, Socket], dict[str, Any]]],
+        processing_plan: ProcessingPlan,
         stats: dict[str, float],
     ):
         """
@@ -256,7 +259,7 @@ class Engine:
                     output_socket._data = None
                 self.signals.nodeErrorOccurred.emit(node.id, error_msg)
 
-    def _get_processing_plan(self) -> list[tuple[Node, dict[str, Socket], dict[str, Any]]] | None:
+    def _get_processing_plan(self) -> ProcessingPlan:
         """
         Gets the processing plan. If the cache is invalid, it computes a new one.
         Assumes the lock is held.
@@ -269,7 +272,7 @@ class Engine:
         """Invalidates the cached processing plan. Assumes lock is held."""
         self._cached_plan = None
 
-    def _compute_processing_plan(self) -> list[tuple[Node, dict[str, Socket], dict[str, Any]]] | None:
+    def _compute_processing_plan(self) -> ProcessingPlan:
         """
         Computes the topological sort and builds a detailed, thread-safe
         processing plan from it. Assumes lock is held.
@@ -372,15 +375,15 @@ class Engine:
         self._state = EngineState.STOPPED
         logger.info("Engine: Graph processing stopped.")
 
-    def stop_processing(self):
+    def stop_processing(self) -> bool:
         with self._lock:
             if self._state != EngineState.RUNNING:
-                logger.warning(f"Engine: Cannot stop. Current state is {self._state.name}.")
-                return
+                return False
             self._state = EngineState.STOPPING
         self.signals.processingStateChanged.emit(EngineState.STOPPING)
         self._queue_command("stop_graph")
         logger.info("Engine: Queued command to stop graph processing.")
+        return True
 
     def _create_graph_snapshot_locked(self) -> dict:
         """Creates a copy of the graph state. Assumes lock is held."""
@@ -397,13 +400,9 @@ class Engine:
         self.signals.graphChanged.emit(snapshot)
 
     def set_clock_source(self, node_id: str | None):
-        was_running = self._state == EngineState.RUNNING
-        if was_running:
-            self.stop_processing()
+        was_running = self.stop_processing()
         with self._lock:
             if self.graph.selected_clock_node_id == node_id:
-                if was_running:
-                    self.start_processing()
                 return
             new_node = self.graph.nodes.get(node_id)
             if new_node and isinstance(new_node, IClockProvider):
@@ -598,9 +597,7 @@ class Engine:
     def reload_plugins_and_graph(self, plugin_dirs: list[str]):
         """Performs a full, transactional reload of plugins and the graph."""
         logger.info("Engine: Starting plugin reload transaction.")
-        was_running = self._state == EngineState.RUNNING
-        if was_running:
-            self.stop_processing()
+        was_running = self.stop_processing()
         self._synchronous_stop_processing_thread()
         with self._lock:
             graph_data = {
@@ -630,8 +627,7 @@ class Engine:
     def shutdown(self):
         """Performs a fully synchronous shutdown of the engine and all node resources."""
         logger.info("Engine: Shutting down...")
-        if self._state == EngineState.RUNNING:
-            self.stop_processing()
+        self.stop_processing()
         self._synchronous_stop_processing_thread()
         logger.info("Engine: Processing thread stopped. Cleaning up nodes...")
         with self._lock:

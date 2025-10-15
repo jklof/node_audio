@@ -10,16 +10,16 @@ from PySide6.QtGui import QPen, QColor
 logger = logging.getLogger(__name__)
 
 
-class SimpleTextNodeItem(NodeItem):
+class TextNodeItem(NodeItem):
     """
-    A UI for the SimpleTextNode that provides a resizable text editing area.
+    A UI for the TextNode that provides a resizable text editing area.
     It synchronizes its content with the logic node in a thread-safe manner.
     """
 
     MIN_NODE_WIDTH = 250
     MIN_NODE_HEIGHT = 150
 
-    def __init__(self, node_logic: "SimpleTextNode"):
+    def __init__(self, node_logic: "TextNode"):
         initial_width = node_logic.ui_size[0] if node_logic.ui_size else 300
         super().__init__(node_logic, width=initial_width)
 
@@ -173,11 +173,11 @@ class SimpleTextNodeItem(NodeItem):
                 self.concat_checkbox.setChecked(new_concat_mode)
 
 
-class SimpleTextNode(Node):
-    NODE_TYPE = "Simple Text"
-    UI_CLASS = SimpleTextNodeItem
+class TextNode(Node):
+    NODE_TYPE = "Text"
+    UI_CLASS = TextNodeItem
     CATEGORY = "Utility"
-    DESCRIPTION = "A simple text box for editing, inputting, and outputting string data."
+    DESCRIPTION = "A text box for editing, inputting, and outputting string data."
 
     def __init__(self, name, node_id=None):
         super().__init__(name, node_id)
