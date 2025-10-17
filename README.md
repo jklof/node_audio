@@ -13,6 +13,8 @@ conda activate node-audio-dev
 #    files are immediately reflected without needing to reinstall.
 pip install -e . -v
 
+# run
+python main.py
 
 # remove the environment
 conda deactivate node-audio-dev
