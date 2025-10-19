@@ -47,10 +47,11 @@ VOICES_SHA256 = "bca610b8308e8d99f32e6fe4197e7ec01679264efed0cac9140fe9c29f1fbf7
 
 
 # =============================================================================
-# Worker (Refactored to use downloader module)
+# REVISED Worker with Internal Queue
 # =============================================================================
 class WorkerCommand(Enum):
-    PROCESS_TEXT = auto()
+    ADD_TEXT = auto()
+    CLEAR_AND_PROCESS = auto()  # For gate-trigger interruption
     SHUTDOWN = auto()
 
 
@@ -79,37 +80,29 @@ class KokoroWorker(threading.Thread):
         self.voices_path: Optional[str] = None
         self._resamplers, self._kokoro, self._g2p = {}, None, None
 
+        # --- NEW: Worker-side state for proactive queuing ---
+        self._work_queue: Deque[str] = deque()
+        self._is_synthesizing = False
+        self._synthesis_cancelled_midway = False
+
     def _send_response(self, type: WorkerResponse, data: Any):
         self.res_q.append((type, data))
 
     def _status_callback(self, message: str):
-        """Helper to send status updates back to the main thread."""
         self._send_response(WorkerResponse.STATUS, message)
 
     def _ensure_model_files_exist(self) -> bool:
-        """
-        Builds a manifest of required files and uses the downloader module
-        to ensure they are present and valid.
-        """
         model_dir = os.path.join(_PLUGIN_DIR, KOKORO_MODELS_SUBDIR)
-
-        # Find the selected model's info from our manifest
         target_model_info = next((m for m in KOKORO_MODELS if m["name"] == self.model_name), None)
         if not target_model_info:
             self._send_response(WorkerResponse.ERROR, f"Model '{self.model_name}' is not a valid choice.")
             return False
 
-        # Define local paths for the files
         self.voices_path = os.path.join(model_dir, VOICES_FILENAME)
         self.model_path = os.path.join(model_dir, target_model_info["name"])
 
-        # Create the file manifest for the downloader
         file_manifest = [
-            {
-                "path": self.voices_path,
-                "url": KOKORO_BASE_URL + VOICES_FILENAME,
-                "sha256": VOICES_SHA256,
-            },
+            {"path": self.voices_path, "url": KOKORO_BASE_URL + VOICES_FILENAME, "sha256": VOICES_SHA256},
             {
                 "path": self.model_path,
                 "url": KOKORO_BASE_URL + target_model_info["name"],
@@ -117,24 +110,18 @@ class KokoroWorker(threading.Thread):
             },
         ]
 
-        # Call the general-purpose downloader, passing our cancel event
         if not downloader.ensure_files(
             file_manifest, status_callback=self._status_callback, cancel_event=self.cancel_event
         ):
-            # This will be false if it failed or was cancelled
             if not self.cancel_event.is_set():
                 self._send_response(WorkerResponse.ERROR, "Failed to retrieve model files.")
             return False
-
         return True
 
     def _load_resources(self) -> bool:
         try:
             if not self._ensure_model_files_exist():
-                if not self.cancel_event.is_set():
-                    logger.error(f"[{self.node_name}] Aborting resource load due to missing or corrupt model files.")
                 return False
-
             self._send_response(WorkerResponse.STATUS, "Loading models...")
             self._kokoro = Kokoro(self.model_path, self.voices_path)
             fallback = espeak.EspeakFallback(british=True)
@@ -155,6 +142,8 @@ class KokoroWorker(threading.Thread):
         return self._resamplers[sr](t)
 
     def _process_text(self, text: str, voice_id: Any, speed: float):
+        self._is_synthesizing = True
+        self._synthesis_cancelled_midway = False
         try:
             self._send_response(WorkerResponse.STATUS, "Synthesizing...")
             phonemes, _ = self._g2p(text)
@@ -162,31 +151,53 @@ class KokoroWorker(threading.Thread):
             async def gen():
                 s = self._kokoro.create_stream(phonemes, voice=voice_id, speed=speed, is_phonemes=True, trim=True)
                 async for chunk, sr in s:
+                    # Check for external shutdown OR internal interrupt signal
+                    if self.cancel_event.is_set() or self._synthesis_cancelled_midway:
+                        break
                     tensor = torch.atleast_2d(torch.from_numpy(chunk.T.copy()).to(DEFAULT_DTYPE))
                     self._send_response(WorkerResponse.AUDIO, self._resample(tensor, sr))
 
             self._loop.run_until_complete(gen())
-            self._send_response(WorkerResponse.STATUS, "Ready")
+
         except Exception as e:
-            logger.error(f"[{self.node_name}] TTS error: {e}", exc_info=True)
-            self._send_response(WorkerResponse.ERROR, f"Synthesis error: {e}")
+            if not self.cancel_event.is_set() and not self._synthesis_cancelled_midway:
+                logger.error(f"[{self.node_name}] TTS error: {e}", exc_info=True)
+                self._send_response(WorkerResponse.ERROR, f"Synthesis error: {e}")
+        finally:
+            self._is_synthesizing = False
+            # Only report "Ready" if we finished naturally
+            if not self.cancel_event.is_set() and not self._synthesis_cancelled_midway:
+                self._send_response(WorkerResponse.STATUS, "Ready")
 
     def run(self):
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
 
         if not self._load_resources():
-            return  # Exit if resource loading failed or was cancelled
+            return
 
         while not self.cancel_event.is_set():
+            # --- Step 1: Handle incoming commands from the main thread ---
             try:
                 cmd, data = self.req_q.popleft()
                 if cmd == WorkerCommand.SHUTDOWN:
                     break
-                elif cmd == WorkerCommand.PROCESS_TEXT:
-                    self._process_text(*data)
+                elif cmd == WorkerCommand.ADD_TEXT:
+                    self._work_queue.append(data)
+                elif cmd == WorkerCommand.CLEAR_AND_PROCESS:
+                    self._synthesis_cancelled_midway = True  # Signal current synthesis to stop
+                    self._work_queue.clear()
+                    self._work_queue.append(data)
+
             except IndexError:
-                time.sleep(0.005)
+                pass  # No new commands, proceed to processing
+
+            # --- Step 2: Proactively start next synthesis task if idle ---
+            if not self._is_synthesizing and self._work_queue:
+                text_to_process, voice_id, speed = self._work_queue.popleft()
+                self._process_text(text_to_process, voice_id, speed)
+
+            time.sleep(0.005)
 
         self._loop.close()
         logger.info(f"[{self.node_name}] Worker thread finished.")
@@ -200,32 +211,26 @@ class TTSKokoroNodeItem(NodeItem):
 
     def __init__(self, node_logic: "TTSKokoroNode"):
         super().__init__(node_logic, width=self.NODE_SPECIFIC_WIDTH)
-
         self.container = QWidget()
         layout = QVBoxLayout(self.container)
         layout.setContentsMargins(
             NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING, NODE_CONTENT_PADDING
         )
         layout.setSpacing(5)
-
         self.model_label = QLabel("Model:")
         self.model_combo = QComboBox()
         for model in KOKORO_MODELS:
             self.model_combo.addItem(model["name"], model["name"])
-
         self.voice_label = QLabel("Voice:")
         self.voice_combo = QComboBox()
         self.voice_combo.addItem("Loading...")
-
         self.speed_label = QLabel("Speed:")
         self.speed_box = QDoubleSpinBox()
         self.speed_box.setRange(0.5, 2.0)
         self.speed_box.setSingleStep(0.1)
         self.speed_box.setDecimals(1)
-
         self.status_label = QLabel("Status: ...")
         self.status_label.setWordWrap(True)
-
         layout.addWidget(self.model_label)
         layout.addWidget(self.model_combo)
         layout.addWidget(self.voice_label)
@@ -234,7 +239,6 @@ class TTSKokoroNodeItem(NodeItem):
         layout.addWidget(self.speed_box)
         layout.addWidget(self.status_label)
         self.setContentWidget(self.container)
-
         self.model_combo.textActivated.connect(self.node_logic.set_model_name)
         self.voice_combo.currentIndexChanged.connect(self._on_voice_selected)
         self.speed_box.valueChanged.connect(self.node_logic.set_speed)
@@ -257,17 +261,14 @@ class TTSKokoroNodeItem(NodeItem):
             self.status_label.setStyleSheet("color: orange;")
         else:
             self.status_label.setStyleSheet("color: lightgreen;")
-
         model_name = state.get("model_name")
         if model_name and self.model_combo.currentText() != model_name:
             with QSignalBlocker(self.model_combo):
                 self.model_combo.setCurrentText(model_name)
-
         speed_value = state.get("speed")
         if speed_value is not None and self.speed_box.value() != speed_value:
             with QSignalBlocker(self.speed_box):
                 self.speed_box.setValue(speed_value)
-
         available_voices = state.get("available_voices", [])
         if available_voices:
             current_items = [self.voice_combo.itemData(i) for i in range(self.voice_combo.count())]
@@ -276,7 +277,6 @@ class TTSKokoroNodeItem(NodeItem):
                     self.voice_combo.clear()
                     for v in available_voices:
                         self.voice_combo.addItem(str(v), v)
-
         selected_voice = state.get("voice")
         if selected_voice:
             idx = self.voice_combo.findData(selected_voice)
@@ -286,26 +286,31 @@ class TTSKokoroNodeItem(NodeItem):
 
 
 # =============================================================================
-# Node Logic Class (Refactored for Cancellation)
+# REVISED Node Logic Class
 # =============================================================================
 class TTSKokoroNode(Node):
     NODE_TYPE = "TTS Kokoro"
     UI_CLASS = TTSKokoroNodeItem
     CATEGORY = "Generators"
-    DESCRIPTION = "Generates speech from text using the Kokoro TTS engine."
+    DESCRIPTION = "Generates speech from text. Uses Gate input to trigger, otherwise queues incoming text."
 
     def __init__(self, name: str, node_id: Optional[str] = None):
         super().__init__(name, node_id)
         self.add_input("text_in", data_type=str)
+        self.add_input("gate_in", data_type=bool)
         self.add_output("out", data_type=torch.Tensor)
+
         self._current_status = "Stopped"
         self._speed: float = 1.0
         self._voice: Optional[Any] = None
         self._model_name: str = KOKORO_MODELS[0]["name"]
         self._available_voices: List[Any] = []
         self._saved_voice_name: Optional[str] = None
+
         self._audio_buffer = torch.empty((1, 0), dtype=DEFAULT_DTYPE)
-        self._last_processed_text = ""
+        self._last_queued_text: str = ""
+        self._previous_gate_state: bool = False
+
         self._req_q: Deque[Tuple[Enum, Any]] = deque()
         self._res_q: Deque[Tuple[Enum, Any]] = deque()
         self._worker: Optional[KokoroWorker] = None
@@ -398,10 +403,12 @@ class TTSKokoroNode(Node):
         self._set_status("Starting worker...")
         self._req_q.clear()
         self._res_q.clear()
-        self._cancel_event.clear()  # Reset cancellation flag for the new worker
+        self._cancel_event.clear()
         with self._lock:
             self._audio_buffer = torch.empty((1, 0), dtype=DEFAULT_DTYPE)
             model_to_use = self._model_name
+            self._last_queued_text = ""
+            self._previous_gate_state = False
         self._worker = KokoroWorker(
             self.name, self._req_q, self._res_q, DEFAULT_SAMPLERATE, model_to_use, self._cancel_event
         )
@@ -410,7 +417,7 @@ class TTSKokoroNode(Node):
     def stop(self):
         if self._worker and self._worker.is_alive():
             self._set_status("Stopping worker...")
-            self._cancel_event.set()  # Signal cancellation to the worker
+            self._cancel_event.set()
             self._req_q.append((WorkerCommand.SHUTDOWN, None))
             self._worker.join(timeout=2.0)
             if self._worker.is_alive():
@@ -424,16 +431,39 @@ class TTSKokoroNode(Node):
 
     def process(self, input_data: dict) -> dict:
         self._poll_worker_responses()
+
         text = input_data.get("text_in")
-        if self._worker and self._worker.is_alive() and isinstance(text, str):
-            stripped_text = text.strip()
-            if stripped_text and stripped_text != self._last_processed_text:
-                self._last_processed_text = stripped_text
-                with self._lock:
-                    self._audio_buffer = torch.empty((1, 0), dtype=DEFAULT_DTYPE)
-                    current_voice, current_speed = self._voice, self._speed
-                if current_voice:
-                    self._req_q.append((WorkerCommand.PROCESS_TEXT, (stripped_text, current_voice, current_speed)))
+        gate = input_data.get("gate_in")
+        is_gate_connected = self.inputs["gate_in"].connections
+
+        if self._worker and self._worker.is_alive():
+            with self._lock:
+                current_voice, current_speed = self._voice, self._speed
+
+            if current_voice:
+                # --- GATE/TRIGGER MODE ---
+                if is_gate_connected:
+                    current_gate_state = bool(gate)
+                    if current_gate_state and not self._previous_gate_state:  # Rising edge
+                        text_to_speak = text.strip() if isinstance(text, str) else ""
+                        if text_to_speak:
+                            logger.info(f"[{self.name}] Gate triggered. Speaking: '{text_to_speak}'")
+                            with self._lock:
+                                self._audio_buffer = torch.empty((1, 0), dtype=DEFAULT_DTYPE)
+                            payload = (text_to_speak, current_voice, current_speed)
+                            self._req_q.append((WorkerCommand.CLEAR_AND_PROCESS, payload))
+                    self._previous_gate_state = current_gate_state
+
+                # --- QUEUE/STREAM MODE ---
+                else:
+                    text_to_queue = text.strip() if isinstance(text, str) else ""
+                    if text_to_queue and text_to_queue != self._last_queued_text:
+                        self._last_queued_text = text_to_queue
+                        logger.info(f"[{self.name}] Adding to queue: '{text_to_queue}'")
+                        payload = (text_to_queue, current_voice, current_speed)
+                        self._req_q.append((WorkerCommand.ADD_TEXT, payload))
+
+        # --- AUDIO OUTPUT ---
         output_block = torch.zeros((1, DEFAULT_BLOCKSIZE), dtype=DEFAULT_DTYPE)
         with self._lock:
             if self._audio_buffer.shape[1] >= DEFAULT_BLOCKSIZE:
@@ -458,4 +488,4 @@ class TTSKokoroNode(Node):
             if loaded_model_name in valid_model_names:
                 self._model_name = loaded_model_name
             else:
-                self._model_name = KOKORO_MODELS[0]["name"]  # Fallback to default
+                self._model_name = KOKORO_MODELS[0]["name"]
