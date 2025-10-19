@@ -3,8 +3,6 @@ import time
 import asyncio
 import threading
 import logging
-import urllib.request
-import hashlib
 from collections import deque
 from enum import Enum, auto
 from typing import Deque, Optional, Any, List, Tuple
@@ -22,6 +20,9 @@ from ui_elements import NodeItem, NODE_CONTENT_PADDING
 from PySide6.QtWidgets import QLabel, QComboBox, QDoubleSpinBox, QVBoxLayout, QWidget
 from PySide6.QtCore import Slot, QSignalBlocker
 
+# --- Top-level downloader import ---
+import downloader
+
 # --- Logging ---
 logger = logging.getLogger(__name__)
 
@@ -30,10 +31,10 @@ _PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 KOKORO_MODELS_SUBDIR = "../extras/kokoro"
 KOKORO_BASE_URL = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/"
 
-# --- Simplified model list ---
+# --- Model Manifest ---
 KOKORO_MODELS = [
     {
-        "name": "kokoro-v1.0.fp16-gpu.onnx",  # kokoro-v1.0.fp16.onnx is identical
+        "name": "kokoro-v1.0.fp16-gpu.onnx",
         "sha256": "c1610a859f3bdea01107e73e50100685af38fff88f5cd8e5c56df109ec880204",
     },
     {
@@ -46,7 +47,7 @@ VOICES_SHA256 = "bca610b8308e8d99f32e6fe4197e7ec01679264efed0cac9140fe9c29f1fbf7
 
 
 # =============================================================================
-# Worker (Simplified and Corrected)
+# Worker (Refactored to use downloader module)
 # =============================================================================
 class WorkerCommand(Enum):
     PROCESS_TEXT = auto()
@@ -61,10 +62,19 @@ class WorkerResponse(Enum):
 
 
 class KokoroWorker(threading.Thread):
-    def __init__(self, node_name: str, req_q: Deque, res_q: Deque, target_sr: int, model_name: str):
+    def __init__(
+        self,
+        node_name: str,
+        req_q: Deque,
+        res_q: Deque,
+        target_sr: int,
+        model_name: str,
+        cancel_event: threading.Event,
+    ):
         super().__init__(name=f"KokoroWorker-{node_name}", daemon=True)
         self.node_name, self.req_q, self.res_q, self.target_sr = node_name, req_q, res_q, target_sr
-        self.model_name = model_name  # The specific model to use is now passed in
+        self.model_name = model_name
+        self.cancel_event = cancel_event
         self.model_path: Optional[str] = None
         self.voices_path: Optional[str] = None
         self._resamplers, self._kokoro, self._g2p = {}, None, None
@@ -72,98 +82,57 @@ class KokoroWorker(threading.Thread):
     def _send_response(self, type: WorkerResponse, data: Any):
         self.res_q.append((type, data))
 
-    class DownloadProgressBar:
-        def __init__(self, worker_instance: "KokoroWorker", file_name: str):
-            self.worker = worker_instance
-            self.file_name = file_name
-            self._last_percent_reported = -1
-
-        def __call__(self, block_num: int, block_size: int, total_size: int):
-            downloaded = block_num * block_size
-            if total_size > 0:
-                percent = int((downloaded / total_size) * 100)
-                if percent != self._last_percent_reported:
-                    self.worker._send_response(WorkerResponse.STATUS, f"Downloading {self.file_name} ({percent}%)")
-                    self._last_percent_reported = percent
-
-    def _verify_sha256(self, file_path: str, expected_hash: str) -> bool:
-        file_name = os.path.basename(file_path)
-        self._send_response(WorkerResponse.STATUS, f"Verifying {file_name}...")
-        sha256_hash = hashlib.sha256()
-        try:
-            with open(file_path, "rb") as f:
-                chunk_size = 64 * 1024  # 64KB
-                for chunk in iter(lambda: f.read(chunk_size), b""):
-                    sha256_hash.update(chunk)
-            calculated_hash = sha256_hash.hexdigest()
-
-            if calculated_hash == expected_hash:
-                logger.info(f"[{self.node_name}] SHA256 hash verified for {file_name}.")
-                return True
-            else:
-                logger.critical(f"[{self.node_name}] FATAL: SHA256 HASH MISMATCH for {file_name}!")
-                logger.critical(f"  - Expected:   {expected_hash}")
-                logger.critical(f"  - Calculated: {calculated_hash}")
-                self._send_response(WorkerResponse.ERROR, f"Aborting: Hash mismatch for {file_name}")
-                return False
-        except Exception as e:
-            logger.error(f"[{self.node_name}] Could not verify hash for {file_path}: {e}", exc_info=True)
-            self._send_response(WorkerResponse.ERROR, f"File verification failed for {file_name}")
-            return False
-
-    def _download_file(self, url: str, dest_path: str, expected_hash: str) -> bool:
-        file_name = os.path.basename(dest_path)
-        self._send_response(WorkerResponse.STATUS, f"Downloading {file_name}...")
-        try:
-            progress_hook = self.DownloadProgressBar(self, file_name)
-            urllib.request.urlretrieve(url, dest_path, reporthook=progress_hook)
-            self._send_response(WorkerResponse.STATUS, f"{file_name} downloaded.")
-
-            if not self._verify_sha256(dest_path, expected_hash):
-                raise ValueError(f"Hash verification failed for downloaded file: {file_name}")
-
-            return True
-        except Exception as e:
-            logger.error(f"[{self.node_name}] Failed to download or verify {url}: {e}")
-            return False
+    def _status_callback(self, message: str):
+        """Helper to send status updates back to the main thread."""
+        self._send_response(WorkerResponse.STATUS, message)
 
     def _ensure_model_files_exist(self) -> bool:
+        """
+        Builds a manifest of required files and uses the downloader module
+        to ensure they are present and valid.
+        """
         model_dir = os.path.join(_PLUGIN_DIR, KOKORO_MODELS_SUBDIR)
-        os.makedirs(model_dir, exist_ok=True)
 
-        # --- Step 1: Ensure voices.bin is valid ---
-        self.voices_path = os.path.join(model_dir, VOICES_FILENAME)
-        is_voices_file_valid = os.path.exists(self.voices_path) and self._verify_sha256(self.voices_path, VOICES_SHA256)
-        if not is_voices_file_valid:
-            logger.info(f"[{self.node_name}] Voices file invalid or missing. Downloading...")
-            voices_url = KOKORO_BASE_URL + VOICES_FILENAME
-            if not self._download_file(voices_url, self.voices_path, VOICES_SHA256):
-                return False
-
-        # --- Step 2: Find the user-selected model info ---
+        # Find the selected model's info from our manifest
         target_model_info = next((m for m in KOKORO_MODELS if m["name"] == self.model_name), None)
         if not target_model_info:
             self._send_response(WorkerResponse.ERROR, f"Model '{self.model_name}' is not a valid choice.")
             return False
 
-        # --- Step 3: Ensure the selected model file is valid ---
-        target_model_path = os.path.join(model_dir, target_model_info["name"])
-        is_model_file_valid = os.path.exists(target_model_path) and self._verify_sha256(
-            target_model_path, target_model_info["sha256"]
-        )
-        if not is_model_file_valid:
-            logger.info(f"[{self.node_name}] Model '{self.model_name}' invalid or missing. Downloading...")
-            model_url = KOKORO_BASE_URL + target_model_info["name"]
-            if not self._download_file(model_url, target_model_path, target_model_info["sha256"]):
-                return False
+        # Define local paths for the files
+        self.voices_path = os.path.join(model_dir, VOICES_FILENAME)
+        self.model_path = os.path.join(model_dir, target_model_info["name"])
 
-        self.model_path = target_model_path
+        # Create the file manifest for the downloader
+        file_manifest = [
+            {
+                "path": self.voices_path,
+                "url": KOKORO_BASE_URL + VOICES_FILENAME,
+                "sha256": VOICES_SHA256,
+            },
+            {
+                "path": self.model_path,
+                "url": KOKORO_BASE_URL + target_model_info["name"],
+                "sha256": target_model_info["sha256"],
+            },
+        ]
+
+        # Call the general-purpose downloader, passing our cancel event
+        if not downloader.ensure_files(
+            file_manifest, status_callback=self._status_callback, cancel_event=self.cancel_event
+        ):
+            # This will be false if it failed or was cancelled
+            if not self.cancel_event.is_set():
+                self._send_response(WorkerResponse.ERROR, "Failed to retrieve model files.")
+            return False
+
         return True
 
     def _load_resources(self) -> bool:
         try:
             if not self._ensure_model_files_exist():
-                logger.error(f"[{self.node_name}] Aborting resource load due to missing or corrupt model files.")
+                if not self.cancel_event.is_set():
+                    logger.error(f"[{self.node_name}] Aborting resource load due to missing or corrupt model files.")
                 return False
 
             self._send_response(WorkerResponse.STATUS, "Loading models...")
@@ -205,9 +174,11 @@ class KokoroWorker(threading.Thread):
     def run(self):
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
+
         if not self._load_resources():
-            return
-        while True:
+            return  # Exit if resource loading failed or was cancelled
+
+        while not self.cancel_event.is_set():
             try:
                 cmd, data = self.req_q.popleft()
                 if cmd == WorkerCommand.SHUTDOWN:
@@ -216,12 +187,13 @@ class KokoroWorker(threading.Thread):
                     self._process_text(*data)
             except IndexError:
                 time.sleep(0.005)
+
         self._loop.close()
         logger.info(f"[{self.node_name}] Worker thread finished.")
 
 
 # =============================================================================
-# REVISED Node UI Class (Adds model selection)
+# Node UI Class (Unchanged)
 # =============================================================================
 class TTSKokoroNodeItem(NodeItem):
     NODE_SPECIFIC_WIDTH = 220
@@ -314,7 +286,7 @@ class TTSKokoroNodeItem(NodeItem):
 
 
 # =============================================================================
-# REVISED Node Logic Class (Adds model selection state)
+# Node Logic Class (Refactored for Cancellation)
 # =============================================================================
 class TTSKokoroNode(Node):
     NODE_TYPE = "TTS Kokoro"
@@ -329,7 +301,7 @@ class TTSKokoroNode(Node):
         self._current_status = "Stopped"
         self._speed: float = 1.0
         self._voice: Optional[Any] = None
-        self._model_name: str = KOKORO_MODELS[0]["name"]  # Default to gpu fp16
+        self._model_name: str = KOKORO_MODELS[0]["name"]
         self._available_voices: List[Any] = []
         self._saved_voice_name: Optional[str] = None
         self._audio_buffer = torch.empty((1, 0), dtype=DEFAULT_DTYPE)
@@ -337,6 +309,7 @@ class TTSKokoroNode(Node):
         self._req_q: Deque[Tuple[Enum, Any]] = deque()
         self._res_q: Deque[Tuple[Enum, Any]] = deque()
         self._worker: Optional[KokoroWorker] = None
+        self._cancel_event = threading.Event()
 
     def _set_status(self, status: str):
         state_to_emit = None
@@ -425,15 +398,19 @@ class TTSKokoroNode(Node):
         self._set_status("Starting worker...")
         self._req_q.clear()
         self._res_q.clear()
+        self._cancel_event.clear()  # Reset cancellation flag for the new worker
         with self._lock:
             self._audio_buffer = torch.empty((1, 0), dtype=DEFAULT_DTYPE)
             model_to_use = self._model_name
-        self._worker = KokoroWorker(self.name, self._req_q, self._res_q, DEFAULT_SAMPLERATE, model_to_use)
+        self._worker = KokoroWorker(
+            self.name, self._req_q, self._res_q, DEFAULT_SAMPLERATE, model_to_use, self._cancel_event
+        )
         self._worker.start()
 
     def stop(self):
         if self._worker and self._worker.is_alive():
             self._set_status("Stopping worker...")
+            self._cancel_event.set()  # Signal cancellation to the worker
             self._req_q.append((WorkerCommand.SHUTDOWN, None))
             self._worker.join(timeout=2.0)
             if self._worker.is_alive():
@@ -476,10 +453,9 @@ class TTSKokoroNode(Node):
         with self._lock:
             self._speed = data.get("speed", 1.0)
             self._saved_voice_name = data.get("voice")
-            # Ensure the loaded model name is valid, otherwise fall back to default
             loaded_model_name = data.get("model_name")
             valid_model_names = [m["name"] for m in KOKORO_MODELS]
             if loaded_model_name in valid_model_names:
                 self._model_name = loaded_model_name
             else:
-                self._model_name = KOKORO_MODELS[1]["name"]  # Default
+                self._model_name = KOKORO_MODELS[0]["name"]  # Fallback to default
