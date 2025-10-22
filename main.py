@@ -13,6 +13,8 @@ from app_controller import AppController
 from graph_view import NodeGraphWidget
 from ui_icons import create_icon, create_colored_logo
 
+import torch
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
@@ -238,7 +240,18 @@ if __name__ == "__main__":
         metavar="PATH_TO_GRAPH.json",
         help="Load a specific graph file on startup, overriding the last saved session.",
     )
+    parser.add_argument(
+        "--torch-threads",
+        type=int,
+        metavar="N",
+        help="Set the number of threads for PyTorch operations to N.",
+    )
+
     args = parser.parse_args()
+
+    if args.torch_threads:
+        torch.set_num_threads(args.torch_threads)
+        logger.info(f"Set PyTorch number of threads to: {args.torch_threads}")
 
     app = QApplication(sys.argv)
 
