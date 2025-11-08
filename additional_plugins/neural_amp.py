@@ -146,7 +146,6 @@ class NAMWaveNet(nn.Module):
         net_config = config.get("config", config.get("architecture", config))
         self._layers = nn.ModuleList([LayerStack(**lc) for lc in net_config["layers"]])
 
-        # JIT requires the 'else' branch for conditional module creation
         if net_config.get("head"):
             self._head: Optional[Head] = Head(in_channels=net_config["layers"][-1]["head_size"], **net_config["head"])
         else:
@@ -165,6 +164,13 @@ class NAMWaveNet(nn.Module):
             i = ls.import_weights(weights, i)
         if self._head is not None:
             i = self._head.import_weights(weights, i)
+
+        # The training code appends `head_scale` as the last value in the weights array.
+        # We must read it here to consume all weights and prevent the mismatch warning.
+        if i < len(weights):
+            self._head_scale = weights[i]
+            i += 1
+
         if i != len(weights):
             logger.warning(f"NAM weight mismatch: Used {i} of {len(weights)} weights.")
 
@@ -173,7 +179,6 @@ class NAMWaveNet(nn.Module):
         for layer_stack in self._layers:
             head_input, y = layer_stack(y, x, head_input)
 
-        # head_input is guaranteed to be a Tensor here, assert for JIT
         assert head_input is not None
 
         result = head_input * self._head_scale
@@ -196,7 +201,7 @@ def load_nam_model(filepath: str) -> nn.Module:
 # ==============================================================================
 # UI & NODE IMPLEMENTATION
 # ==============================================================================
-class NAMNodeItem(NodeItem):  # (This class is identical to the previous version)
+class NAMNodeItem(NodeItem):
     NODE_SPECIFIC_WIDTH = 220
 
     def __init__(self, n):
