@@ -248,7 +248,7 @@ class NAMNode(Node):
     NODE_TYPE = "Neural Amp Modeler"
     UI_CLASS = NAMNodeItem
     CATEGORY = "Effects"
-    DESCRIPTION = "Processes audio using a trained Neural Amp Model (.nam) file. Expects MONO input."
+    DESCRIPTION = "Processes audio using a .nam file. Multi-channel audio is mixed to mono before processing."
 
     def __init__(self, name: str, node_id: Optional[str] = None):
         super().__init__(name, node_id)
@@ -298,14 +298,27 @@ class NAMNode(Node):
                 logger.debug(f"[{self.name}] Resetting model state for new stream.")
                 self._model.reset()
 
+    # --- process method now handles multi-channel input by mixing down ---
     def process(self, input_data: Dict) -> Dict:
         audio_in = input_data.get("in")
-        if self._model is None or not isinstance(audio_in, torch.Tensor) or audio_in.shape[0] != 1:
+        if self._model is None or not isinstance(audio_in, torch.Tensor):
             return {"out": audio_in}
 
+        # TODO: need to handle sample rate conversion if model was trained at different rate
+
+        # --- Auto-Mixdown Logic ---
+        num_channels = audio_in.shape[0]
+        if num_channels > 1:
+            # If multi-channel, average across channels to create a mono signal
+            mono_signal = torch.mean(audio_in, dim=0, keepdim=True)
+        else:
+            mono_signal = audio_in
+
         with torch.inference_mode():
-            input_batch = audio_in.unsqueeze(0)
+            # The model expects a batch dimension, so unsqueeze(0)
+            input_batch = mono_signal.unsqueeze(0)
             output_batch = self._model(input_batch)
+            # Squeeze the batch and channel dimensions to get the final mono output
             return {"out": output_batch.squeeze(0)}
 
     def _get_state_snapshot_locked(self):
