@@ -303,6 +303,8 @@ class NAMNode(Node):
         if self._model is None or not isinstance(audio_in, torch.Tensor) or audio_in.shape[0] != 1:
             return {"out": audio_in}
 
+        # TODO: need to handle sample rate conversion if model was trained at different rate
+
         with torch.inference_mode():
             input_batch = audio_in.unsqueeze(0)
             output_batch = self._model(input_batch)
