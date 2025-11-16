@@ -5,21 +5,21 @@ from typing import Optional, Dict, Tuple
 
 import torch
 import torch.nn as nn
+import torchaudio.transforms as T
 
 from node_system import Node
 from ui_elements import NodeItem, NODE_CONTENT_PADDING
-from constants import DEFAULT_DTYPE
+from constants import DEFAULT_DTYPE, DEFAULT_SAMPLERATE, DEFAULT_BLOCKSIZE
 
 from PySide6.QtWidgets import QWidget, QLabel, QVBoxLayout, QPushButton, QFileDialog
 from PySide6.QtCore import Slot
 
 logger = logging.getLogger(__name__)
 
+
 # ==============================================================================
 # JIT-COMPATIBLE STREAMING NAM IMPLEMENTATION
 # ==============================================================================
-
-
 def _get_activation(name: str) -> nn.Module:
     if name.lower() == "tanh":
         return nn.Tanh()
@@ -170,7 +170,6 @@ class NAMWaveNet(nn.Module):
         if i < len(weights):
             self._head_scale = weights[i]
             i += 1
-
         if i != len(weights):
             logger.warning(f"NAM weight mismatch: Used {i} of {len(weights)} weights.")
 
@@ -178,24 +177,24 @@ class NAMWaveNet(nn.Module):
         y, head_input = x, None
         for layer_stack in self._layers:
             head_input, y = layer_stack(y, x, head_input)
-
         assert head_input is not None
-
         result = head_input * self._head_scale
         if self._head is not None:
             result = self._head(result)
         return result
 
 
-def load_nam_model(filepath: str) -> nn.Module:
+def load_nam_model(filepath: str) -> Tuple[nn.Module, int]:
     with open(filepath, "r") as f:
         config = json.load(f)
     if config.get("architecture", "WaveNet") != "WaveNet":
         raise ValueError("Unsupported NAM architecture.")
+    model_config = config.get("config", {})
+    model_samplerate = model_config.get("sample_rate", model_config.get("fs", 48000))
     model = NAMWaveNet(config)
     model.eval()
     model.import_weights(torch.tensor(config["weights"], dtype=DEFAULT_DTYPE))
-    return model
+    return model, int(model_samplerate)
 
 
 # ==============================================================================
@@ -257,46 +256,58 @@ class NAMNode(Node):
         self._model: Optional[torch.jit.ScriptModule | NAMWaveNet] = None
         self._file_path: Optional[str] = None
         self._error_message: Optional[str] = None
+        self._model_samplerate: int = DEFAULT_SAMPLERATE
+
+        # Use stateless resamplers and manage buffers manually
+        self._resampler_to_model: Optional[T.Resample] = None
+        self._resampler_from_model: Optional[T.Resample] = None
+        self._input_fifo = torch.tensor([], dtype=DEFAULT_DTYPE)
+        self._output_fifo = torch.tensor([], dtype=DEFAULT_DTYPE)
+
         try:
             torch.set_flush_denormal(True)
-            logger.info(f"[{self.name}] Set flush-denormal mode for performance.")
-        except Exception as e:
-            logger.warning(f"[{self.name}] Failed to set flush-denormal mode: {e}")
+        except Exception:
+            pass
 
     @Slot(str)
     def load_model(self, file_path: str):
-        logger.info(f"[{self.name}] Loading model: {file_path}")
         state_to_emit = None
         with self._lock:
+            self._resampler_to_model = None
+            self._resampler_from_model = None
             try:
-                model = load_nam_model(file_path)
+                model, model_samplerate = load_nam_model(file_path)
+                self._model_samplerate = model_samplerate
                 model.reset()
 
-                # --- JIT COMPILATION STEP ---
+                if self._model_samplerate != DEFAULT_SAMPLERATE:
+                    logger.info(
+                        f"[{self.name}] Resampling required: App SR ({DEFAULT_SAMPLERATE} Hz) -> Model SR ({self._model_samplerate} Hz)"
+                    )
+                    self._resampler_to_model = T.Resample(
+                        DEFAULT_SAMPLERATE, self._model_samplerate, dtype=DEFAULT_DTYPE
+                    )
+                    self._resampler_from_model = T.Resample(
+                        self._model_samplerate, DEFAULT_SAMPLERATE, dtype=DEFAULT_DTYPE
+                    )
+
                 try:
                     self._model = torch.jit.script(model)
-                    logger.info(f"[{self.name}] Successfully JIT-scripted the model for max performance.")
-                except Exception as e:
-                    logger.warning(
-                        f"[{self.name}] JIT scripting failed: {e}. Falling back to eager mode (will be slower)."
-                    )
-                    self._model = model  # Fallback to the original, un-compiled model
-
+                except Exception:
+                    self._model = model
                 self._file_path, self._error_message = file_path, None
                 self.clear_error_state()
-                logger.info(f"[{self.name}] Model loaded. Receptive field: {model.receptive_field}")
             except Exception as e:
-                self._model, self._file_path = None, None
-                self._error_message, self.error_state = str(e), str(e)
-                logger.error(f"[{self.name}] Failed to load model: {e}", exc_info=True)
+                self._model, self._file_path, self._error_message, self.error_state = None, None, str(e), str(e)
             state_to_emit = self._get_state_snapshot_locked()
         self.ui_update_callback(state_to_emit)
 
     def start(self):
         with self._lock:
             if hasattr(self._model, "reset"):
-                logger.debug(f"[{self.name}] Resetting model state for new stream.")
                 self._model.reset()
+            self._input_fifo = torch.tensor([], dtype=DEFAULT_DTYPE)
+            self._output_fifo = torch.tensor([], dtype=DEFAULT_DTYPE)
 
     # --- process method now handles multi-channel input by mixing down ---
     def process(self, input_data: Dict) -> Dict:
@@ -304,22 +315,45 @@ class NAMNode(Node):
         if self._model is None or not isinstance(audio_in, torch.Tensor):
             return {"out": audio_in}
 
-        # TODO: need to handle sample rate conversion if model was trained at different rate
-
-        # --- Auto-Mixdown Logic ---
-        num_channels = audio_in.shape[0]
-        if num_channels > 1:
-            # If multi-channel, average across channels to create a mono signal
-            mono_signal = torch.mean(audio_in, dim=0, keepdim=True)
-        else:
-            mono_signal = audio_in
+        mono_signal = torch.mean(audio_in, dim=0, keepdim=True) if audio_in.shape[0] > 1 else audio_in
 
         with torch.inference_mode():
-            # The model expects a batch dimension, so unsqueeze(0)
-            input_batch = mono_signal.unsqueeze(0)
-            output_batch = self._model(input_batch)
-            # Squeeze the batch and channel dimensions to get the final mono output
-            return {"out": output_batch.squeeze(0)}
+            with self._lock:
+                resampler_to = self._resampler_to_model
+                resampler_from = self._resampler_from_model
+
+            if resampler_to and resampler_from:
+                # 1. Add incoming audio to the input FIFO
+                self._input_fifo = torch.cat((self._input_fifo, mono_signal), dim=1)
+
+                # 2. Resample the entire input FIFO
+                resampled_input = resampler_to(self._input_fifo)
+
+                # 3. Process with the model
+                model_output = self._model(resampled_input.unsqueeze(0)).squeeze(0)
+
+                # 4. Resample back to the app's sample rate
+                resampled_output = resampler_from(model_output)
+
+                # 5. Add the result to our output FIFO
+                self._output_fifo = torch.cat((self._output_fifo, resampled_output), dim=1)
+
+                # 6. Determine how many input samples were consumed
+                consumed_input_samples = int(resampled_input.shape[1] * (DEFAULT_SAMPLERATE / self._model_samplerate))
+                self._input_fifo = self._input_fifo[:, consumed_input_samples:]
+
+            else:  # No resampling needed
+                processed_output = self._model(mono_signal.unsqueeze(0)).squeeze(0)
+                self._output_fifo = torch.cat((self._output_fifo, processed_output), dim=1)
+
+            # 7. Check if the output FIFO has a full block to return
+            if self._output_fifo.shape[1] >= DEFAULT_BLOCKSIZE:
+                output_block = self._output_fifo[:, :DEFAULT_BLOCKSIZE]
+                self._output_fifo = self._output_fifo[:, DEFAULT_BLOCKSIZE:]
+                return {"out": output_block}
+            else:
+                # Not enough output samples yet, return silence and wait
+                return {"out": torch.zeros((1, DEFAULT_BLOCKSIZE), dtype=DEFAULT_DTYPE)}
 
     def _get_state_snapshot_locked(self):
         return {"file_path": self._file_path, "error_message": self._error_message}
