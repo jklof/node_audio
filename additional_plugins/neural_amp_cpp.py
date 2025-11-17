@@ -62,12 +62,12 @@ class NAMCppNodeItem(NodeItem):
 
 
 class NAMCppNode(FFINodeBase):
-    NODE_TYPE = "Neural Amp Modeler (C++)"
+    NODE_TYPE = "Neural Amp Modeler++ (faster)"
     UI_CLASS = NAMCppNodeItem
     CATEGORY = "Effects"
-    DESCRIPTION = "Processes audio using a .nam file. Multi-channel audio is mixed to mono before processing."
+    DESCRIPTION = "Processes audio using a Neural Amp Model. Multi-channel audio is mixed to mono before processing."
 
-    LIB_NAME = "nam_processor"
+    LIB_NAME = "neural_amp_processor"
     API = {
         "set_parameters": {"argtypes": [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_float, ctypes.c_int]},
         "process_block": {

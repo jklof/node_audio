@@ -264,7 +264,7 @@ private:
 // ===================================================
 
 PLUGIN_API void* create_handle() {
-    return new ModulationProcessor();
+    return new (std::nothrow) ModulationProcessor();
 }
 
 PLUGIN_API void delete_handle(void* handle) {

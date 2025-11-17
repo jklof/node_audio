@@ -121,7 +121,7 @@ private:
 // ===================================================
 
 PLUGIN_API void* create_handle() {
-    return new DelayProcessor();
+    return new (std::nothrow) DelayProcessor();
 }
 
 PLUGIN_API void delete_handle(void* handle) {
