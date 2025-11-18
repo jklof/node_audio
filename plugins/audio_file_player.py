@@ -8,14 +8,19 @@ from typing import Optional, Dict
 import numpy as np
 import torch
 import soundfile as sf
-import torchaudio.transforms as T
 
 from node_system import Node
 from constants import DEFAULT_SAMPLERATE, DEFAULT_BLOCKSIZE, DEFAULT_DTYPE
 from ui_elements import NodeItem, NODE_CONTENT_PADDING
 
 from PySide6.QtWidgets import QWidget, QLabel, QSlider, QVBoxLayout, QHBoxLayout, QFileDialog, QPushButton
-from PySide6.QtCore import Qt, Slot, Signal, QObject
+from PySide6.QtCore import Qt, Slot
+
+# --- Import the new ResamplingStream wrapper ---
+try:
+    from resampler import ResamplingStream
+except ImportError:
+    logging.error("Could not import ResamplingStream from resampler.py")
 
 # Configure logging for this module
 logger = logging.getLogger(__name__)
@@ -152,7 +157,7 @@ class AudioFilePlayerNode(Node):
     NODE_TYPE = "Audio File Player"
     UI_CLASS = AudioFilePlayerNodeItem
     CATEGORY = "Generators"
-    DESCRIPTION = "Streams audio from a file. Playback is controlled by its own play/pause button."
+    DESCRIPTION = "Streams audio from a file with high-quality resampling."
     IS_CLOCK_SOURCE = False
 
     def __init__(self, name, node_id=None):
@@ -279,17 +284,28 @@ class AudioFilePlayerNode(Node):
     def _file_reader_loop(self):
         current_frame = 0
         state_to_emit = None
-        resampler = None
+        resampler_stream = None  # This will hold our ResamplingStream instance
+
         try:
             with sf.SoundFile(self._file_path, "r") as sf_file:
                 file_info = {"samplerate": sf_file.samplerate, "channels": sf_file.channels, "frames": sf_file.frames}
                 duration = sf_file.frames / sf_file.samplerate if sf_file.samplerate > 0 else 0.0
 
-                # --- Torchaudio Integration ---
+                # --- Initialize ResamplingStream if needed ---
                 if file_info["samplerate"] != DEFAULT_SAMPLERATE:
-                    resampler = T.Resample(
-                        orig_freq=file_info["samplerate"], new_freq=DEFAULT_SAMPLERATE, dtype=DEFAULT_DTYPE
-                    )
+                    try:
+                        resampler_stream = ResamplingStream(
+                            orig_sr=file_info["samplerate"],
+                            target_sr=DEFAULT_SAMPLERATE,
+                            num_channels=file_info["channels"],
+                            dtype=DEFAULT_DTYPE,
+                        )
+                        logger.info(
+                            f"[{self.name}] Initialized ResamplingStream: {file_info['samplerate']} -> {DEFAULT_SAMPLERATE} Hz"
+                        )
+                    except Exception as e:
+                        logger.error(f"[{self.name}] Failed to initialize ResamplingStream: {e}")
+                        raise e
 
                 # This buffer holds resampled audio data as a tensor before it's chunked into blocks.
                 tensor_buffer = torch.empty((file_info["channels"], 0), dtype=DEFAULT_DTYPE)
@@ -321,6 +337,11 @@ class AudioFilePlayerNode(Node):
                     sf_file.seek(target_frame)
                     current_frame = target_frame
                     logger.info(f"[{self.name}] Worker performed initial seek to {initial_seek_seconds:.2f}s")
+
+                    # IMPORTANT: Reset resampler history on seek
+                    if resampler_stream:
+                        resampler_stream.reset()
+
                     with self._lock:
                         state_to_emit = self._update_state_snapshot_locked(
                             position=(current_frame / file_info["samplerate"])
@@ -342,18 +363,27 @@ class AudioFilePlayerNode(Node):
                         with self._lock:
                             self._audio_buffer.clear()
                         tensor_buffer = torch.empty((file_info["channels"], 0), dtype=DEFAULT_DTYPE)
+
+                        # IMPORTANT: Reset resampler history on seek
+                        if resampler_stream:
+                            resampler_stream.reset()
+
                         logger.info(f"[{self.name}] Worker seeked to frame {target_frame}")
 
                     if (
                         current_playback_state == PlaybackState.PLAYING
                         and len(self._audio_buffer) < INTERNAL_BUFFER_MAX_BLOCKS
                     ):
+                        # Read a raw chunk from disk
                         raw_chunk_np = sf_file.read(CHUNK_SIZE_FRAMES, dtype="float32", always_2d=True)
 
                         if raw_chunk_np is None or raw_chunk_np.shape[0] == 0:
                             logger.info(f"[{self.name}] End of file, looping back to start.")
                             sf_file.seek(0)
                             current_frame = 0
+                            # Reset stream on loop
+                            if resampler_stream:
+                                resampler_stream.reset()
                             continue
 
                         current_frame += raw_chunk_np.shape[0]
@@ -361,14 +391,20 @@ class AudioFilePlayerNode(Node):
                         # Convert NumPy chunk (samples, channels) to Tensor (channels, samples)
                         raw_tensor = torch.from_numpy(raw_chunk_np.T.copy()).to(DEFAULT_DTYPE)
 
-                        # Resample if necessary
-                        resampled_tensor = resampler(raw_tensor) if resampler else raw_tensor
+                        # --- Resampling Logic with State ---
+                        if resampler_stream:
+                            # Push raw audio into the stream
+                            resampler_stream.push(raw_tensor)
+                            # Pull whatever is ready at the target sample rate
+                            resampled_tensor = resampler_stream.pull()
+                        else:
+                            resampled_tensor = raw_tensor
 
                         if resampled_tensor.shape[1] > 0:
                             tensor_buffer = torch.cat((tensor_buffer, resampled_tensor), dim=1)
 
+                        # Slice into exact blocks for the engine
                         while tensor_buffer.shape[1] >= DEFAULT_BLOCKSIZE:
-                            # Slice one block from the start
                             block = tensor_buffer[:, :DEFAULT_BLOCKSIZE]
                             tensor_buffer = tensor_buffer[:, DEFAULT_BLOCKSIZE:]
 

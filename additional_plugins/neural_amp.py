@@ -5,7 +5,6 @@ from typing import Optional, Dict, Tuple
 
 import torch
 import torch.nn as nn
-import torchaudio.transforms as T
 
 from node_system import Node
 from ui_elements import NodeItem, NODE_CONTENT_PADDING
@@ -13,6 +12,13 @@ from constants import DEFAULT_DTYPE, DEFAULT_SAMPLERATE, DEFAULT_BLOCKSIZE
 
 from PySide6.QtWidgets import QWidget, QLabel, QVBoxLayout, QPushButton, QFileDialog
 from PySide6.QtCore import Slot
+
+# --- Import the new ResamplingStream wrapper ---
+try:
+    from resampler import ResamplingStream
+except ImportError:
+    # Fallback or error handling if resampler.py isn't present yet in the environment
+    logging.error("Could not import ResamplingStream from resampler.py")
 
 logger = logging.getLogger(__name__)
 
@@ -258,11 +264,9 @@ class NAMNode(Node):
         self._error_message: Optional[str] = None
         self._model_samplerate: int = DEFAULT_SAMPLERATE
 
-        # Use stateless resamplers and manage buffers manually
-        self._resampler_to_model: Optional[T.Resample] = None
-        self._resampler_from_model: Optional[T.Resample] = None
-        self._input_fifo = torch.tensor([], dtype=DEFAULT_DTYPE)
-        self._output_fifo = torch.tensor([], dtype=DEFAULT_DTYPE)
+        # --- Updated: Use ResamplingStream for clean continuity ---
+        self._resampler_stream_in: Optional[ResamplingStream] = None
+        self._resampler_stream_out: Optional[ResamplingStream] = None
 
         try:
             torch.set_flush_denormal(True)
@@ -273,8 +277,10 @@ class NAMNode(Node):
     def load_model(self, file_path: str):
         state_to_emit = None
         with self._lock:
-            self._resampler_to_model = None
-            self._resampler_from_model = None
+            # Reset streams
+            self._resampler_stream_in = None
+            self._resampler_stream_out = None
+
             try:
                 model, model_samplerate = load_nam_model(file_path)
                 self._model_samplerate = model_samplerate
@@ -282,13 +288,20 @@ class NAMNode(Node):
 
                 if self._model_samplerate != DEFAULT_SAMPLERATE:
                     logger.info(
-                        f"[{self.name}] Resampling required: App SR ({DEFAULT_SAMPLERATE} Hz) -> Model SR ({self._model_samplerate} Hz)"
+                        f"[{self.name}] Resampling configured: App ({DEFAULT_SAMPLERATE} Hz) <-> Model ({self._model_samplerate} Hz)"
                     )
-                    self._resampler_to_model = T.Resample(
-                        DEFAULT_SAMPLERATE, self._model_samplerate, dtype=DEFAULT_DTYPE
+                    # Initialize streaming resamplers (1 channel for NAM)
+                    self._resampler_stream_in = ResamplingStream(
+                        orig_sr=DEFAULT_SAMPLERATE,
+                        target_sr=self._model_samplerate,
+                        num_channels=1,
+                        dtype=DEFAULT_DTYPE,
                     )
-                    self._resampler_from_model = T.Resample(
-                        self._model_samplerate, DEFAULT_SAMPLERATE, dtype=DEFAULT_DTYPE
+                    self._resampler_stream_out = ResamplingStream(
+                        orig_sr=self._model_samplerate,
+                        target_sr=DEFAULT_SAMPLERATE,
+                        num_channels=1,
+                        dtype=DEFAULT_DTYPE,
                     )
 
                 try:
@@ -299,6 +312,7 @@ class NAMNode(Node):
                 self.clear_error_state()
             except Exception as e:
                 self._model, self._file_path, self._error_message, self.error_state = None, None, str(e), str(e)
+                logger.error(f"[{self.name}] Failed to load model: {e}", exc_info=True)
             state_to_emit = self._get_state_snapshot_locked()
         self.ui_update_callback(state_to_emit)
 
@@ -306,54 +320,60 @@ class NAMNode(Node):
         with self._lock:
             if hasattr(self._model, "reset"):
                 self._model.reset()
-            self._input_fifo = torch.tensor([], dtype=DEFAULT_DTYPE)
-            self._output_fifo = torch.tensor([], dtype=DEFAULT_DTYPE)
+            if self._resampler_stream_in:
+                self._resampler_stream_in.reset()
+            if self._resampler_stream_out:
+                self._resampler_stream_out.reset()
 
-    # --- process method now handles multi-channel input by mixing down ---
     def process(self, input_data: Dict) -> Dict:
         audio_in = input_data.get("in")
         if self._model is None or not isinstance(audio_in, torch.Tensor):
             return {"out": audio_in}
 
+        # NAM processes mono. Mix down if necessary.
         mono_signal = torch.mean(audio_in, dim=0, keepdim=True) if audio_in.shape[0] > 1 else audio_in
 
         with torch.inference_mode():
-            with self._lock:
-                resampler_to = self._resampler_to_model
-                resampler_from = self._resampler_from_model
+            # --- 1. Input Resampling (if needed) ---
+            input_to_model = None
 
-            if resampler_to and resampler_from:
-                # 1. Add incoming audio to the input FIFO
-                self._input_fifo = torch.cat((self._input_fifo, mono_signal), dim=1)
-
-                # 2. Resample the entire input FIFO
-                resampled_input = resampler_to(self._input_fifo)
-
-                # 3. Process with the model
-                model_output = self._model(resampled_input.unsqueeze(0)).squeeze(0)
-
-                # 4. Resample back to the app's sample rate
-                resampled_output = resampler_from(model_output)
-
-                # 5. Add the result to our output FIFO
-                self._output_fifo = torch.cat((self._output_fifo, resampled_output), dim=1)
-
-                # 6. Determine how many input samples were consumed
-                consumed_input_samples = int(resampled_input.shape[1] * (DEFAULT_SAMPLERATE / self._model_samplerate))
-                self._input_fifo = self._input_fifo[:, consumed_input_samples:]
-
-            else:  # No resampling needed
-                processed_output = self._model(mono_signal.unsqueeze(0)).squeeze(0)
-                self._output_fifo = torch.cat((self._output_fifo, processed_output), dim=1)
-
-            # 7. Check if the output FIFO has a full block to return
-            if self._output_fifo.shape[1] >= DEFAULT_BLOCKSIZE:
-                output_block = self._output_fifo[:, :DEFAULT_BLOCKSIZE]
-                self._output_fifo = self._output_fifo[:, DEFAULT_BLOCKSIZE:]
-                return {"out": output_block}
+            if self._resampler_stream_in:
+                # Push current block into the input resampler stream
+                self._resampler_stream_in.push(mono_signal)
+                # Pull ALL available samples in the model's sample rate
+                input_to_model = self._resampler_stream_in.pull()
             else:
-                # Not enough output samples yet, return silence and wait
-                return {"out": torch.zeros((1, DEFAULT_BLOCKSIZE), dtype=DEFAULT_DTYPE)}
+                input_to_model = mono_signal
+
+            # --- 2. Model Inference ---
+            # If resampling yielded 0 samples (rare, but possible with tiny buffers), skip inference
+            if input_to_model.shape[1] > 0:
+                # NAM models generally preserve input length
+                model_output = self._model(input_to_model.unsqueeze(0)).squeeze(0)
+            else:
+                model_output = torch.zeros_like(input_to_model)
+
+            # --- 3. Output Resampling (if needed) ---
+            final_output = None
+
+            if self._resampler_stream_out:
+                # Push model output (at model_sr) into the output resampler stream
+                self._resampler_stream_out.push(model_output)
+
+                # Pull exactly one block size for the application output.
+                # ResamplingStream's internal buffer handles the rate conversion continuity.
+                if self._resampler_stream_out.can_pull(DEFAULT_BLOCKSIZE):
+                    final_output = self._resampler_stream_out.pull(DEFAULT_BLOCKSIZE)
+                else:
+                    # Buffer underflow handling: Output silence.
+                    # This might happen briefly at start-up or if rates drift significantly.
+                    final_output = torch.zeros((1, DEFAULT_BLOCKSIZE), dtype=DEFAULT_DTYPE)
+            else:
+                # If no resampling, the model output *should* match the blocksize
+                # assuming 1:1 processing.
+                final_output = model_output
+
+            return {"out": final_output}
 
     def _get_state_snapshot_locked(self):
         return {"file_path": self._file_path, "error_message": self._error_message}

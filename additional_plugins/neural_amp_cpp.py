@@ -5,14 +5,18 @@ import os
 import json
 from typing import Dict, Optional
 
-import torchaudio.transforms as T
-
 from ffi_node import FFINodeBase
 from ui_elements import NodeItem, NODE_CONTENT_PADDING
 from constants import DEFAULT_DTYPE, DEFAULT_SAMPLERATE, DEFAULT_BLOCKSIZE, DEFAULT_CHANNELS
 
 from PySide6.QtWidgets import QWidget, QLabel, QVBoxLayout, QPushButton, QFileDialog
 from PySide6.QtCore import Slot
+
+# --- Import the new ResamplingStream wrapper ---
+try:
+    from resampler import ResamplingStream
+except ImportError:
+    logging.error("Could not import ResamplingStream from resampler.py")
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +69,7 @@ class NAMCppNode(FFINodeBase):
     NODE_TYPE = "Neural Amp Modeler++ (faster)"
     UI_CLASS = NAMCppNodeItem
     CATEGORY = "Effects"
-    DESCRIPTION = "Processes audio using a Neural Amp Model. Multi-channel audio is mixed to mono before processing."
+    DESCRIPTION = "Processes audio using a Neural Amp Model (C++). Multi-channel audio is mixed to mono."
 
     LIB_NAME = "neural_amp_processor"
     API = {
@@ -83,10 +87,9 @@ class NAMCppNode(FFINodeBase):
         self._error_message: Optional[str] = None
         self._model_samplerate: int = DEFAULT_SAMPLERATE
 
-        self._resampler_to_model: Optional[T.Resample] = None
-        self._resampler_from_model: Optional[T.Resample] = None
-        self._input_fifo = torch.tensor([], dtype=DEFAULT_DTYPE)
-        self._output_fifo = torch.tensor([], dtype=DEFAULT_DTYPE)
+        # --- Updated: Use ResamplingStream for clean continuity ---
+        self._resampler_stream_in: Optional[ResamplingStream] = None
+        self._resampler_stream_out: Optional[ResamplingStream] = None
 
         if self._file_path and self.dsp_handle:
             self.load_model(self._file_path)
@@ -100,8 +103,10 @@ class NAMCppNode(FFINodeBase):
             self.ui_update_callback(self._get_state_snapshot_locked())
             return
         with self._lock:
-            self._resampler_to_model = None
-            self._resampler_from_model = None
+            # Reset streams
+            self._resampler_stream_in = None
+            self._resampler_stream_out = None
+
             try:
                 with open(file_path, "r") as f:
                     config = json.load(f)
@@ -110,16 +115,23 @@ class NAMCppNode(FFINodeBase):
 
                 if self._model_samplerate != DEFAULT_SAMPLERATE:
                     logger.info(
-                        f"[{self.name}] Resampling required: App SR ({DEFAULT_SAMPLERATE} Hz) -> Model SR ({self._model_samplerate} Hz)"
+                        f"[{self.name}] Resampling configured: App ({DEFAULT_SAMPLERATE} Hz) <-> Model ({self._model_samplerate} Hz)"
                     )
-                    self._resampler_to_model = T.Resample(
-                        DEFAULT_SAMPLERATE, self._model_samplerate, dtype=DEFAULT_DTYPE
+                    # Initialize streaming resamplers (NAM is mono -> 1 channel)
+                    self._resampler_stream_in = ResamplingStream(
+                        orig_sr=DEFAULT_SAMPLERATE,
+                        target_sr=self._model_samplerate,
+                        num_channels=1,
+                        dtype=DEFAULT_DTYPE,
                     )
-                    self._resampler_from_model = T.Resample(
-                        self._model_samplerate, DEFAULT_SAMPLERATE, dtype=DEFAULT_DTYPE
+                    self._resampler_stream_out = ResamplingStream(
+                        orig_sr=self._model_samplerate,
+                        target_sr=DEFAULT_SAMPLERATE,
+                        num_channels=1,
+                        dtype=DEFAULT_DTYPE,
                     )
 
-                # The C++ module's block size can be dynamic, so we just pass a representative value during setup.
+                # The C++ module's block size can be dynamic, so we just pass a representative value.
                 self.lib.set_parameters(
                     self.dsp_handle, file_path.encode("utf-8"), self._model_samplerate, DEFAULT_BLOCKSIZE * 2
                 )
@@ -133,8 +145,10 @@ class NAMCppNode(FFINodeBase):
 
     def start(self):
         with self._lock:
-            self._input_fifo = torch.tensor([], dtype=DEFAULT_DTYPE)
-            self._output_fifo = torch.tensor([], dtype=DEFAULT_DTYPE)
+            if self._resampler_stream_in:
+                self._resampler_stream_in.reset()
+            if self._resampler_stream_out:
+                self._resampler_stream_out.reset()
 
     def process(self, input_data: Dict) -> Dict:
         if not self.dsp_handle or self.error_state:
@@ -143,36 +157,46 @@ class NAMCppNode(FFINodeBase):
         if not isinstance(signal, torch.Tensor):
             return {"out": None}
 
+        # NAM processes mono. Mix down if necessary.
         mono_signal = torch.mean(signal, dim=0, keepdim=True) if signal.shape[0] > 1 else signal
 
-        with self._lock:
-            resampler_to = self._resampler_to_model
-            resampler_from = self._resampler_from_model
-
         # --- Run processing chain ---
-        if resampler_to and resampler_from:
-            self._input_fifo = torch.cat((self._input_fifo, mono_signal), dim=1)
-            signal_for_cpp = resampler_to(self._input_fifo)
+        audio_for_cpp = None
 
-            # This is the C++ processing step
-            processed_by_cpp = self._process_cpp_block(signal_for_cpp)
-
-            resampled_output = resampler_from(processed_by_cpp)
-            self._output_fifo = torch.cat((self._output_fifo, resampled_output), dim=1)
-
-            consumed_input_samples = int(signal_for_cpp.shape[1] * (DEFAULT_SAMPLERATE / self._model_samplerate))
-            self._input_fifo = self._input_fifo[:, consumed_input_samples:]
+        # 1. Input Resampling
+        if self._resampler_stream_in:
+            # Push current block
+            self._resampler_stream_in.push(mono_signal)
+            # Pull ALL available samples at the model's rate
+            audio_for_cpp = self._resampler_stream_in.pull()
         else:
-            processed_output = self._process_cpp_block(mono_signal)
-            self._output_fifo = torch.cat((self._output_fifo, processed_output), dim=1)
+            audio_for_cpp = mono_signal
 
-        # --- Return output block if available ---
-        if self._output_fifo.shape[1] >= DEFAULT_BLOCKSIZE:
-            output_block = self._output_fifo[:, :DEFAULT_BLOCKSIZE]
-            self._output_fifo = self._output_fifo[:, DEFAULT_BLOCKSIZE:]
-            return {"out": output_block}
+        # 2. C++ Processing
+        # If resampling buffer yielded no samples (unlikely but possible), skip C++
+        if audio_for_cpp.shape[1] > 0:
+            processed_by_cpp = self._process_cpp_block(audio_for_cpp)
         else:
-            return {"out": torch.zeros((1, DEFAULT_BLOCKSIZE), dtype=DEFAULT_DTYPE)}
+            processed_by_cpp = torch.zeros_like(audio_for_cpp)
+
+        # 3. Output Resampling & Buffering
+        final_output = None
+
+        if self._resampler_stream_out:
+            # Push processed audio (model rate)
+            self._resampler_stream_out.push(processed_by_cpp)
+
+            # Pull exactly one block for the graph output
+            if self._resampler_stream_out.can_pull(DEFAULT_BLOCKSIZE):
+                final_output = self._resampler_stream_out.pull(DEFAULT_BLOCKSIZE)
+            else:
+                # Underflow handling: output silence
+                final_output = torch.zeros((1, DEFAULT_BLOCKSIZE), dtype=DEFAULT_DTYPE)
+        else:
+            # If no resampling, we assume 1:1 input/output ratio, so logic matches input size
+            final_output = processed_by_cpp
+
+        return {"out": final_output}
 
     def _process_cpp_block(self, input_tensor: torch.Tensor) -> torch.Tensor:
         """Helper function to encapsulate the C++ call."""
@@ -182,6 +206,7 @@ class NAMCppNode(FFINodeBase):
         input_tensor = input_tensor.contiguous().to(torch.float32)
         num_samples = input_tensor.shape[1]
 
+        # Output buffer must match input size for the C++ processor
         output_buffer = torch.zeros((1, num_samples), dtype=torch.float32)
 
         in_ptr = ctypes.cast(input_tensor.data_ptr(), ctypes.POINTER(ctypes.c_float))
